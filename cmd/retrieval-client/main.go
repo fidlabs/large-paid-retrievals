@@ -157,6 +157,9 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 					return errors.New("aborted")
 				}
 			}
+			if err := chargeRailsForQuotes(context.Background(), fc, client, items, payDebug); err != nil {
+				return err
+			}
 			if verbose {
 				fmt.Printf("Step 2/%d: fetching paid pieces for %d CID(s)\n", 2, len(items))
 			}
@@ -491,6 +494,44 @@ func prepareRailsForQuotes(ctx context.Context, fc *filpay.Client, client string
 		}
 		if payDebug {
 			payClientLog("payer preparation complete for payee=%s", payeeHex)
+		}
+	}
+	return nil
+}
+
+func chargeRailsForQuotes(ctx context.Context, fc *filpay.Client, client string, items []quoteItem, payDebug bool) error {
+	payer := common.HexToAddress(client)
+	byPayee := map[string]*big.Int{}
+	for _, it := range items {
+		if strings.TrimSpace(it.Payee0x) == "" || !common.IsHexAddress(it.Payee0x) {
+			return fmt.Errorf("quote %s for cid=%s missing valid payee_0x", it.DealUUID, it.CID)
+		}
+		priceWei, err := paymentheader.ParseFILToWei(it.PriceFIL)
+		if err != nil {
+			return fmt.Errorf("quote %s has invalid price_fil=%q: %w", it.DealUUID, it.PriceFIL, err)
+		}
+		key := common.HexToAddress(it.Payee0x).Hex()
+		if byPayee[key] == nil {
+			byPayee[key] = big.NewInt(0)
+		}
+		byPayee[key].Add(byPayee[key], priceWei)
+	}
+	payees := make([]string, 0, len(byPayee))
+	for payee := range byPayee {
+		payees = append(payees, payee)
+	}
+	sort.Strings(payees)
+	for _, payeeHex := range payees {
+		amountWei := byPayee[payeeHex]
+		if payDebug {
+			payClientLog("charging rail one-time payment payee=%s amount_wei=%s", payeeHex, amountWei.String())
+		}
+		txHash, err := fc.ChargeRailOneTime(ctx, payer, common.HexToAddress(payeeHex), amountWei)
+		if err != nil {
+			return fmt.Errorf("charge rail for payee %s failed: %w", payeeHex, err)
+		}
+		if payDebug {
+			payClientLog("modifyRailPayment submitted payee=%s tx=%s", payeeHex, txHash)
 		}
 	}
 	return nil
