@@ -64,6 +64,7 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 		outDir    string
 		cids      []string
 		cidFile   string
+		manifest  string
 		yes       bool
 		expiresIn int
 		verbose   bool
@@ -73,7 +74,7 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 	)
 	c := &cobra.Command{
 		Use:   "fetch",
-		Short: "Fetch multiple CIDs: quote (402) then EVM-signed paid retrieval",
+		Short: "Fetch multiple piece CIDs: quote (402) then EVM-signed paid retrieval",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			evmPK, err := filpay.LoadPrivateKey(keyOpts.privateKey, keyOpts.privateKeyFile, keyOpts.privateKeyEnv)
 			if err != nil {
@@ -87,12 +88,28 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 				payClientLog("client 0x=%s (derived from private key)", client)
 			}
 
-			allCIDs, err := collectCIDs(cids, cidFile, args)
-			if err != nil {
-				return err
-			}
-			if len(allCIDs) == 0 {
-				return errors.New("provide at least one CID via args, --cid, or --cid-file")
+			var allCIDs []string
+			if strings.TrimSpace(manifest) != "" {
+				if len(cids) > 0 || strings.TrimSpace(cidFile) != "" || len(args) > 0 {
+					return errors.New("--manifest is mutually exclusive with positional CIDs, --cid, and --cid-file")
+				}
+				var err error
+				allCIDs, err = extractPieceCIDsFromManifest(manifest)
+				if err != nil {
+					return err
+				}
+				if len(allCIDs) == 0 {
+					return fmt.Errorf("manifest %q has no pieces[].piece_cid entries", manifest)
+				}
+			} else {
+				var err error
+				allCIDs, err = collectCIDs(cids, cidFile, args)
+				if err != nil {
+					return err
+				}
+				if len(allCIDs) == 0 {
+					return errors.New("provide at least one CID via args, --cid, or --cid-file (or use --manifest)")
+				}
 			}
 			if err := os.MkdirAll(outDir, 0o755); err != nil {
 				return err
@@ -210,6 +227,7 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 	c.Flags().StringVar(&outDir, "out-dir", ".", "Output directory")
 	c.Flags().StringArrayVar(&cids, "cid", nil, "CID to fetch (repeatable)")
 	c.Flags().StringVar(&cidFile, "cid-file", "", "File with CIDs (newline or comma separated)")
+	c.Flags().StringVar(&manifest, "manifest", "", "Path to data-prep-standard super-manifest JSON (extract pieces[].piece_cid)")
 	c.Flags().BoolVar(&yes, "yes", false, "Skip interactive confirmation")
 	c.Flags().IntVar(&expiresIn, "expires-in-sec", 120, "Header expiry interval in seconds")
 	c.Flags().BoolVar(&verbose, "verbose", false, "Print detailed per-step progress output")
@@ -610,6 +628,38 @@ func collectCIDs(flagCIDs []string, cidFile string, args []string) ([]string, er
 				appendCID(p)
 			}
 		}
+	}
+	return out, nil
+}
+
+func extractPieceCIDsFromManifest(manifestPath string) ([]string, error) {
+	b, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return nil, fmt.Errorf("read manifest %q: %w", manifestPath, err)
+	}
+
+	var m struct {
+		Pieces []struct {
+			PieceCID string `json:"piece_cid"`
+		} `json:"pieces"`
+	}
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, fmt.Errorf("parse manifest %q: %w", manifestPath, err)
+	}
+
+	// Deduplicate while preserving order.
+	seen := make(map[string]struct{}, len(m.Pieces))
+	out := make([]string, 0, len(m.Pieces))
+	for _, p := range m.Pieces {
+		piece := strings.TrimSpace(p.PieceCID)
+		if piece == "" {
+			continue
+		}
+		if _, ok := seen[piece]; ok {
+			continue
+		}
+		seen[piece] = struct{}{}
+		out = append(out, piece)
 	}
 	return out, nil
 }
