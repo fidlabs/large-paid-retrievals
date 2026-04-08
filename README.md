@@ -3,12 +3,12 @@
 Small CLI tools for paid piece retrieval over HTTP using:
 
 - Thin proxy sitting in front of Curio or Boost HTTP `.../piece/...` endpoint to broker payments
-- `x402` payment headers with EVM-style signing
+- MPP payment headers with EVM-style signing
 - Filecoin Pay rails on FVM (automated creation/finding of rails)
 
 This is primarily built for large (many TiBs) PoRep deals so relies on some basic assumptions:
-- Static price per piece (easy to change, just NIY)
-- Most pieces will be full ~32GB with prices in the range of $0.10 - $1.00, so transaction overheads and gas fees are sustainable
+- Static price per piece (easy to change, just NYI)
+- Most pieces will be full ~32GB with prices in the range of $0.10 to $1.00, so transaction overheads and gas fees are sustainable
 - Quote and fetch one Piece at a time - requires more client-side error handling and consumes more transactions, but has near-term advantages:
   - Copes with large data sets being spread across multiple SPs
   - Works with most existing SP software stacks
@@ -17,8 +17,8 @@ This is primarily built for large (many TiBs) PoRep deals so relies on some basi
 
 This repo builds two binaries:
 
-- `sp-proxy`: serves `/piece/<cid>` with 402 quote + paid GET flow
-- `retrieval-client`: discovers sources, gets quotes, signs payment headers, downloads CAR files
+- `sp-proxy`: serves `/piece/<cid>` with 402 MPP challenge + paid GET flow
+- `retrieval-client`: discovers sources, gets MPP challenges, signs proof headers, downloads CAR files
 
 ## Prerequisites
 
@@ -131,7 +131,7 @@ Useful flags:
 
 - `--listen`: HTTP listen address (default `:8787`)
 - `--db`: SQLite file for deal state (default `./sp-proxy.db`)
-- `--price-fil`: quote price per Piece in FIL
+- `--price-fil`: challenge price per Piece in FIL
 - `--pay-rpc-url`: FVM RPC for Filecoin Pay interactions
 - `--pay-private-key|--pay-private-key-file|--pay-private-key-env`: settler key source
 - `--pay-payments-address`: optional payments contract override (empty = chain default)
@@ -179,9 +179,9 @@ If you want to ignore discovered endpoints and only probe one base URL (eg your 
 1. Resolve candidate providers for each piece CID (via discovery, unless `--sp-base-url` override is set).
 2. Probe each location:
   - `200 OK` => free download (saved immediately)
-  - `402` => parse quote and keep cheapest usable one
+  - `402` => parse MPP challenge and keep cheapest usable one
 3. Prepare and charge Filecoin Pay rails for paid pieces.
-4. Send paid GET with signed `X-Payment-Header`.
+4. Send paid GET with `Authorization: Payment <credential>`.
 
 ### `fetch` flags (most-used)
 
@@ -193,7 +193,7 @@ If you want to ignore discovered endpoints and only probe one base URL (eg your 
 - `--pay-payments-address` (optional contract override)
 - `--filpay-private-key|--filpay-private-key-file|--filpay-private-key-env` (client key source)
 - `--yes` (skip confirm prompt)
-- `--expires-in-sec` (x402 header expiry)
+- `--expires-in-sec` (MPP proof header expiry)
 - `--pay-debug`, `--verbose`
 
 ## Environment variables

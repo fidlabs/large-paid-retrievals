@@ -43,7 +43,7 @@ func root() *cobra.Command {
 	)
 	c := &cobra.Command{
 		Use:   "sp-proxy",
-		Short: "Internet-facing /piece/<cid> quote + paid retrieval (Filecoin Pay + EVM x402)",
+		Short: "Internet-facing /piece/<cid> MPP challenge + paid retrieval (Filecoin Pay + EVM)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, err := spproxy.OpenStore(dbPath)
 			if err != nil {
@@ -95,9 +95,9 @@ func root() *cobra.Command {
 	}
 	c.Flags().StringVar(&listen, "listen", ":8787", "Listen address")
 	c.Flags().StringVar(&dbPath, "db", "./sp-proxy.db", "SQLite deals database path")
-	c.Flags().StringVar(&priceFIL, "price-fil", "0.01", "Quoted price (FIL) per requested CID")
-	c.Flags().StringVar(&clientQuery, "client-query", "client", "Query key used to identify client on quote requests")
-	c.Flags().StringVar(&clientHeader, "client-header", "X-Client-Address", "Header key used to identify client on quote requests")
+	c.Flags().StringVar(&priceFIL, "price-fil", "0.01", "Challenge price (FIL) per requested CID")
+	c.Flags().StringVar(&clientQuery, "client-query", "client", "Query key used to identify client on challenge requests")
+	c.Flags().StringVar(&clientHeader, "client-header", "X-Client-Address", "Header key used to identify client on challenge requests")
 	c.Flags().IntVar(&maxSkewSec, "max-clock-skew-sec", 30, "Allowed clock skew in seconds for header expiry")
 	c.Flags().BoolVar(&verbose, "verbose", false, "Enable debug-level structured logs")
 

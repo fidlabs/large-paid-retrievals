@@ -22,8 +22,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/fidlabs/paid-retrievals/internal/filpay"
+	"github.com/fidlabs/paid-retrievals/internal/mpp"
 	"github.com/fidlabs/paid-retrievals/internal/paymentheader"
-	"github.com/fidlabs/paid-retrievals/internal/x402"
 )
 
 type filpayKeyOpts struct {
@@ -32,11 +32,19 @@ type filpayKeyOpts struct {
 	privateKeyEnv  string
 }
 
-type quoteItem struct {
+type problemDetails struct {
+	Type   string `json:"type"`
+	Title  string `json:"title"`
+	Status int    `json:"status"`
+	Detail string `json:"detail"`
+}
+
+type challengeItem struct {
 	CID      string
 	DealUUID string
 	PriceFIL string
 	Payee0x  string
+	Challenge mpp.Challenge
 }
 
 func main() {
@@ -50,7 +58,7 @@ func root() *cobra.Command {
 	keyOpts := &filpayKeyOpts{}
 	r := &cobra.Command{
 		Use:   "retrieval-client",
-		Short: "Client CLI for x402 + Filecoin Pay piece retrieval (EVM client key)",
+		Short: "Client CLI for MPP + Filecoin Pay piece retrieval (EVM client key)",
 	}
 	addFilpayKeyFlags(r, keyOpts)
 	r.AddCommand(cmdFetch(keyOpts))
@@ -74,7 +82,7 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 	)
 	c := &cobra.Command{
 		Use:   "fetch",
-		Short: "Fetch multiple piece CIDs: quote (402) then EVM-signed paid retrieval",
+		Short: "Fetch multiple piece CIDs: MPP challenge (402) then EVM-signed paid retrieval",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			evmPK, err := filpay.LoadPrivateKey(keyOpts.privateKey, keyOpts.privateKeyFile, keyOpts.privateKeyEnv)
 			if err != nil {
@@ -120,30 +128,36 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 			}
 			cli := &http.Client{Timeout: 120 * time.Second}
 
-			items := make([]quoteItem, 0, len(allCIDs))
+			items := make([]challengeItem, 0, len(allCIDs))
 			if verbose {
-				fmt.Printf("Step 1/%d: fetching quotes for %d CID(s)\n", 2, len(allCIDs))
+				fmt.Printf("Step 1/%d: fetching MPP challenges for %d CID(s)\n", 2, len(allCIDs))
 			}
 
 			for _, cid := range allCIDs {
 				if verbose {
-					fmt.Printf("  - requesting quote for CID %s\n", cid)
+					fmt.Printf("  - requesting challenge for CID %s\n", cid)
 				}
-				q, err := requestQuote(cli, base, cid, client, payDebug)
+				q, err := requestChallenge(cli, base, cid, client, payDebug)
 				if err != nil {
-					return fmt.Errorf("dataset incomplete: quote request failed for CID %s: %w", cid, err)
+					return fmt.Errorf("dataset incomplete: challenge request failed for CID %s: %w", cid, err)
 				}
-				if payDebug && strings.TrimSpace(q.Payee0x) != "" {
-					payClientLog("quote includes payee_0x=%s (fund/open native-FIL rail payer=client → payee); SP settles on paid GET", q.Payee0x)
+				if payDebug && strings.TrimSpace(q.Request.Payee0x) != "" {
+					payClientLog("challenge includes payee_0x=%s (fund/open native-FIL rail payer=client → payee); SP settles on paid GET", q.Request.Payee0x)
 				}
 				if verbose {
-					line := fmt.Sprintf("    received quote: CID %s costs %s FIL (deal %s)", cid, q.PriceFIL, q.DealUUID)
-					if strings.TrimSpace(q.Payee0x) != "" {
-						line += fmt.Sprintf(" payee_0x=%s", q.Payee0x)
+					line := fmt.Sprintf("    received challenge: CID %s costs %s FIL (deal %s)", cid, q.Request.PriceFIL, q.Request.DealUUID)
+					if strings.TrimSpace(q.Request.Payee0x) != "" {
+						line += fmt.Sprintf(" payee_0x=%s", q.Request.Payee0x)
 					}
 					fmt.Println(line)
 				}
-				items = append(items, quoteItem{CID: cid, DealUUID: q.DealUUID, PriceFIL: q.PriceFIL, Payee0x: strings.TrimSpace(q.Payee0x)})
+				items = append(items, challengeItem{
+					CID:       cid,
+					DealUUID:  q.Request.DealUUID,
+					PriceFIL:  q.Request.PriceFIL,
+					Payee0x:   strings.TrimSpace(q.Request.Payee0x),
+					Challenge: *q,
+				})
 			}
 
 			var prices []string
@@ -161,12 +175,12 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 			if fc.SignerAddress().Hex() != client {
 				return fmt.Errorf("derived client %s does not match filpay signer %s", client, fc.SignerAddress().Hex())
 			}
-			if err := prepareRailsForQuotes(context.Background(), fc, client, items, payDebug); err != nil {
+			if err := prepareRailsForChallenges(context.Background(), fc, client, items, payDebug); err != nil {
 				return err
 			}
 
 			if !yes {
-				ok, err := promptYesNo("Proceed with payment headers and download? [y/N]: ")
+				ok, err := promptYesNo("Proceed with MPP proofs and download? [y/N]: ")
 				if err != nil {
 					return err
 				}
@@ -174,7 +188,7 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 					return errors.New("aborted")
 				}
 			}
-			if err := chargeRailsForQuotes(context.Background(), fc, client, items, payDebug); err != nil {
+			if err := chargeRailsForChallenges(context.Background(), fc, client, items, payDebug); err != nil {
 				return err
 			}
 			if verbose {
@@ -184,9 +198,11 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 			for _, it := range items {
 				piecePath := "/piece/" + it.CID
 				if verbose {
-					fmt.Printf("  - creating payment header for CID %s (deal %s)\n", it.CID, it.DealUUID)
+					fmt.Printf("  - creating MPP proof for CID %s (deal %s)\n", it.CID, it.DealUUID)
 				}
-				h := &x402.PaymentHeader{
+				h := &mpp.ProofPayload{
+					Version:       mpp.VersionV1,
+					ChallengeID:   it.Challenge.ID,
 					DealUUID:      it.DealUUID,
 					ClientAddress: client,
 					CID:           it.CID,
@@ -196,20 +212,24 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 					Nonce:         uuid.NewString(),
 					ExpiresUnix:   time.Now().Add(time.Duration(expiresIn) * time.Second).Unix(),
 				}
-				st, sig, err := x402.SignEVM(evmPK, h.CanonicalMessage())
+				st, sig, err := mpp.SignEVM(evmPK, h.CanonicalMessage())
 				if err != nil {
 					return err
 				}
 				h.SigType = st
 				h.Signature = sig
 				if payDebug {
-					payClientLog("signed x402 deal=%s cid=%s path=%s sig_type=%s sig_len=%d", it.DealUUID, it.CID, piecePath, st, len(sig))
+					payClientLog("signed mpp deal=%s cid=%s path=%s sig_type=%s sig_len=%d", it.DealUUID, it.CID, piecePath, st, len(sig))
 				}
-				raw, err := h.EncodeHTTP()
+				cred, err := mpp.BuildCredential(it.Challenge, *h, client)
 				if err != nil {
 					return err
 				}
-				outPath, err := downloadCAR(cli, base, it.CID, piecePath, raw, outDir, payDebug)
+				authz, err := cred.EncodeAuthorization()
+				if err != nil {
+					return err
+				}
+				outPath, err := downloadCAR(cli, base, it.CID, piecePath, authz, outDir, payDebug)
 				if err != nil {
 					return err
 				}
@@ -271,8 +291,8 @@ func cmdRailCheck(keyOpts *filpayKeyOpts) *cobra.Command {
 				return fmt.Errorf("derived client %s does not match filpay signer %s", client, fc.SignerAddress().Hex())
 			}
 
-			// Gather payees from manual flags and optional live quote requests.
-			quotes := make([]quoteItem, 0)
+			// Gather payees from manual flags and optional live challenge requests.
+			challenges := make([]challengeItem, 0)
 			if len(cids) > 0 || strings.TrimSpace(cidFile) != "" || len(args) > 0 {
 				base, err := url.Parse(strings.TrimSpace(spBaseURL))
 				if err != nil {
@@ -284,15 +304,16 @@ func cmdRailCheck(keyOpts *filpayKeyOpts) *cobra.Command {
 				}
 				cli := &http.Client{Timeout: 120 * time.Second}
 				for _, cid := range allCIDs {
-					q, err := requestQuote(cli, base, cid, client, payDebug)
+					q, err := requestChallenge(cli, base, cid, client, payDebug)
 					if err != nil {
-						return fmt.Errorf("quote failed for cid=%s: %w", cid, err)
+						return fmt.Errorf("challenge request failed for cid=%s: %w", cid, err)
 					}
-					quotes = append(quotes, quoteItem{
-						CID:      cid,
-						DealUUID: q.DealUUID,
-						PriceFIL: q.PriceFIL,
-						Payee0x:  strings.TrimSpace(q.Payee0x),
+					challenges = append(challenges, challengeItem{
+						CID:       cid,
+						DealUUID:  q.Request.DealUUID,
+						PriceFIL:  q.Request.PriceFIL,
+						Payee0x:   strings.TrimSpace(q.Request.Payee0x),
+						Challenge: *q,
 					})
 				}
 			}
@@ -310,13 +331,13 @@ func cmdRailCheck(keyOpts *filpayKeyOpts) *cobra.Command {
 					byPayeeRequired[common.HexToAddress(strings.TrimSpace(p)).Hex()] = new(big.Int).Set(reqWei)
 				}
 			}
-			for _, q := range quotes {
+			for _, q := range challenges {
 				if !common.IsHexAddress(strings.TrimSpace(q.Payee0x)) {
-					return fmt.Errorf("quote cid=%s deal=%s has invalid payee_0x %q", q.CID, q.DealUUID, q.Payee0x)
+					return fmt.Errorf("challenge cid=%s deal=%s has invalid payee_0x %q", q.CID, q.DealUUID, q.Payee0x)
 				}
 				w, err := paymentheader.ParseFILToWei(q.PriceFIL)
 				if err != nil {
-					return fmt.Errorf("quote cid=%s deal=%s has bad price %q: %w", q.CID, q.DealUUID, q.PriceFIL, err)
+					return fmt.Errorf("challenge cid=%s deal=%s has bad price %q: %w", q.CID, q.DealUUID, q.PriceFIL, err)
 				}
 				key := common.HexToAddress(strings.TrimSpace(q.Payee0x)).Hex()
 				if byPayeeRequired[key] == nil {
@@ -333,12 +354,12 @@ func cmdRailCheck(keyOpts *filpayKeyOpts) *cobra.Command {
 				}
 			}
 			if len(byPayeeRequired) == 0 {
-				return errors.New("no payees discovered. Provide --payee or quote CIDs (--cid/--cid-file/args)")
+				return errors.New("no payees discovered. Provide --payee or challenge CIDs (--cid/--cid-file/args)")
 			}
 
-			if len(quotes) > 0 {
-				fmt.Println("\nQuote details:")
-				for _, q := range quotes {
+			if len(challenges) > 0 {
+				fmt.Println("\nChallenge details:")
+				for _, q := range challenges {
 					fmt.Printf("- cid=%s deal=%s price_fil=%s payee_0x=%s\n", q.CID, q.DealUUID, q.PriceFIL, q.Payee0x)
 				}
 			}
@@ -408,12 +429,12 @@ func cmdRailCheck(keyOpts *filpayKeyOpts) *cobra.Command {
 			return nil
 		},
 	}
-	c.Flags().StringVar(&spBaseURL, "sp-base-url", "http://127.0.0.1:8787", "SP proxy base URL (used if quote CIDs are provided)")
-	c.Flags().StringArrayVar(&cids, "cid", nil, "CID to quote for payee discovery (repeatable)")
-	c.Flags().StringVar(&cidFile, "cid-file", "", "File with CIDs for payee discovery (newline/comma separated)")
+	c.Flags().StringVar(&spBaseURL, "sp-base-url", "http://127.0.0.1:8787", "SP proxy base URL (used if CID challenges are requested)")
+	c.Flags().StringArrayVar(&cids, "cid", nil, "CID to request challenges for payee discovery (repeatable)")
+	c.Flags().StringVar(&cidFile, "cid-file", "", "File with CIDs for payee discovery via MPP challenges (newline/comma separated)")
 	c.Flags().StringArrayVar(&payees, "payee", nil, "Explicit payee 0x address to check (repeatable)")
-	c.Flags().StringVar(&requiredFIL, "required-fil", "", "Optional required FIL amount per --payee when no quotes are used")
-	c.Flags().BoolVar(&payDebug, "pay-debug", false, "Enable detailed quote debug while discovering payees from quotes")
+	c.Flags().StringVar(&requiredFIL, "required-fil", "", "Optional required FIL amount per --payee when no challenges are used")
+	c.Flags().BoolVar(&payDebug, "pay-debug", false, "Enable detailed challenge debug while discovering payees from challenges")
 	c.Flags().StringVar(&payRPCURL, "pay-rpc-url", getenv("SP_PROXY_PAY_RPC_URL", "https://api.calibration.node.glif.io/rpc/v1"), "Filecoin RPC (FVM)")
 	c.Flags().StringVar(&payPaymentsAddress, "pay-payments-address", getenv("SP_PROXY_PAY_PAYMENTS_ADDRESS", ""), "Filecoin Pay payments contract (0x); empty uses chain default")
 	return c
@@ -432,19 +453,19 @@ func truncateForLog(s string, max int) string {
 }
 
 func addFilpayKeyFlags(c *cobra.Command, opts *filpayKeyOpts) {
-	c.PersistentFlags().StringVar(&opts.privateKey, "filpay-private-key", "", "Hex private key: client 0x identity + x402 signing (prefer env or file)")
-	c.PersistentFlags().StringVar(&opts.privateKeyFile, "filpay-private-key-file", "", "File with hex private key for client identity + x402")
+	c.PersistentFlags().StringVar(&opts.privateKey, "filpay-private-key", "", "Hex private key: client 0x identity + MPP signing (prefer env or file)")
+	c.PersistentFlags().StringVar(&opts.privateKeyFile, "filpay-private-key-file", "", "File with hex private key for client identity + MPP")
 	c.PersistentFlags().StringVar(&opts.privateKeyEnv, "filpay-private-key-env", getenv("FILPAY_PRIVATE_KEY_ENV", "FILPAY_PRIVATE_KEY"), "Env var for hex client key")
 }
 
-func requestQuote(cli *http.Client, base *url.URL, cid, client string, payDebug bool) (*x402.QuoteResponse, error) {
+func requestChallenge(cli *http.Client, base *url.URL, cid, client string, payDebug bool) (*mpp.Challenge, error) {
 	u := *base
 	u.Path = "/piece/" + cid
 	q := u.Query()
 	q.Set("client", client)
 	u.RawQuery = q.Encode()
 	if payDebug {
-		payClientLog("quote GET %s (expect 402)", u.String())
+		payClientLog("challenge GET %s (expect 402)", u.String())
 	}
 
 	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
@@ -458,38 +479,37 @@ func requestQuote(cli *http.Client, base *url.URL, cid, client string, payDebug 
 	defer res.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 	if payDebug {
-		payClientLog("quote response status=%d cid=%s", res.StatusCode, cid)
-		payClientLog("quote response headers: content-type=%q cache-control=%q", res.Header.Get("Content-Type"), res.Header.Get("Cache-Control"))
-		payClientLog("quote response body (truncated): %s", truncateForLog(string(body), 2048))
+		payClientLog("challenge response status=%d cid=%s", res.StatusCode, cid)
+		payClientLog("challenge response headers: content-type=%q cache-control=%q", res.Header.Get("Content-Type"), res.Header.Get("Cache-Control"))
+		payClientLog("challenge response body (truncated): %s", truncateForLog(string(body), 2048))
 	}
 	if res.StatusCode != http.StatusPaymentRequired {
 		return nil, fmt.Errorf("expected 402 got %d", res.StatusCode)
 	}
-	var payload struct {
-		X402 x402.QuoteResponse `json:"x402"`
+	wa := strings.TrimSpace(res.Header.Get("WWW-Authenticate"))
+	ch, err := mpp.ParseWWWAuthenticate(wa)
+	if err != nil {
+		return nil, fmt.Errorf("invalid WWW-Authenticate challenge: %w", err)
 	}
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, err
-	}
-	if payload.X402.DealUUID == "" || payload.X402.PriceFIL == "" {
-		return nil, errors.New("invalid quote payload")
+	if ch.Request.DealUUID == "" || ch.Request.PriceFIL == "" {
+		return nil, errors.New("invalid challenge request payload")
 	}
 	if payDebug {
-		payClientLog("quote OK x402={deal_uuid:%s cid:%s price_fil:%s payee_0x:%q}", payload.X402.DealUUID, payload.X402.CID, payload.X402.PriceFIL, payload.X402.Payee0x)
+		payClientLog("challenge OK payment={id:%s deal_uuid:%s cid:%s price_fil:%s payee_0x:%q}", ch.ID, ch.Request.DealUUID, ch.Request.CID, ch.Request.PriceFIL, ch.Request.Payee0x)
 	}
-	return &payload.X402, nil
+	return ch, nil
 }
 
-func prepareRailsForQuotes(ctx context.Context, fc *filpay.Client, client string, items []quoteItem, payDebug bool) error {
+func prepareRailsForChallenges(ctx context.Context, fc *filpay.Client, client string, items []challengeItem, payDebug bool) error {
 	payer := common.HexToAddress(client)
 	byPayee := map[string]*big.Int{}
 	for _, it := range items {
 		if strings.TrimSpace(it.Payee0x) == "" || !common.IsHexAddress(it.Payee0x) {
-			return fmt.Errorf("quote %s for cid=%s missing valid payee_0x", it.DealUUID, it.CID)
+			return fmt.Errorf("challenge %s for cid=%s missing valid payee_0x", it.DealUUID, it.CID)
 		}
 		priceWei, err := paymentheader.ParseFILToWei(it.PriceFIL)
 		if err != nil {
-			return fmt.Errorf("quote %s has invalid price_fil=%q: %w", it.DealUUID, it.PriceFIL, err)
+			return fmt.Errorf("challenge %s has invalid price_fil=%q: %w", it.DealUUID, it.PriceFIL, err)
 		}
 		key := common.HexToAddress(it.Payee0x).Hex()
 		if byPayee[key] == nil {
@@ -517,16 +537,16 @@ func prepareRailsForQuotes(ctx context.Context, fc *filpay.Client, client string
 	return nil
 }
 
-func chargeRailsForQuotes(ctx context.Context, fc *filpay.Client, client string, items []quoteItem, payDebug bool) error {
+func chargeRailsForChallenges(ctx context.Context, fc *filpay.Client, client string, items []challengeItem, payDebug bool) error {
 	payer := common.HexToAddress(client)
 	byPayee := map[string]*big.Int{}
 	for _, it := range items {
 		if strings.TrimSpace(it.Payee0x) == "" || !common.IsHexAddress(it.Payee0x) {
-			return fmt.Errorf("quote %s for cid=%s missing valid payee_0x", it.DealUUID, it.CID)
+			return fmt.Errorf("challenge %s for cid=%s missing valid payee_0x", it.DealUUID, it.CID)
 		}
 		priceWei, err := paymentheader.ParseFILToWei(it.PriceFIL)
 		if err != nil {
-			return fmt.Errorf("quote %s has invalid price_fil=%q: %w", it.DealUUID, it.PriceFIL, err)
+			return fmt.Errorf("challenge %s has invalid price_fil=%q: %w", it.DealUUID, it.PriceFIL, err)
 		}
 		key := common.HexToAddress(it.Payee0x).Hex()
 		if byPayee[key] == nil {
@@ -555,18 +575,18 @@ func chargeRailsForQuotes(ctx context.Context, fc *filpay.Client, client string,
 	return nil
 }
 
-func downloadCAR(cli *http.Client, base *url.URL, cid, piecePath, paymentHeader, outDir string, payDebug bool) (string, error) {
+func downloadCAR(cli *http.Client, base *url.URL, cid, piecePath, authorization, outDir string, payDebug bool) (string, error) {
 	u := *base
 	u.Path = piecePath
 	fullURL := u.String()
 	if payDebug {
-		payClientLog("paid GET %s (X-Payment-Header len=%d)", fullURL, len(paymentHeader))
+		payClientLog("paid GET %s (Authorization: Payment len=%d)", fullURL, len(authorization))
 	}
 	req, err := http.NewRequest(http.MethodGet, fullURL, nil)
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set(x402.HeaderName, paymentHeader)
+	req.Header.Set("Authorization", authorization)
 	res, err := cli.Do(req)
 	if err != nil {
 		return "", err
@@ -580,7 +600,20 @@ func downloadCAR(cli *http.Client, base *url.URL, cid, piecePath, paymentHeader,
 		if payDebug {
 			payClientLog("paid GET error body (truncated): %s", truncateForLog(string(b), 512))
 		}
-		return "", fmt.Errorf("download %s failed: %s %s", cid, res.Status, strings.TrimSpace(string(b)))
+		trimmed := strings.TrimSpace(string(b))
+		var pd problemDetails
+		if err := json.Unmarshal(b, &pd); err == nil && pd.Type != "" {
+			msg := fmt.Sprintf("download %s failed: %s", cid, res.Status)
+			if pd.Title != "" {
+				msg += " - " + pd.Title
+			}
+			if pd.Detail != "" {
+				msg += ": " + pd.Detail
+			}
+			msg += fmt.Sprintf(" (type=%s)", pd.Type)
+			return "", errors.New(msg)
+		}
+		return "", fmt.Errorf("download %s failed: %s %s", cid, res.Status, trimmed)
 	}
 	outPath := filepath.Join(outDir, sanitizeFilename(cid)+".car")
 	f, err := os.Create(outPath)

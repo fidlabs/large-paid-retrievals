@@ -12,12 +12,20 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/fidlabs/paid-retrievals/internal/mpp"
 	"github.com/fidlabs/paid-retrievals/internal/paymentheader"
-	"github.com/fidlabs/paid-retrievals/internal/x402"
 	"github.com/ethereum/go-ethereum/common"
 )
 
 var cidPattern = regexp.MustCompile(`^[a-zA-Z0-9._:-]{8,256}$`)
+const problemBase = "https://paymentauth.org/problems/"
+
+type problemDetail struct {
+	Type   string `json:"type"`
+	Title  string `json:"title"`
+	Status int    `json:"status"`
+	Detail string `json:"detail,omitempty"`
+}
 
 type Config struct {
 	PriceFIL      string
@@ -27,7 +35,7 @@ type Config struct {
 	MaxClockSkew  time.Duration
 	Logger        *slog.Logger
 
-	// FilecoinPay (native FIL) is required: quotes include payee_0x; paid downloads require EVM-signed x402 + on-chain settleRail.
+	// FilecoinPay (native FIL) is required: quotes include payee_0x; paid downloads require EVM-signed MPP proof + on-chain settleRail.
 	FilecoinPay  FilecoinPaySettler
 	QuotePayee0x string
 	// PayDebug emits extra Info-level logs for Filecoin Pay (HTTP + use with filpay --pay-debug on settler).
@@ -82,7 +90,7 @@ func NewHandler(cfg Config, store *Store) http.Handler {
 			return
 		}
 
-		rawHdr := strings.TrimSpace(r.Header.Get(x402.HeaderName))
+		rawHdr := strings.TrimSpace(r.Header.Get("Authorization"))
 		if rawHdr == "" {
 			handleQuote(w, r, store, cfg, cid, logger)
 			return
@@ -121,90 +129,209 @@ func handleQuote(w http.ResponseWriter, r *http.Request, store *Store, cfg Confi
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	logger.Info("quote created", "deal_uuid", dealID, "client", client, "cid", cid, "price_fil", cfg.PriceFIL)
+	logger.Info("mpp challenge created", "deal_uuid", dealID, "client", client, "cid", cid, "price_fil", cfg.PriceFIL)
 	if cfg.PayDebug {
-		logger.Info("filecoin pay quote", "scope", "filpay-http", "deal_uuid", dealID, "client_0x", client,
+		logger.Info("filecoin pay challenge", "scope", "filpay-http", "deal_uuid", dealID, "client_0x", client,
 			"cid", cid, "price_fil", cfg.PriceFIL, "payee_0x", payee, "filecoin_pay", true)
 	}
+	challenge := mpp.Challenge{
+		ID:     dealID,
+		Realm:  mpp.RealmPrefix + r.Host,
+		Method: mpp.MethodID,
+		Intent: mpp.IntentID,
+		Description: "Filecoin piece retrieval charge",
+		Opaque: map[string]string{
+			"deal_uuid": dealID,
+			"cid":       cid,
+		},
+		Request: mpp.PaymentRequest{
+			DealUUID: dealID,
+			CID:      cid,
+			PriceFIL: cfg.PriceFIL,
+			Payee0x:  payee,
+			Method:   http.MethodGet,
+			Path:     "/piece/" + cid,
+			Host:     r.Host,
+		},
+		Expires: time.Now().Add(2 * time.Minute).UTC().Format(time.RFC3339),
+	}
+	if err := mpp.WritePaymentRequired(w, challenge); err != nil {
+		logger.Error("failed to write payment challenge", "deal_uuid", dealID, "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+}
 
-	resp := x402.QuoteResponse{DealUUID: dealID, CID: cid, PriceFIL: cfg.PriceFIL, Payee0x: payee}
-	w.Header().Set("Content-Type", "application/json")
+func issueChallengeForDeal(w http.ResponseWriter, r *http.Request, deal *Deal, logger *slog.Logger) {
+	if deal == nil {
+		return
+	}
+	challenge := mpp.Challenge{
+		ID:     deal.DealUUID,
+		Realm:  mpp.RealmPrefix + r.Host,
+		Method: mpp.MethodID,
+		Intent: mpp.IntentID,
+		Description: "Filecoin piece retrieval charge",
+		Opaque: map[string]string{
+			"deal_uuid": deal.DealUUID,
+			"cid":       deal.CID,
+		},
+		Request: mpp.PaymentRequest{
+			DealUUID: deal.DealUUID,
+			CID:      deal.CID,
+			PriceFIL: deal.PriceFIL,
+			Payee0x:  deal.Payee0x,
+			Method:   http.MethodGet,
+			Path:     "/piece/" + deal.CID,
+			Host:     r.Host,
+		},
+		Expires: time.Now().Add(2 * time.Minute).UTC().Format(time.RFC3339),
+	}
+	wa, err := challenge.WWWAuthenticateValue()
+	if err != nil {
+		logger.Warn("failed to write fresh challenge", "deal_uuid", deal.DealUUID, "error", err)
+		return
+	}
 	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(http.StatusPaymentRequired)
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"x402":            resp,
-		"payment_header":  x402.HeaderName,
-		"payment_required": true,
+	w.Header().Set("WWW-Authenticate", wa)
+}
+
+func writeProblem(w http.ResponseWriter, status int, code, detail string) {
+	title := "Payment Error"
+	switch code {
+	case "payment-required":
+		title = "Payment Required"
+	case "payment-insufficient":
+		title = "Payment Insufficient"
+	case "payment-expired":
+		title = "Payment Expired"
+	case "verification-failed":
+		title = "Payment Verification Failed"
+	case "method-unsupported":
+		title = "Payment Method Unsupported"
+	case "malformed-credential":
+		title = "Malformed Payment Credential"
+	case "invalid-challenge":
+		title = "Invalid Payment Challenge"
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(problemDetail{
+		Type:   problemBase + code,
+		Title:  title,
+		Status: status,
+		Detail: detail,
 	})
 }
 
+func failPaymentRequired(w http.ResponseWriter, r *http.Request, deal *Deal, logger *slog.Logger, code, detail string) {
+	if deal != nil {
+		issueChallengeForDeal(w, r, deal, logger)
+	} else {
+		w.Header().Set("WWW-Authenticate", mpp.AuthScheme+` realm="`+mpp.RealmPrefix+r.Host+`", method="`+mpp.MethodID+`", intent="`+mpp.IntentID+`"`)
+	}
+	writeProblem(w, http.StatusPaymentRequired, code, detail)
+}
+
 func handlePaid(w http.ResponseWriter, r *http.Request, store *Store, cfg Config, cid, rawHdr string, logger *slog.Logger) {
-	hdr, err := x402.DecodeHTTP(rawHdr)
+	cred, err := mpp.DecodeAuthorization(rawHdr)
 	if err != nil {
-		logger.Warn("forbidden: decode payment header", "error", err, "cid", cid, "path", r.URL.Path)
-		http.Error(w, "forbidden", http.StatusForbidden)
+		logger.Warn("payment required: decode authorization credential", "error", err, "cid", cid, "path", r.URL.Path)
+		failPaymentRequired(w, r, nil, logger, "malformed-credential", "Invalid Payment authorization credential format")
+		return
+	}
+	hdr := cred.Payload
+	if cred.Challenge.ID != hdr.ChallengeID {
+		logger.Warn("payment required: challenge id mismatch", "challenge_id", cred.Challenge.ID, "payload_challenge_id", hdr.ChallengeID)
+		failPaymentRequired(w, r, nil, logger, "invalid-challenge", "Credential challenge id does not match payload challenge id")
+		return
+	}
+	if hdr.ChallengeID != hdr.DealUUID {
+		logger.Warn("payment required: challenge/deal mismatch", "challenge_id", hdr.ChallengeID, "deal_uuid", hdr.DealUUID)
+		failPaymentRequired(w, r, nil, logger, "invalid-challenge", "Challenge id does not match deal id")
 		return
 	}
 	now := time.Now()
 	if err := hdr.ValidateAt(now); err != nil {
-		logger.Warn("forbidden: invalid header", "error", err, "deal_uuid", hdr.DealUUID, "cid", cid)
-		http.Error(w, "forbidden", http.StatusForbidden)
+		logger.Warn("payment required: invalid payload", "error", err, "deal_uuid", hdr.DealUUID, "cid", cid)
+		failPaymentRequired(w, r, nil, logger, "verification-failed", "Credential payload failed validation")
 		return
 	}
 	if hdr.ExpiresUnix > now.Add(10*time.Minute).Unix()+int64(cfg.MaxClockSkew.Seconds()) {
-		logger.Warn("forbidden: expiry too far in future", "deal_uuid", hdr.DealUUID, "cid", cid, "expires_unix", hdr.ExpiresUnix)
-		http.Error(w, "forbidden", http.StatusForbidden)
+		logger.Warn("payment required: expiry too far in future", "deal_uuid", hdr.DealUUID, "cid", cid, "expires_unix", hdr.ExpiresUnix)
+		failPaymentRequired(w, r, nil, logger, "payment-expired", "Credential expiry is too far in the future")
 		return
 	}
 	if strings.ToUpper(hdr.Method) != http.MethodGet {
-		logger.Warn("forbidden: bad method in header", "deal_uuid", hdr.DealUUID, "header_method", hdr.Method, "expected", http.MethodGet)
-		http.Error(w, "forbidden", http.StatusForbidden)
+		logger.Warn("payment required: bad method in payload", "deal_uuid", hdr.DealUUID, "payload_method", hdr.Method, "expected", http.MethodGet)
+		failPaymentRequired(w, r, nil, logger, "verification-failed", "Credential method does not match request method")
 		return
 	}
 	if hdr.Path != r.URL.Path {
-		logger.Warn("forbidden: path mismatch", "deal_uuid", hdr.DealUUID, "header_path", hdr.Path, "request_path", r.URL.Path)
-		http.Error(w, "forbidden", http.StatusForbidden)
+		logger.Warn("payment required: path mismatch", "deal_uuid", hdr.DealUUID, "payload_path", hdr.Path, "request_path", r.URL.Path)
+		failPaymentRequired(w, r, nil, logger, "verification-failed", "Credential path does not match request path")
 		return
 	}
 	if !hostMatches(hdr.Host, r.Host) {
-		logger.Warn("forbidden: host mismatch", "deal_uuid", hdr.DealUUID, "header_host", hdr.Host, "request_host", r.Host)
-		http.Error(w, "forbidden", http.StatusForbidden)
+		logger.Warn("payment required: host mismatch", "deal_uuid", hdr.DealUUID, "payload_host", hdr.Host, "request_host", r.Host)
+		failPaymentRequired(w, r, nil, logger, "verification-failed", "Credential host does not match request host")
 		return
 	}
 	deal, err := store.GetDeal(r.Context(), hdr.DealUUID)
 	if err != nil {
-		logger.Warn("forbidden: unknown deal", "deal_uuid", hdr.DealUUID, "error", err)
-		http.Error(w, "forbidden", http.StatusForbidden)
+		logger.Warn("payment required: unknown deal", "deal_uuid", hdr.DealUUID, "error", err)
+		failPaymentRequired(w, r, nil, logger, "invalid-challenge", "Challenge is unknown or expired")
+		return
+	}
+	expectedReqB64, err := mpp.CanonicalRequestB64(mpp.PaymentRequest{
+		DealUUID: deal.DealUUID,
+		CID:      deal.CID,
+		PriceFIL: deal.PriceFIL,
+		Payee0x:  deal.Payee0x,
+		Method:   http.MethodGet,
+		Path:     "/piece/" + deal.CID,
+		Host:     r.Host,
+	})
+	if err != nil {
+		logger.Error("internal: request encoding failed", "deal_uuid", deal.DealUUID, "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if !strings.EqualFold(cred.Challenge.Method, mpp.MethodID) ||
+		!strings.EqualFold(cred.Challenge.Intent, mpp.IntentID) ||
+		cred.Challenge.Request != expectedReqB64 {
+		logger.Warn("payment required: challenge echo mismatch", "deal_uuid", deal.DealUUID)
+		failPaymentRequired(w, r, deal, logger, "invalid-challenge", "Credential challenge parameters do not match issued challenge")
 		return
 	}
 	if !sameHexAddress(hdr.ClientAddress, deal.Client) {
-		logger.Warn("forbidden: client mismatch", "deal_uuid", hdr.DealUUID, "header_client", hdr.ClientAddress, "deal_client", deal.Client)
-		http.Error(w, "forbidden", http.StatusForbidden)
+		logger.Warn("payment required: client mismatch", "deal_uuid", hdr.DealUUID, "payload_client", hdr.ClientAddress, "deal_client", deal.Client)
+		failPaymentRequired(w, r, deal, logger, "verification-failed", "Credential client address does not match quoted client")
 		return
 	}
 	if deal.CID != cid {
-		logger.Warn("forbidden: cid mismatch", "deal_uuid", hdr.DealUUID, "header_cid", cid, "deal_cid", deal.CID)
-		http.Error(w, "forbidden", http.StatusForbidden)
+		logger.Warn("payment required: cid mismatch", "deal_uuid", hdr.DealUUID, "request_cid", cid, "deal_cid", deal.CID)
+		failPaymentRequired(w, r, deal, logger, "verification-failed", "Deal CID does not match requested CID")
 		return
 	}
 	if hdr.CID != "" && hdr.CID != cid {
-		logger.Warn("forbidden: explicit header cid mismatch", "deal_uuid", hdr.DealUUID, "header_cid", hdr.CID, "request_cid", cid)
-		http.Error(w, "forbidden", http.StatusForbidden)
+		logger.Warn("payment required: explicit payload cid mismatch", "deal_uuid", hdr.DealUUID, "payload_cid", hdr.CID, "request_cid", cid)
+		failPaymentRequired(w, r, deal, logger, "verification-failed", "Credential CID does not match requested CID")
 		return
 	}
-	if !strings.EqualFold(strings.TrimSpace(hdr.SigType), x402.SigTypeEVM) {
-		logger.Warn("forbidden: x402 signatures must be evm (secp256k1 / 0x client)", "deal_uuid", hdr.DealUUID, "sig_type", hdr.SigType)
-		http.Error(w, "forbidden", http.StatusForbidden)
+	if !strings.EqualFold(strings.TrimSpace(hdr.SigType), mpp.SigTypeEVM) {
+		logger.Warn("payment required: mpp signatures must be evm", "deal_uuid", hdr.DealUUID, "sig_type", hdr.SigType)
+		failPaymentRequired(w, r, deal, logger, "method-unsupported", "Only evm signature type is supported")
 		return
 	}
-	verifier := x402.EVMVerifier{}
+	verifier := mpp.EVMVerifier{}
 	if err := verifier.Verify(hdr.ClientAddress, hdr.CanonicalMessage(), hdr.Signature); err != nil {
-		logger.Warn("forbidden: signature verify failed", "deal_uuid", hdr.DealUUID, "client", hdr.ClientAddress, "error", err)
-		http.Error(w, "forbidden", http.StatusForbidden)
+		logger.Warn("payment required: signature verify failed", "deal_uuid", hdr.DealUUID, "client", hdr.ClientAddress, "error", err)
+		failPaymentRequired(w, r, deal, logger, "verification-failed", "Credential signature verification failed")
 		return
 	}
 	if cfg.PayDebug {
-		logger.Info("filecoin pay x402 signature ok", "scope", "filpay-http", "deal_uuid", hdr.DealUUID,
+		logger.Info("filecoin pay mpp signature ok", "scope", "filpay-http", "deal_uuid", hdr.DealUUID,
 			"sig_type", hdr.SigType, "client_0x", hdr.ClientAddress, "cid", cid)
 	}
 	if strings.TrimSpace(deal.Payee0x) == "" || !common.IsHexAddress(strings.TrimSpace(deal.Payee0x)) {
@@ -227,14 +354,14 @@ func handlePaid(w http.ResponseWriter, r *http.Request, store *Store, cfg Config
 	txHash, err := cfg.FilecoinPay.SettleIfFunded(r.Context(), payer, payeeAddr, priceWei)
 	if err != nil {
 		logger.Warn("payment required: filecoin pay settle failed", "deal_uuid", hdr.DealUUID, "error", err)
-		http.Error(w, "payment required: filecoin pay rail or balance not satisfied", http.StatusPaymentRequired)
+		failPaymentRequired(w, r, deal, logger, "payment-insufficient", "Filecoin Pay rail or available balance is insufficient for settlement")
 		return
 	}
 	logger.Info("filecoin pay rail settled", "deal_uuid", deal.DealUUID, "settle_tx", txHash, "payer", payer.Hex(), "payee", payeeAddr.Hex())
 	if err := store.ConsumeNonce(r.Context(), deal.DealUUID, hdr.Nonce, hdr.ExpiresUnix); err != nil {
 		if err == ErrReplayNonce {
-			logger.Warn("forbidden: replay nonce", "deal_uuid", deal.DealUUID, "nonce", hdr.Nonce)
-			http.Error(w, "forbidden", http.StatusForbidden)
+			logger.Warn("payment required: replay nonce", "deal_uuid", deal.DealUUID, "nonce", hdr.Nonce)
+			failPaymentRequired(w, r, deal, logger, "invalid-challenge", "Credential nonce has already been used")
 			return
 		}
 		logger.Error("failed to consume nonce", "deal_uuid", deal.DealUUID, "nonce", hdr.Nonce, "error", err)
@@ -249,6 +376,7 @@ func handlePaid(w http.ResponseWriter, r *http.Request, store *Store, cfg Config
 	logger.Info("paid retrieval authorized", "deal_uuid", deal.DealUUID, "client", deal.Client, "cid", cid)
 
 	body := dummyCAR(cid, deal.DealUUID)
+	_ = mpp.WritePaymentReceipt(w.Header(), mpp.MethodID, txHash, time.Now())
 	w.Header().Set("Content-Type", "application/vnd.ipld.car")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s.car\"", cid))
 	w.Header().Set("Cache-Control", "no-store")
