@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"net/url"
@@ -40,10 +41,10 @@ type problemDetails struct {
 }
 
 type challengeItem struct {
-	CID      string
-	DealUUID string
-	PriceFIL string
-	Payee0x  string
+	CID       string
+	DealUUID  string
+	PriceFIL  string
+	Payee0x   string
 	Challenge mpp.Challenge
 }
 
@@ -68,16 +69,16 @@ func root() *cobra.Command {
 
 func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 	var (
-		spBaseURL string
-		outDir    string
-		cids      []string
-		cidFile   string
-		manifest  string
-		yes       bool
-		expiresIn int
-		verbose   bool
-		payDebug  bool
-		payRPCURL string
+		spBaseURL          string
+		outDir             string
+		cids               []string
+		cidFile            string
+		manifest           string
+		yes                bool
+		expiresIn          int
+		verbose            bool
+		payDebug           bool
+		payRPCURL          string
 		payPaymentsAddress string
 	)
 	c := &cobra.Command{
@@ -167,7 +168,23 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 			total := sumFILValues(prices)
 			fmt.Printf("Total required amount: %s FIL for %d piece(s).\n", total, len(items))
 
-			fc, err := filpay.NewClient(context.Background(), payRPCURL, keyOpts.privateKey, keyOpts.privateKeyFile, keyOpts.privateKeyEnv, payPaymentsAddress)
+			var filpayLogger *slog.Logger
+			if payDebug || verbose {
+				level := slog.LevelInfo
+				if verbose {
+					level = slog.LevelDebug
+				}
+				filpayLogger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+			}
+			fc, err := filpay.NewClient(
+				context.Background(),
+				payRPCURL,
+				keyOpts.privateKey,
+				keyOpts.privateKeyFile,
+				keyOpts.privateKeyEnv,
+				payPaymentsAddress,
+				filpay.WithPayLogging(filpayLogger, payDebug || verbose),
+			)
 			if err != nil {
 				return fmt.Errorf("init filpay client for rail setup: %w", err)
 			}
@@ -175,12 +192,16 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 			if fc.SignerAddress().Hex() != client {
 				return fmt.Errorf("derived client %s does not match filpay signer %s", client, fc.SignerAddress().Hex())
 			}
+			prepStart := time.Now()
 			if err := prepareRailsForChallenges(context.Background(), fc, client, items, payDebug); err != nil {
 				return err
 			}
+			if payDebug || verbose {
+				payClientLog("prepare phase complete in %s", time.Since(prepStart).Round(time.Millisecond))
+			}
 
 			if !yes {
-				ok, err := promptYesNo("Proceed with MPP proofs and download? [y/N]: ")
+				ok, err := promptYesNo("Proceed with payment and download? [y/N]: ")
 				if err != nil {
 					return err
 				}
@@ -188,8 +209,12 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 					return errors.New("aborted")
 				}
 			}
+			chargeStart := time.Now()
 			if err := chargeRailsForChallenges(context.Background(), fc, client, items, payDebug); err != nil {
 				return err
+			}
+			if payDebug || verbose {
+				payClientLog("charge phase complete in %s", time.Since(chargeStart).Round(time.Millisecond))
 			}
 			if verbose {
 				fmt.Printf("Step 2/%d: fetching paid pieces for %d CID(s)\n", 2, len(items))
@@ -279,7 +304,19 @@ func cmdRailCheck(keyOpts *filpayKeyOpts) *cobra.Command {
 			client := crypto.PubkeyToAddress(evmPK.PublicKey).Hex()
 			fmt.Printf("Client (payer): %s\n", client)
 
-			fc, err := filpay.NewClient(context.Background(), payRPCURL, keyOpts.privateKey, keyOpts.privateKeyFile, keyOpts.privateKeyEnv, payPaymentsAddress)
+			var filpayLogger *slog.Logger
+			if payDebug {
+				filpayLogger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+			}
+			fc, err := filpay.NewClient(
+				context.Background(),
+				payRPCURL,
+				keyOpts.privateKey,
+				keyOpts.privateKeyFile,
+				keyOpts.privateKeyEnv,
+				payPaymentsAddress,
+				filpay.WithPayLogging(filpayLogger, payDebug),
+			)
 			if err != nil {
 				return fmt.Errorf("init filpay client: %w", err)
 			}
@@ -525,13 +562,40 @@ func prepareRailsForChallenges(ctx context.Context, fc *filpay.Client, client st
 	for _, payeeHex := range payees {
 		requiredWei := byPayee[payeeHex]
 		if payDebug {
-			payClientLog("preparing payer for payee=%s required_wei=%s", payeeHex, requiredWei.String())
+			payClientLog("preparing payer for payee=%s required_wei=%s (check approval/balance/rail, then submit txs only if needed)", payeeHex, requiredWei.String())
+			payeeAddr := common.HexToAddress(payeeHex)
+			approval, aerr := fc.OperatorApproval(ctx, payer, payer)
+			_, _, avail, _, berr := fc.AccountInfoIfSettled(ctx, payer)
+			railID, rerr := fc.FindActiveFILRail(ctx, payer, payeeAddr)
+			approved := "unknown"
+			if aerr == nil {
+				approved = fmt.Sprintf("%t", approval.Approved)
+			}
+			availStr := "unknown"
+			fundsOK := "unknown"
+			if berr == nil && avail != nil {
+				availStr = avail.String()
+				if avail.Cmp(requiredWei) >= 0 {
+					fundsOK = "yes"
+				} else {
+					fundsOK = "no"
+				}
+			}
+			railState := "no"
+			if rerr == nil && railID != nil {
+				railState = "yes rail_id=" + railID.String()
+			}
+			payClientLog(
+				"preflight payee=%s approved=%s available_wei=%s required_wei=%s funds_sufficient=%s active_rail=%s operator_check_err=%v balance_check_err=%v rail_check_err=%v",
+				payeeHex, approved, availStr, requiredWei.String(), fundsOK, railState, aerr, berr, rerr,
+			)
 		}
+		start := time.Now()
 		if err := fc.PreparePayerForPayee(ctx, payer, common.HexToAddress(payeeHex), requiredWei); err != nil {
 			return fmt.Errorf("prepare rail/account for payee %s failed: %w", payeeHex, err)
 		}
 		if payDebug {
-			payClientLog("payer preparation complete for payee=%s", payeeHex)
+			payClientLog("payer preparation complete for payee=%s duration=%s", payeeHex, time.Since(start).Round(time.Millisecond))
 		}
 	}
 	return nil
@@ -564,12 +628,13 @@ func chargeRailsForChallenges(ctx context.Context, fc *filpay.Client, client str
 		if payDebug {
 			payClientLog("charging rail one-time payment payee=%s amount_wei=%s", payeeHex, amountWei.String())
 		}
+		start := time.Now()
 		txHash, err := fc.ChargeRailOneTime(ctx, payer, common.HexToAddress(payeeHex), amountWei)
 		if err != nil {
 			return fmt.Errorf("charge rail for payee %s failed: %w", payeeHex, err)
 		}
 		if payDebug {
-			payClientLog("modifyRailPayment submitted payee=%s tx=%s", payeeHex, txHash)
+			payClientLog("modifyRailPayment submitted payee=%s tx=%s duration=%s", payeeHex, txHash, time.Since(start).Round(time.Millisecond))
 		}
 	}
 	return nil
