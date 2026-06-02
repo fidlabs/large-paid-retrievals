@@ -476,7 +476,7 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 	c.Flags().BoolVar(&yes, "yes", false, "Skip interactive confirmation")
 	c.Flags().BoolVar(&dryRun, "dry-run", false, "Probe and print quote only; no chain transactions or downloads")
 	c.Flags().BoolVar(&noProgress, "no-progress", false, "Disable progress output (default: on when stderr is a terminal)")
-	c.Flags().IntVar(&parallel, "parallel", 3, "Max concurrent downloads")
+	c.Flags().IntVar(&parallel, "parallel", 6, "Max concurrent downloads")
 	c.Flags().IntVar(&expiresIn, "expires-in-sec", 120, "Header expiry interval in seconds")
 	c.Flags().BoolVar(&verbose, "verbose", false, "Print detailed probe/download progress (stdout) and retrieval step logs to stderr ([retrieval-client])")
 	c.Flags().BoolVar(&payDebug, "pay-debug", false, "Log Filecoin Pay chain operations to stderr ([filpay-client])")

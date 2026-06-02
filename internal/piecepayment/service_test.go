@@ -507,11 +507,25 @@ func TestFailPaymentRequiredWithoutDeal(t *testing.T) {
 }
 
 func TestFailPaymentUnavailableServiceUnavailable(t *testing.T) {
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/piece/"+testPieceCID, nil)
-	req.Host = "example.com"
-	failPaymentRequired(rec, req, nil, nil, "payment-unavailable", "retry later")
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status %d", rec.Code)
+	deal := &Deal{
+		DealUUID:   "deal-unavail",
+		Client:     "f1client",
+		CID:        testPieceCID,
+		PriceUSDFC: "0.1",
+		Payee0x:    "0x2222222222222222222222222222222222222222",
+	}
+	for name, dealArg := range map[string]*Deal{"no deal": nil, "with deal": deal} {
+		t.Run(name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/piece/"+testPieceCID, nil)
+			req.Host = "example.com"
+			failPaymentRequired(rec, req, dealArg, nil, "payment-unavailable", "retry later")
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status %d", rec.Code)
+			}
+			if dealArg != nil && rec.Header().Get("WWW-Authenticate") == "" {
+				t.Fatal("expected WWW-Authenticate challenge with deal")
+			}
+		})
 	}
 }

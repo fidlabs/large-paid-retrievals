@@ -221,7 +221,7 @@ func issueChallengeForDeal(w http.ResponseWriter, r *http.Request, deal *Deal, l
 		return
 	}
 	challenge := buildChallenge(r.Host, deal.DealUUID, deal.CID, deal.PriceUSDFC, deal.Payee0x)
-	if err := mpp.WritePaymentRequired(w, challenge); err != nil {
+	if err := mpp.SetPaymentRequired(w, challenge); err != nil {
 		logger.Error("failed to write payment challenge", "deal_uuid", challenge.ID, "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
