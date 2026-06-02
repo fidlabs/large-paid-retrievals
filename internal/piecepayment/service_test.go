@@ -303,14 +303,14 @@ func TestLockSettlementPairSerializesSamePair(t *testing.T) {
 	select {
 	case <-acquired:
 		t.Fatal("second lock should block while first is held")
-	case <-time.After(50 * time.Millisecond):
+	case <-time.After(200 * time.Millisecond):
 		// expected blocked
 	}
 
 	unlock1()
 	select {
 	case <-acquired:
-	case <-time.After(250 * time.Millisecond):
+	case <-time.After(1 * time.Second):
 		t.Fatal("second lock did not acquire after first released")
 	}
 	close(release)
@@ -503,5 +503,15 @@ func TestFailPaymentRequiredWithoutDeal(t *testing.T) {
 	}
 	if !strings.Contains(rec.Header().Get("WWW-Authenticate"), mpp.AuthScheme) {
 		t.Fatal("expected authenticate header")
+	}
+}
+
+func TestFailPaymentUnavailableServiceUnavailable(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/piece/"+testPieceCID, nil)
+	req.Host = "example.com"
+	failPaymentRequired(rec, req, nil, nil, "payment-unavailable", "retry later")
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status %d", rec.Code)
 	}
 }

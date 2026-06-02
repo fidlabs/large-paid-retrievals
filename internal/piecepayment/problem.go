@@ -60,5 +60,9 @@ func failPaymentRequired(w http.ResponseWriter, r *http.Request, deal *Deal, log
 	} else {
 		w.Header().Set("WWW-Authenticate", mpp.AuthScheme+` realm="`+mpp.RealmPrefix+r.Host+`", method="`+mpp.MethodID+`", intent="`+mpp.IntentID+`"`)
 	}
-	writeProblem(w, http.StatusPaymentRequired, code, detail)
+	status := http.StatusPaymentRequired
+	if code == "payment-unavailable" {
+		status = http.StatusServiceUnavailable
+	}
+	writeProblem(w, status, code, detail)
 }

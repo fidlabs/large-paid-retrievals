@@ -851,25 +851,30 @@ func chargeRailsForChallenges(ctx context.Context, fc filpayOperations, client s
 func collectCIDs(flagCIDs []string, cidFile string, args []string) ([]string, error) {
 	seen := map[string]struct{}{}
 	var out []string
-	appendCID := func(v string) {
+	appendCID := func(v string) error {
 		v = strings.TrimSpace(v)
 		if v == "" {
-			return
+			return nil
 		}
 		if _, ok := seen[v]; ok {
-			return
+			return fmt.Errorf("duplicate CID %q", v)
 		}
 		seen[v] = struct{}{}
 		out = append(out, v)
+		return nil
 	}
 	for _, c := range flagCIDs {
 		for _, p := range strings.Split(c, ",") {
-			appendCID(p)
+			if err := appendCID(p); err != nil {
+				return nil, err
+			}
 		}
 	}
 	for _, c := range args {
 		for _, p := range strings.Split(c, ",") {
-			appendCID(p)
+			if err := appendCID(p); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if cidFile != "" {
@@ -879,7 +884,9 @@ func collectCIDs(flagCIDs []string, cidFile string, args []string) ([]string, er
 		}
 		for _, line := range strings.Split(string(b), "\n") {
 			for _, p := range strings.Split(line, ",") {
-				appendCID(p)
+				if err := appendCID(p); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}
@@ -901,7 +908,6 @@ func extractPieceCIDsFromManifest(manifestPath string) ([]string, error) {
 		return nil, fmt.Errorf("parse manifest %q: %w", manifestPath, err)
 	}
 
-	// Deduplicate while preserving order.
 	seen := make(map[string]struct{}, len(m.Pieces))
 	out := make([]string, 0, len(m.Pieces))
 	for _, p := range m.Pieces {
@@ -910,7 +916,7 @@ func extractPieceCIDsFromManifest(manifestPath string) ([]string, error) {
 			continue
 		}
 		if _, ok := seen[piece]; ok {
-			continue
+			return nil, fmt.Errorf("duplicate CID %q in manifest", piece)
 		}
 		seen[piece] = struct{}{}
 		out = append(out, piece)
