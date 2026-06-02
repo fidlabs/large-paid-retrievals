@@ -13,20 +13,20 @@ import (
 )
 
 type mockFilpayOps struct {
-	signer       common.Address
-	approval     *filpay.OperatorApprovalStatus
-	approvalErr  error
-	avail        *big.Int
-	accountErr   error
-	railID       *big.Int
-	railErr      error
-	rails        []filpay.TokenRailDetail
-	listRailsErr error
-	prepareErr   error
-	chargeTx     string
-	chargeErr    error
-	prepareCalls int
-	chargeCalls  int
+	signer          common.Address
+	approval        *filpay.OperatorApprovalStatus
+	approvalErr     error
+	avail           *big.Int
+	accountErr      error
+	railID          *big.Int
+	railErr         error
+	rails           []filpay.TokenRailDetail
+	listRailsErr    error
+	prepareErr      error
+	chargeTx        string
+	chargeErr       error
+	prepareCalls    int
+	chargeCalls     int
 	preparedByPayee map[string]*big.Int
 }
 

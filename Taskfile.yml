@@ -132,7 +132,8 @@ tasks:
           --pay-rpc-url "https://api.calibration.node.glif.io/rpc/v1" \
           --sp-base-url "http://127.0.0.1:${sp_proxy_port}" \
           --yes \
-          --cid baga6ea4seaqchqdzwxltukzwbtajfugthjhikv2ezg46qjvsevzbe7nghsxtmbj
+          --cid baga6ea4seaqchqdzwxltukzwbtajfugthjhikv2ezg46qjvsevzbe7nghsxtmbj \
+          --cid baga6ea4seaqchqdzwxltukzwbtajfugthjhikv2ezg46qjvsevzbe7nghsxtmbk
         # we fetch a dummy CAR file which is all zeros so we can't usefully verify it
         echo "*** piece fetched ***"
 
