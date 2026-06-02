@@ -88,12 +88,17 @@ type Config struct {
 	Store        DealStore
 }
 
+type settlementLockEntry struct {
+	mu   sync.Mutex
+	refs int
+}
+
 type RetrievalService struct {
 	cfg    Config
 	logger *slog.Logger
 
 	settleMu    sync.Mutex
-	settleLocks map[string]*sync.Mutex
+	settleLocks map[string]*settlementLockEntry
 }
 
 func NewRetrievalService(cfg Config) *RetrievalService {
@@ -107,7 +112,7 @@ func NewRetrievalService(cfg Config) *RetrievalService {
 	return &RetrievalService{
 		cfg:         cfg,
 		logger:      logger,
-		settleLocks: make(map[string]*sync.Mutex),
+		settleLocks: make(map[string]*settlementLockEntry),
 	}
 }
 
@@ -300,14 +305,24 @@ func sameHexAddress(a, b string) bool {
 func (s *RetrievalService) lockSettlementPair(payer, payee common.Address) func() {
 	key := payer.Hex() + "|" + payee.Hex()
 	s.settleMu.Lock()
-	mu, ok := s.settleLocks[key]
+	entry, ok := s.settleLocks[key]
 	if !ok {
-		mu = &sync.Mutex{}
-		s.settleLocks[key] = mu
+		entry = &settlementLockEntry{}
+		s.settleLocks[key] = entry
 	}
+	entry.refs++
 	s.settleMu.Unlock()
-	mu.Lock()
-	return mu.Unlock
+
+	entry.mu.Lock()
+	return func() {
+		entry.mu.Unlock()
+		s.settleMu.Lock()
+		entry.refs--
+		if entry.refs == 0 {
+			delete(s.settleLocks, key)
+		}
+		s.settleMu.Unlock()
+	}
 }
 
 func settlementPaymentRequiredError(deal *Deal, err error) *PaymentRequiredError {

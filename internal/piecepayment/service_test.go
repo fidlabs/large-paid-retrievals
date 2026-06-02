@@ -316,6 +316,29 @@ func TestLockSettlementPairSerializesSamePair(t *testing.T) {
 	close(release)
 }
 
+func TestLockSettlementPairRemovesIdleEntry(t *testing.T) {
+	svc := NewRetrievalService(Config{
+		Store:       &mockDealStore{},
+		FilecoinPay: stubSettler{},
+	})
+	payer := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	payee := common.HexToAddress("0x2222222222222222222222222222222222222222")
+
+	unlock := svc.lockSettlementPair(payer, payee)
+	svc.settleMu.Lock()
+	if len(svc.settleLocks) != 1 {
+		t.Fatalf("expected one lock entry while held, got %d", len(svc.settleLocks))
+	}
+	svc.settleMu.Unlock()
+
+	unlock()
+	svc.settleMu.Lock()
+	defer svc.settleMu.Unlock()
+	if len(svc.settleLocks) != 0 {
+		t.Fatalf("expected lock table empty after unlock, got %d entries", len(svc.settleLocks))
+	}
+}
+
 func TestIssueQuoteBadClient(t *testing.T) {
 	svc, _, _ := testService(t, &mockDealStore{}, stubSettler{})
 	req := httptest.NewRequest(http.MethodGet, "http://h/piece/"+testPieceCID+"?client=not-an-address", nil)
