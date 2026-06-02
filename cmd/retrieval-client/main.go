@@ -14,6 +14,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -116,6 +117,7 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 		expiresIn          int
 		verbose            bool
 		payDebug           bool
+		parallel           int
 		payRPCURL          string
 		payPaymentsAddress string
 	)
@@ -349,25 +351,22 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 			if ui.Enabled() {
 				ui.Phase("downloading pieces")
 			}
+			if parallel < 1 {
+				parallel = 1
+			}
+			if parallel > len(items) && len(items) > 0 {
+				parallel = len(items)
+			}
 
-			dlIndex := 0
-			for _, it := range items {
+			runOne := func(it challengeItem, pieceUI ProgressUI) error {
 				if it.Base == nil {
 					return fmt.Errorf("internal: missing base URL for CID %s", it.CID)
-				}
-				dlIndex++
-				if ui.Enabled() {
-					ui.PieceProbe(dlIndex, len(items), it.CID, "downloading")
 				}
 				if it.Free {
 					if verbose {
 						fmt.Printf("  - downloading free CAR for CID %s from %s\n", it.CID, it.Base.String())
 					}
-					err = downloadFreeCAR(cli, it.Base, it.CID, outDir, it.TotalBytes, ui, verbose)
-					if err != nil {
-						return err
-					}
-					continue
+					return downloadFreeCAR(cli, it.Base, it.CID, outDir, it.TotalBytes, pieceUI, verbose)
 				}
 				piecePath := "/piece/" + it.CID
 				if verbose {
@@ -402,10 +401,68 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				err = downloadCAR(cli, it.Base, it.CID, piecePath, client, authz, outDir, it.TotalBytes, ui, verbose)
-				if err != nil {
-					return err
+				return downloadCAR(cli, it.Base, it.CID, piecePath, client, authz, outDir, it.TotalBytes, pieceUI, verbose)
+			}
+
+			type dlResult struct {
+				idx int
+				err error
+			}
+			jobs := make(chan int)
+			results := make(chan dlResult, len(items))
+			var wg sync.WaitGroup
+
+			var (
+				pui     *parallelDownloadProgress
+				stopUI  chan struct{}
+				doneUI  chan struct{}
+				pieceUI = func(it challengeItem) ProgressUI { return noopProgress{} }
+			)
+			if ui.Enabled() {
+				cids := make([]string, 0, len(items))
+				for _, it := range items {
+					cids = append(cids, it.CID)
 				}
+				pui = newParallelDownloadProgress(os.Stderr, cids)
+				stopUI = make(chan struct{})
+				doneUI = make(chan struct{})
+				go pui.renderLoop(stopUI, doneUI)
+				pieceUI = func(it challengeItem) ProgressUI { return pui.bind(it.CID, !it.Free) }
+			}
+
+			for w := 0; w < parallel; w++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for idx := range jobs {
+						it := items[idx]
+						err := runOne(it, pieceUI(it))
+						if err != nil && pui != nil {
+							pui.setFailed(it.CID, err)
+						}
+						results <- dlResult{idx: idx, err: err}
+					}
+				}()
+			}
+			for idx := 0; idx < len(items); idx++ {
+				jobs <- idx
+			}
+			close(jobs)
+			wg.Wait()
+			if stopUI != nil {
+				close(stopUI)
+				<-doneUI
+			}
+
+			var errs []string
+			for i := 0; i < len(items); i++ {
+				r := <-results
+				if r.err != nil {
+					errs = append(errs, fmt.Sprintf("%s: %v", items[r.idx].CID, r.err))
+				}
+			}
+			if len(errs) > 0 {
+				return fmt.Errorf("download failed for %d piece(s): %s", len(errs), strings.Join(errs, "; "))
 			}
 			fmt.Println("Fetch complete.")
 			return nil
@@ -419,6 +476,7 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 	c.Flags().BoolVar(&yes, "yes", false, "Skip interactive confirmation")
 	c.Flags().BoolVar(&dryRun, "dry-run", false, "Probe and print quote only; no chain transactions or downloads")
 	c.Flags().BoolVar(&noProgress, "no-progress", false, "Disable progress output (default: on when stderr is a terminal)")
+	c.Flags().IntVar(&parallel, "parallel", 3, "Max concurrent downloads")
 	c.Flags().IntVar(&expiresIn, "expires-in-sec", 120, "Header expiry interval in seconds")
 	c.Flags().BoolVar(&verbose, "verbose", false, "Print detailed probe/download progress (stdout) and retrieval step logs to stderr ([retrieval-client])")
 	c.Flags().BoolVar(&payDebug, "pay-debug", false, "Log Filecoin Pay chain operations to stderr ([filpay-client])")

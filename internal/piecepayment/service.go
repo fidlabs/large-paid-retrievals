@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"sync"
 	"strings"
 	"time"
 
@@ -90,6 +91,9 @@ type Config struct {
 type RetrievalService struct {
 	cfg    Config
 	logger *slog.Logger
+
+	settleMu    sync.Mutex
+	settleLocks map[string]*sync.Mutex
 }
 
 func NewRetrievalService(cfg Config) *RetrievalService {
@@ -100,7 +104,11 @@ func NewRetrievalService(cfg Config) *RetrievalService {
 	if cfg.Store == nil {
 		panic("middleware: ServiceConfig.Store is required")
 	}
-	return &RetrievalService{cfg: cfg, logger: logger}
+	return &RetrievalService{
+		cfg:         cfg,
+		logger:      logger,
+		settleLocks: make(map[string]*sync.Mutex),
+	}
 }
 
 func (s *RetrievalService) IssueQuote(r *http.Request, cid string) (*QuoteOutcome, error) {
@@ -187,9 +195,11 @@ func (s *RetrievalService) AuthorizeAndSettle(r *http.Request, cid, rawHdr strin
 	}
 	payer := common.HexToAddress(strings.TrimSpace(deal.Client))
 	payeeAddr := common.HexToAddress(strings.TrimSpace(deal.Payee0x))
+	unlock := s.lockSettlementPair(payer, payeeAddr)
+	defer unlock()
 	txHash, err := s.cfg.FilecoinPay.SettleIfFunded(r.Context(), payer, payeeAddr, priceBaseUnits)
 	if err != nil {
-		return nil, &PaymentRequiredError{Deal: deal, Code: "payment-insufficient", Detail: "Filecoin Pay rail or available balance is insufficient for settlement"}
+		return nil, settlementPaymentRequiredError(deal, err)
 	}
 	s.logger.Info("filecoin pay rail settled", "deal_uuid", deal.DealUUID, "settle_tx", txHash, "payer", payer.Hex(), "payee", payeeAddr.Hex())
 
@@ -285,4 +295,33 @@ func sameHexAddress(a, b string) bool {
 		return false
 	}
 	return common.HexToAddress(a) == common.HexToAddress(b)
+}
+
+func (s *RetrievalService) lockSettlementPair(payer, payee common.Address) func() {
+	key := payer.Hex() + "|" + payee.Hex()
+	s.settleMu.Lock()
+	mu, ok := s.settleLocks[key]
+	if !ok {
+		mu = &sync.Mutex{}
+		s.settleLocks[key] = mu
+	}
+	s.settleMu.Unlock()
+	mu.Lock()
+	return mu.Unlock
+}
+
+func settlementPaymentRequiredError(deal *Deal, err error) *PaymentRequiredError {
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "insufficient") || strings.Contains(msg, "no active token rail") || strings.Contains(msg, "no funds") {
+		return &PaymentRequiredError{
+			Deal:   deal,
+			Code:   "payment-insufficient",
+			Detail: "Filecoin Pay rail or available balance is insufficient for settlement",
+		}
+	}
+	return &PaymentRequiredError{
+		Deal:   deal,
+		Code:   "payment-unavailable",
+		Detail: "Payment settlement is temporarily unavailable; please retry",
+	}
 }

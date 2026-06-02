@@ -281,6 +281,41 @@ func TestPieceAuthFromContext(t *testing.T) {
 	}
 }
 
+func TestLockSettlementPairSerializesSamePair(t *testing.T) {
+	svc := NewRetrievalService(Config{
+		Store:       &mockDealStore{},
+		FilecoinPay: stubSettler{},
+	})
+	payer := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	payee := common.HexToAddress("0x2222222222222222222222222222222222222222")
+
+	unlock1 := svc.lockSettlementPair(payer, payee)
+
+	acquired := make(chan struct{})
+	release := make(chan struct{})
+	go func() {
+		unlock2 := svc.lockSettlementPair(payer, payee)
+		close(acquired)
+		<-release
+		unlock2()
+	}()
+
+	select {
+	case <-acquired:
+		t.Fatal("second lock should block while first is held")
+	case <-time.After(50 * time.Millisecond):
+		// expected blocked
+	}
+
+	unlock1()
+	select {
+	case <-acquired:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("second lock did not acquire after first released")
+	}
+	close(release)
+}
+
 func TestIssueQuoteBadClient(t *testing.T) {
 	svc, _, _ := testService(t, &mockDealStore{}, stubSettler{})
 	req := httptest.NewRequest(http.MethodGet, "http://h/piece/"+testPieceCID+"?client=not-an-address", nil)
@@ -392,6 +427,17 @@ func TestAuthorizeAndSettleErrors(t *testing.T) {
 		_, err := svc2.AuthorizeAndSettle(paidRequest(t, host, testPieceCID, raw), testPieceCID, raw)
 		var pe *PaymentRequiredError
 		if !errors.As(err, &pe) || pe.Code != "payment-insufficient" {
+			t.Fatalf("got %v", err)
+		}
+	})
+
+	t.Run("settlement transient failure", func(t *testing.T) {
+		svc2, pk2, client2 := testService(t, store, stubSettler{err: errors.New("nonce too low")})
+		q2, _ := svc2.IssueQuote(issueQuoteRequest(t, host, testPieceCID, client2), testPieceCID)
+		raw := buildProof(t, pk2, q2.Challenge, client2, testPieceCID, host, "n-pay-2", time.Now().Add(time.Minute).Unix())
+		_, err := svc2.AuthorizeAndSettle(paidRequest(t, host, testPieceCID, raw), testPieceCID, raw)
+		var pe *PaymentRequiredError
+		if !errors.As(err, &pe) || pe.Code != "payment-unavailable" {
 			t.Fatalf("got %v", err)
 		}
 	})

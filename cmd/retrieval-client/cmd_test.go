@@ -406,6 +406,37 @@ func TestCmdFetchFreeCAR(t *testing.T) {
 	}
 }
 
+func TestCmdFetchFreeCARParallelFlag(t *testing.T) {
+	const cid = testPieceCID
+	keyHex, clientAddr := testKeyHex(t)
+	restore := restoreHooks(t)
+	defer restore()
+
+	ts := httptest.NewServer(freeCarHandler(cid, []byte("free-bytes-parallel")))
+	defer ts.Close()
+	stubDiscoverURL(t, ts.URL)
+	stubFilpaySigner(clientAddr)
+
+	outDir := t.TempDir()
+	cmd := root()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{
+		"fetch", "--filpay-private-key", keyHex, "--yes",
+		"--cid", cid, "--out-dir", outDir, "--parallel", "2",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(outDir, sanitizeFilename(cid)+".car"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "free-bytes-parallel" {
+		t.Fatalf("got %q", b)
+	}
+}
+
 func TestCmdFetchUsesDiscoverInjection(t *testing.T) {
 	const (
 		cid      = testPieceCID

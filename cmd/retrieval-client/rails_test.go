@@ -27,6 +27,7 @@ type mockFilpayOps struct {
 	chargeErr    error
 	prepareCalls int
 	chargeCalls  int
+	preparedByPayee map[string]*big.Int
 }
 
 func (m *mockFilpayOps) Close() {}
@@ -79,6 +80,12 @@ func (m *mockFilpayOps) ListTokenRailsAsPayer(ctx context.Context, payer common.
 
 func (m *mockFilpayOps) PreparePayerForPayee(ctx context.Context, payer, payee common.Address, required *big.Int) error {
 	m.prepareCalls++
+	if m.preparedByPayee == nil {
+		m.preparedByPayee = map[string]*big.Int{}
+	}
+	if required != nil {
+		m.preparedByPayee[payee.Hex()] = new(big.Int).Set(required)
+	}
 	return m.prepareErr
 }
 
@@ -109,6 +116,31 @@ func TestPrepareRailsForChallenges(t *testing.T) {
 	}
 	if mock.prepareCalls != 1 {
 		t.Fatalf("prepare calls=%d", mock.prepareCalls)
+	}
+}
+
+func TestPrepareRailsAggregatesRequiredByPayee(t *testing.T) {
+	payee := "0x2222222222222222222222222222222222222222"
+	client := "0x1111111111111111111111111111111111111111"
+	mock := &mockFilpayOps{signer: common.HexToAddress(client)}
+	items := []challengeItem{
+		{CID: "bafy1", DealUUID: "d1", PriceUSDFC: "0.01", Payee0x: payee, Free: false},
+		{CID: "bafy2", DealUUID: "d2", PriceUSDFC: "0.02", Payee0x: payee, Free: false},
+	}
+	if err := prepareRailsForChallenges(context.Background(), mock, client, items, false); err != nil {
+		t.Fatal(err)
+	}
+	if mock.prepareCalls != 1 {
+		t.Fatalf("expected one prepare call for shared payee, got %d", mock.prepareCalls)
+	}
+	got, ok := mock.preparedByPayee[common.HexToAddress(payee).Hex()]
+	if !ok {
+		t.Fatalf("missing prepared amount for payee %s", payee)
+	}
+	// 0.01 + 0.02 USDFC in base units.
+	want := big.NewInt(30_000_000_000_000_000)
+	if got.Cmp(want) != 0 {
+		t.Fatalf("prepared amount=%s want=%s", got.String(), want.String())
 	}
 }
 
