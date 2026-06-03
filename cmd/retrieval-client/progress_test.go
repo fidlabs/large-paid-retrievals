@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestLineProgressTxLifecycle(t *testing.T) {
@@ -258,6 +259,21 @@ func TestNoopProgressDisabled(t *testing.T) {
 	}
 	if newProgressUI(os.Stderr, true).Enabled() {
 		t.Fatal("--no-progress should disable progress")
+	}
+}
+
+func TestTruncateRunes(t *testing.T) {
+	const emoji = "é🎉"
+	long := strings.Repeat(emoji, 60)
+	got := truncateRunes(long, 96)
+	if !strings.HasSuffix(got, "...") {
+		t.Fatalf("expected suffix: %q", got)
+	}
+	if utf8.ValidString(strings.TrimSuffix(got, "...")) == false {
+		t.Fatalf("invalid UTF-8 after truncate: %q", got)
+	}
+	if len([]rune(strings.TrimSuffix(got, "..."))) != 96 {
+		t.Fatalf("rune count = %d", len([]rune(strings.TrimSuffix(got, "..."))))
 	}
 }
 

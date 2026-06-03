@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 type parallelPieceState struct {
@@ -68,15 +69,20 @@ func (p *parallelDownloadProgress) renderLoop(stop <-chan struct{}, done chan<- 
 
 func (p *parallelDownloadProgress) render(final bool) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	p.frame++
-
-	// Move up before redraw (all rows except first draw).
-	if p.frame > 1 {
-		fmt.Fprintf(p.out, "\033[%dA", len(p.pieces))
-	}
+	frame := p.frame
+	n := len(p.pieces)
+	moveUp := frame > 1
+	lines := make([]string, n)
 	for i := range p.pieces {
-		line := p.formatPieceLine(i, final)
+		lines[i] = p.formatPieceLine(i, final)
+	}
+	p.mu.Unlock()
+
+	if moveUp {
+		fmt.Fprintf(p.out, "\033[%dA", n)
+	}
+	for _, line := range lines {
 		fmt.Fprintf(p.out, "\r\033[2K%s\n", line)
 	}
 }
@@ -158,11 +164,7 @@ func (p *parallelDownloadProgress) setFailed(cid string, err error) {
 		if err == nil {
 			return
 		}
-		msg := strings.TrimSpace(err.Error())
-		if len(msg) > 96 {
-			msg = msg[:96] + "..."
-		}
-		ps.lastError = msg
+		ps.lastError = truncateRunes(strings.TrimSpace(err.Error()), 96)
 	})
 }
 
@@ -198,4 +200,12 @@ func (b *boundParallelPieceProgress) DownloadFailed(_ string) {
 }
 func (b *boundParallelPieceProgress) DownloadDone(_, _ string) {
 	b.parent.setDone(b.cid)
+}
+
+func truncateRunes(s string, maxRunes int) string {
+	if maxRunes <= 0 || utf8.RuneCountInString(s) <= maxRunes {
+		return s
+	}
+	runes := []rune(s)
+	return string(runes[:maxRunes]) + "..."
 }
