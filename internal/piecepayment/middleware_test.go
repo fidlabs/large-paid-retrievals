@@ -695,7 +695,7 @@ func TestQuoteZeroContentLengthUnavailable(t *testing.T) {
 	defer ts.Close()
 
 	client := "0x3333333333333333333333333333333333333333"
-	res, err := http.Get(ts.URL + "/piece/"+testPieceCID+"?client="+client)
+	res, err := http.Get(ts.URL + "/piece/" + testPieceCID + "?client=" + client)
 	if err != nil {
 		t.Fatal(err)
 	}
