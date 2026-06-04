@@ -53,11 +53,12 @@ func newTestHandler(cfg pp.Config) http.Handler {
 	pieceHandler := svc.PiecePaymentMiddleware(4096)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body := []byte("DUMMY-CAR\nPATH=" + r.URL.Path + "\n")
 		w.Header().Set("Content-Type", "application/vnd.ipld.car")
-		w.Header().Set("Content-Length", strconv.FormatInt(advertisedBytes, 10))
 		if r.Method == http.MethodHead {
+			w.Header().Set("Content-Length", strconv.FormatInt(advertisedBytes, 10))
 			w.WriteHeader(http.StatusOK)
 			return
 		}
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(body)
 	}))
@@ -634,6 +635,38 @@ func TestQuoteWithoutContentLengthUnavailable(t *testing.T) {
 	}
 	if mustProblemType(t, res) != "https://paymentauth.org/problems/payment-unavailable" {
 		t.Fatal("problem type")
+	}
+}
+
+func TestQuoteNoContentHEADUnavailable(t *testing.T) {
+	s := newTestStore(t)
+	defer s.Close()
+	cfg := pp.Config{
+		PriceUSDFCPerGB: "0.01",
+		Store:           s,
+		FilecoinPay:     &mockPaySettler{},
+		QuotePayee0x:    testQuotePayee0x,
+		ClientQuery:     "client",
+	}
+	svc := pp.NewRetrievalService(cfg)
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	ts := httptest.NewServer(svc.PiecePaymentMiddleware(4096)(next))
+	defer ts.Close()
+
+	client := "0x3333333333333333333333333333333333333333"
+	res, err := http.Get(ts.URL + "/piece/" + testPieceCID + "?client=" + client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status %d", res.StatusCode)
 	}
 }
 

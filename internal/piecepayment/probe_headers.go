@@ -44,7 +44,8 @@ func pricingProbePieceBytes(status int, header http.Header) int64 {
 	case http.StatusOK:
 		return probeResponseTotalBytes(header)
 	case http.StatusNoContent:
-		return 0
+		// 204 does not advertise a quotable full-piece size.
+		return -1
 	case http.StatusPartialContent:
 		// Defensive: partial HEAD must not set the quoted full-piece price.
 		return -1
