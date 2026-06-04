@@ -7,7 +7,7 @@ Small CLI tools for paid piece retrieval over HTTP using:
 - Filecoin Pay rails on FVM (automated creation/finding of rails)
 
 This is primarily built for large (many TiBs) PoRep deals so relies on some basic assumptions:
-- Static price per piece (easy to change, just NYI)
+- Per-GiB pricing with upfront quote from piece size (HEAD `Content-Length`)
 - Most pieces will be full ~32GB with prices in the range of $0.10 to $1.00, so transaction overheads and gas fees are sustainable
 - Quote and fetch one Piece at a time - requires more client-side error handling and consumes more transactions, but has near-term advantages:
   - Copes with large data sets being spread across multiple SPs
@@ -130,7 +130,7 @@ Minimal example:
 ./bin/sp-proxy \
   --listen :8787 \
   --db ./sp-proxy.db \
-  --price-usdfc 0.01 \
+  --price-usdfc-per-gb 0.01 \
   --pay-rpc-url "https://api.calibration.node.glif.io/rpc/v1" \
   --pay-private-key-file ./sp.key
 ```
@@ -139,7 +139,7 @@ Useful flags:
 
 - `--listen`: HTTP listen address (default `:8787`)
 - `--db`: SQLite file for deal state (default `./sp-proxy.db`)
-- `--price-usdfc`: challenge price per Piece in USDFC
+- `--price-usdfc-per-gb`: USDFC per GiB; total challenge price is computed from upstream HEAD `Content-Length` for that piece
 - `--pay-rpc-url`: FVM RPC for Filecoin Pay interactions
 - `--pay-private-key|--pay-private-key-file|--pay-private-key-env`: settler key source
 - `--pay-payments-address`: optional payments contract override (empty = chain default)
@@ -207,7 +207,7 @@ If you want to ignore discovered endpoints and only probe one base URL (eg your 
 ## E2E shell tasks
 
 - `task test:e2e:dicovery`: discovers two working piece URLs from `sp-tool`, extracts CIDs, and runs `retrieval-client fetch` against mainnet RPC.
-- `task test:e2e:filpay`: starts local nginx (`task nginx:piece`), launches `sp-proxy` on `:8787`, and runs a paid fetch on Calibration through the proxy.
+- `task test:e2e:filpay`: starts local nginx (`task nginx:piece`), launches `sp-proxy` on `:8787` at `0.0003` USDFC/GiB, and runs a paid fetch on Calibration through the proxy.
 
 ## Validation
 

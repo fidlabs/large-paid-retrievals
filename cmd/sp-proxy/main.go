@@ -29,7 +29,7 @@ func root() *cobra.Command {
 	}
 	c.Flags().StringVar(&settings.Listen, "listen", ":8787", "Listen address")
 	c.Flags().StringVar(&settings.DBPath, "db", "./sp-proxy.db", "SQLite deals database path")
-	c.Flags().StringVar(&settings.PriceUSDFC, "price-usdfc", "0.01", "Challenge price (USDFC) per requested CID")
+	c.Flags().StringVar(&settings.PriceUSDFCPerGB, "price-usdfc-per-gb", "0.01", "Challenge price (USDFC) per GiB of piece data; total charge is computed from upstream HEAD Content-Length")
 	c.Flags().StringVar(&settings.ClientQuery, "client-query", "client", "Query key used to identify client on challenge requests")
 	c.Flags().StringVar(&settings.ClientHeader, "client-header", "X-Client-Address", "Header key used to identify client on challenge requests")
 	c.Flags().IntVar(&settings.MaxSkewSec, "max-clock-skew-sec", 30, "Allowed clock skew in seconds for header expiry")

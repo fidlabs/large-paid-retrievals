@@ -49,7 +49,7 @@ Optional auth-params handled:
 Notes:
 - `challenge_id` is unique per quote and currently equals `deal_uuid`.
 - `expires` is RFC3339 and is a short challenge TTL.
-- `price_usdfc` is decimal USDFC string and is converted to base units server-side before settle.
+- `price_usdfc` is the total decimal USDFC charge for the piece (SP computes it as `price_usdfc_per_gib * piece_bytes / 2^30` from upstream HEAD `Content-Length` when the challenge is issued). It is converted to base units server-side before a single settle.
 
 ## Paid Proof Schema (`Authorization: Payment ...`)
 

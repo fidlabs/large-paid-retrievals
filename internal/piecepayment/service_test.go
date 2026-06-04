@@ -16,7 +16,10 @@ import (
 	"github.com/fidlabs/paid-retrievals/internal/mpp"
 )
 
-const testPieceCID = "bafkreidde4sfyosf2pm6u4vxb65wogjg464a6y6tcg75opo6q5wv34bley"
+const (
+	testPieceCID      = "bafkreidde4sfyosf2pm6u4vxb65wogjg464a6y6tcg75opo6q5wv34bley"
+	testQuotePieceGiB = int64(1 << 30)
+)
 
 type mockDealStore struct {
 	deals          map[string]*Deal
@@ -124,13 +127,13 @@ func testService(t *testing.T, store DealStore, settler FilecoinPaySettler) (*Re
 	}
 	client := crypto.PubkeyToAddress(pk.PublicKey).Hex()
 	svc := NewRetrievalService(Config{
-		PriceUSDFC:   "0.1",
-		ClientQuery:  "client",
-		ClientHeader: "X-Client-Address",
-		MaxClockSkew: 30 * time.Second,
-		QuotePayee0x: "0x2222222222222222222222222222222222222222",
-		FilecoinPay:  settler,
-		Store:        store,
+		PriceUSDFCPerGB: "0.1",
+		ClientQuery:     "client",
+		ClientHeader:    "X-Client-Address",
+		MaxClockSkew:    30 * time.Second,
+		QuotePayee0x:    "0x2222222222222222222222222222222222222222",
+		FilecoinPay:     settler,
+		Store:           store,
 	})
 	return svc, pk, client
 }
@@ -343,7 +346,7 @@ func TestIssueQuoteBadClient(t *testing.T) {
 	svc, _, _ := testService(t, &mockDealStore{}, stubSettler{})
 	req := httptest.NewRequest(http.MethodGet, "http://h/piece/"+testPieceCID+"?client=not-an-address", nil)
 	req.Host = "h"
-	_, err := svc.IssueQuote(req, testPieceCID)
+	_, err := svc.IssueQuote(req, testPieceCID, testQuotePieceGiB)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -358,7 +361,7 @@ func TestAuthorizeAndSettleErrors(t *testing.T) {
 	svc, pk, client := testService(t, store, stubSettler{})
 	host := "127.0.0.1:1"
 
-	q, err := svc.IssueQuote(issueQuoteRequest(t, host, testPieceCID, client), testPieceCID)
+	q, err := svc.IssueQuote(issueQuoteRequest(t, host, testPieceCID, client), testPieceCID, testQuotePieceGiB)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -380,7 +383,10 @@ func TestAuthorizeAndSettleErrors(t *testing.T) {
 		if !errors.As(err, &pe) || pe.Code != "invalid-challenge" {
 			t.Fatalf("got %v", err)
 		}
-		store.deals = map[string]*Deal{ch.ID: {DealUUID: ch.ID, Client: client, CID: testPieceCID, PriceUSDFC: "0.1", Payee0x: "0x2222222222222222222222222222222222222222"}}
+		store.deals = map[string]*Deal{ch.ID: {
+			DealUUID: ch.ID, Client: client, CID: testPieceCID,
+			PriceUSDFC: ch.Request.PriceUSDFC, Payee0x: "0x2222222222222222222222222222222222222222",
+		}}
 	})
 
 	t.Run("expired credential", func(t *testing.T) {
@@ -445,7 +451,7 @@ func TestAuthorizeAndSettleErrors(t *testing.T) {
 
 	t.Run("settlement failure", func(t *testing.T) {
 		svc2, pk2, client2 := testService(t, store, stubSettler{err: errors.New("no funds")})
-		q2, _ := svc2.IssueQuote(issueQuoteRequest(t, host, testPieceCID, client2), testPieceCID)
+		q2, _ := svc2.IssueQuote(issueQuoteRequest(t, host, testPieceCID, client2), testPieceCID, testQuotePieceGiB)
 		raw := buildProof(t, pk2, q2.Challenge, client2, testPieceCID, host, "n-pay", time.Now().Add(time.Minute).Unix())
 		_, err := svc2.AuthorizeAndSettle(paidRequest(t, host, testPieceCID, raw), testPieceCID, raw)
 		var pe *PaymentRequiredError
@@ -456,7 +462,7 @@ func TestAuthorizeAndSettleErrors(t *testing.T) {
 
 	t.Run("settlement transient failure", func(t *testing.T) {
 		svc2, pk2, client2 := testService(t, store, stubSettler{err: errors.New("nonce too low")})
-		q2, _ := svc2.IssueQuote(issueQuoteRequest(t, host, testPieceCID, client2), testPieceCID)
+		q2, _ := svc2.IssueQuote(issueQuoteRequest(t, host, testPieceCID, client2), testPieceCID, testQuotePieceGiB)
 		raw := buildProof(t, pk2, q2.Challenge, client2, testPieceCID, host, "n-pay-2", time.Now().Add(time.Minute).Unix())
 		_, err := svc2.AuthorizeAndSettle(paidRequest(t, host, testPieceCID, raw), testPieceCID, raw)
 		var pe *PaymentRequiredError
@@ -467,7 +473,7 @@ func TestAuthorizeAndSettleErrors(t *testing.T) {
 
 	t.Run("replay nonce", func(t *testing.T) {
 		svc3, pk3, client3 := testService(t, &mockDealStore{}, stubSettler{})
-		q3, _ := svc3.IssueQuote(issueQuoteRequest(t, host, testPieceCID, client3), testPieceCID)
+		q3, _ := svc3.IssueQuote(issueQuoteRequest(t, host, testPieceCID, client3), testPieceCID, testQuotePieceGiB)
 		raw := buildProof(t, pk3, q3.Challenge, client3, testPieceCID, host, "replay-n", time.Now().Add(time.Minute).Unix())
 		first, err := svc3.AuthorizeAndSettle(paidRequest(t, host, testPieceCID, raw), testPieceCID, raw)
 		if err != nil {
@@ -484,7 +490,7 @@ func TestAuthorizeAndSettleErrors(t *testing.T) {
 
 	t.Run("mark paid failure still succeeds", func(t *testing.T) {
 		svc4, pk4, client4 := testService(t, &mockDealStore{markPaidErr: errors.New("db down")}, stubSettler{})
-		q4, _ := svc4.IssueQuote(issueQuoteRequest(t, host, testPieceCID, client4), testPieceCID)
+		q4, _ := svc4.IssueQuote(issueQuoteRequest(t, host, testPieceCID, client4), testPieceCID, testQuotePieceGiB)
 		raw := buildProof(t, pk4, q4.Challenge, client4, testPieceCID, host, "n-mark", time.Now().Add(time.Minute).Unix())
 		out, err := svc4.AuthorizeAndSettle(paidRequest(t, host, testPieceCID, raw), testPieceCID, raw)
 		if err != nil || out.TxHash == "" {
