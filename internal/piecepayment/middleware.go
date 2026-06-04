@@ -60,8 +60,8 @@ func (svc *RetrievalService) PiecePaymentMiddleware(MaxHeaderSize int) func(http
 				// Probe upstream with HEAD for existence and piece size before quoting.
 				exists, status, pieceBytes := upstreamProbe(next, r)
 				if !exists {
-					logger.Debug("upstream does not exist", "path", r.URL.Path, "status", status)
-					w.WriteHeader(status)
+					logger.Debug("upstream HEAD probe cannot quote", "path", r.URL.Path, "upstream_status", status)
+					writeProblem(w, http.StatusServiceUnavailable, "payment-unavailable", "Cannot determine piece size for pricing; upstream HEAD must return 200 with Content-Length")
 					return
 				}
 				outcome, err := svc.IssueQuote(r, cid, pieceBytes)

@@ -578,7 +578,7 @@ func TestOversizedAuthorizationForbidden(t *testing.T) {
 	}
 }
 
-func TestUpstreamMissingReturnsStatus(t *testing.T) {
+func TestUpstreamHEADFailureReturnsPaymentUnavailable(t *testing.T) {
 	s := newTestStore(t)
 	defer s.Close()
 	cfg := pp.Config{Store: s, FilecoinPay: &mockPaySettler{}, QuotePayee0x: testQuotePayee0x}
@@ -593,13 +593,47 @@ func TestUpstreamMissingReturnsStatus(t *testing.T) {
 	ts := httptest.NewServer(svc.PiecePaymentMiddleware(4096)(next))
 	defer ts.Close()
 
-	res, err := http.Get(ts.URL + "/piece/" + testPieceCID)
+	res, err := http.Get(ts.URL + "/piece/" + testPieceCID + "?client=0x3333333333333333333333333333333333333333")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer res.Body.Close()
-	if res.StatusCode != http.StatusNotFound {
+	if res.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("status %d", res.StatusCode)
+	}
+}
+
+func TestUpstreamHEADNotAllowedReturnsPaymentUnavailable(t *testing.T) {
+	s := newTestStore(t)
+	defer s.Close()
+	cfg := pp.Config{
+		PriceUSDFCPerGB: "0.01",
+		Store:           s,
+		FilecoinPay:     &mockPaySettler{},
+		QuotePayee0x:    testQuotePayee0x,
+		ClientQuery:     "client",
+	}
+	svc := pp.NewRetrievalService(cfg)
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Length", "9")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("DUMMY-CAR"))
+	})
+	ts := httptest.NewServer(svc.PiecePaymentMiddleware(4096)(next))
+	defer ts.Close()
+
+	client := "0x3333333333333333333333333333333333333333"
+	res, err := http.Get(ts.URL + "/piece/" + testPieceCID + "?client=" + client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status %d want 503 when HEAD cannot quote", res.StatusCode)
 	}
 }
 

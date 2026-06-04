@@ -130,10 +130,10 @@ For testing on calibration network you can create and fund each wallet with FIL 
 
 **Piece size:** before returning a `402` challenge, the proxy probes the upstream piece URL with `HEAD` and reads `Content-Length`. That byte count is the piece size used for quoting. The probe does not forward client `Range` / `If-*` / `Accept-Encoding` headers, so the quoted size is the full identity-encoded object.
 
-**Formula:**
+**Formula** (only when `HEAD` returns `200` with a positive `Content-Length`):
 
 ```text
-billed_gib  = ceil(piece_bytes / 2^30)   # 0 bytes → 0 GiB billed
+billed_gib  = ceil(piece_bytes / 2^30)   # piece_bytes > 0
 price_usdfc = price_usdfc_per_gib × billed_gib
 ```
 
@@ -148,7 +148,7 @@ price_usdfc = price_usdfc_per_gib × billed_gib
 
 **Settlement:** the `price_usdfc` in the MPP challenge is the **total** charge for that piece. After the client pays, the proxy runs **one** Filecoin Pay settlement for that amount, then serves the full `GET` (no metering or partial charges during download).
 
-**No quote** (`503 payment-unavailable`): upstream `HEAD` missing `Content-Length`, `Content-Length: 0`, `204 No Content`, or other non-quotable size.
+**No quote** (`503 payment-unavailable`): the proxy cannot obtain a positive piece size from `HEAD`, including non-`200` responses (e.g. `404`, `405 Method Not Allowed`), missing or zero `Content-Length`, `204 No Content`, or `206 Partial Content`. These cases do not use the formula above.
 
 ## Run the SP proxy
 

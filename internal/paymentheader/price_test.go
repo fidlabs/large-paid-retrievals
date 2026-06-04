@@ -21,6 +21,10 @@ func TestGibsBilled(t *testing.T) {
 	if GibsBilled(32<<30) != 32 {
 		t.Fatal("32 GiB")
 	}
+	// Avoid (pieceBytes + GiB - 1) overflow near MaxInt64.
+	if g := GibsBilled(1<<62); g <= 0 {
+		t.Fatalf("GibsBilled(1<<62)=%d", g)
+	}
 }
 
 func TestPriceUSDFCForBytes(t *testing.T) {

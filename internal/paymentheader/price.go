@@ -16,7 +16,11 @@ func GibsBilled(pieceBytes int64) int64 {
 	if pieceBytes <= 0 {
 		return 0
 	}
-	return (pieceBytes + GiB - 1) / GiB
+	q := pieceBytes / GiB
+	if pieceBytes%GiB != 0 {
+		q++
+	}
+	return q
 }
 
 // PriceUSDFCForBytes returns the total USDFC charge for pieceBytes at pricePerGB USDFC per GiB.
