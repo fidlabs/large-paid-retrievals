@@ -57,17 +57,21 @@ func (svc *RetrievalService) PiecePaymentMiddleware(MaxHeaderSize int) func(http
 				)
 			}
 			if rawHdr == "" {
-				// If there is no authorization header, we need to check if the upstream exists before issuing a payment challenge
-				exists, status := upstreamExists(next, r)
+				// Probe upstream with HEAD for existence and piece size before quoting.
+				exists, status, pieceBytes := upstreamProbe(next, r)
 				if !exists {
-					logger.Debug("upstream does not exist", "path", r.URL.Path, "status", status)
-					w.WriteHeader(status)
+					logger.Debug("upstream HEAD probe cannot quote", "path", r.URL.Path, "upstream_status", status)
+					writeProblem(w, http.StatusServiceUnavailable, "payment-unavailable", "Cannot determine piece size for pricing; upstream HEAD must return 200 with Content-Length")
 					return
 				}
-				outcome, err := svc.IssueQuote(r, cid)
+				outcome, err := svc.IssueQuote(r, cid, pieceBytes)
 				if err != nil {
 					if badReq, ok := errors.AsType[*BadRequestError](err); ok {
 						writeProblem(w, http.StatusBadRequest, "bad-request", badReq.Message)
+						return
+					}
+					if errors.Is(err, ErrPieceSizeUnknown) {
+						writeProblem(w, http.StatusServiceUnavailable, "payment-unavailable", "Cannot determine piece size for pricing; upstream must advertise Content-Length on HEAD")
 						return
 					}
 					http.Error(w, "internal error", http.StatusInternalServerError)
@@ -157,18 +161,21 @@ func parsePiecePath(path string) (string, bool) {
 	return cid, true
 }
 
-func upstreamExists(next http.Handler, r *http.Request) (bool, int) {
+func upstreamProbe(next http.Handler, r *http.Request) (exists bool, status int, pieceBytes int64) {
 	probeReq := r.Clone(r.Context())
 	probeReq.Method = http.MethodHead
-	probeReq.Header = r.Header.Clone()
-	probeReq.Header.Del("Authorization")
+	probeReq.Header = pricingProbeRequestHeaders(r.Header)
 	probeReq.ContentLength = 0
 	probeReq.Body = http.NoBody
 	probeReq.GetBody = nil
 
 	rec := newProbeResponseWriter()
 	next.ServeHTTP(rec, probeReq)
-	return rec.statusCode >= http.StatusOK && rec.statusCode < http.StatusMultipleChoices, rec.statusCode
+	status = rec.statusCode
+	if status < http.StatusOK || status >= http.StatusMultipleChoices {
+		return false, status, -1
+	}
+	return true, status, pricingProbePieceBytes(status, rec.header)
 }
 
 type probeResponseWriter struct {

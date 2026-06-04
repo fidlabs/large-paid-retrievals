@@ -26,6 +26,7 @@ const (
 
 var ErrDealNotFound = errors.New("deal not found")
 var ErrReplayNonce = errors.New("nonce already used")
+var ErrPieceSizeUnknown = errors.New("piece size unknown for pricing")
 
 type Deal struct {
 	DealUUID       string
@@ -77,15 +78,15 @@ func (e *BadRequestError) Error() string {
 }
 
 type Config struct {
-	PriceUSDFC   string
-	ClientQuery  string
-	ClientHeader string
-	MaxClockSkew time.Duration
-	QuotePayee0x string
-	PayDebug     bool
-	FilecoinPay  FilecoinPaySettler
-	Logger       *slog.Logger
-	Store        DealStore
+	PriceUSDFCPerGB string
+	ClientQuery     string
+	ClientHeader    string
+	MaxClockSkew    time.Duration
+	QuotePayee0x    string
+	PayDebug        bool
+	FilecoinPay     FilecoinPaySettler
+	Logger          *slog.Logger
+	Store           DealStore
 }
 
 type settlementLockEntry struct {
@@ -116,19 +117,27 @@ func NewRetrievalService(cfg Config) *RetrievalService {
 	}
 }
 
-func (s *RetrievalService) IssueQuote(r *http.Request, cid string) (*QuoteOutcome, error) {
+func (s *RetrievalService) IssueQuote(r *http.Request, cid string, pieceBytes int64) (*QuoteOutcome, error) {
 	client := identifyClient(r, s.cfg.ClientQuery, s.cfg.ClientHeader)
 	if !common.IsHexAddress(strings.TrimSpace(client)) {
 		s.logger.Warn("bad request: client must be 0x FVM address", "client", client)
 		return nil, &BadRequestError{Message: "bad request: client must be a 0x FVM address"}
 	}
+	if pieceBytes < 0 {
+		return nil, ErrPieceSizeUnknown
+	}
+	priceUSDFC, err := paymentheader.PriceUSDFCForBytes(s.cfg.PriceUSDFCPerGB, pieceBytes)
+	if err != nil {
+		return nil, fmt.Errorf("compute piece price: %w", err)
+	}
 	dealID := uuid.NewString()
 	payee := strings.TrimSpace(s.cfg.QuotePayee0x)
-	if err := s.cfg.Store.InsertQuote(r.Context(), dealID, client, cid, s.cfg.PriceUSDFC, payee); err != nil {
-		s.logger.Error("failed to insert quote", "error", err, "deal_uuid", dealID, "client", client, "cid", cid)
+	if err := s.cfg.Store.InsertQuote(r.Context(), dealID, client, cid, priceUSDFC, payee); err != nil {
+		s.logger.Error("failed to insert quote", "error", err, "deal_uuid", dealID, "client", client, "cid", cid, "piece_bytes", pieceBytes, "price_usdfc", priceUSDFC)
 		return nil, fmt.Errorf("insert quote: %w", err)
 	}
-	return &QuoteOutcome{Challenge: buildChallenge(r.Host, dealID, cid, s.cfg.PriceUSDFC, payee)}, nil
+	s.logger.Info("issued piece quote", "deal_uuid", dealID, "cid", cid, "piece_bytes", pieceBytes, "price_usdfc", priceUSDFC)
+	return &QuoteOutcome{Challenge: buildChallenge(r.Host, dealID, cid, priceUSDFC, payee)}, nil
 }
 
 func (s *RetrievalService) AuthorizeAndSettle(r *http.Request, cid, rawHdr string) (*PaidOutcome, error) {

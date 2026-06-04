@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/fidlabs/paid-retrievals/internal/mpp"
+	"github.com/fidlabs/paid-retrievals/internal/paymentheader"
 	pp "github.com/fidlabs/paid-retrievals/internal/piecepayment"
 	"github.com/fidlabs/paid-retrievals/internal/sqlitestore"
 )
@@ -34,8 +36,8 @@ func newTestStore(t *testing.T) *sqlitestore.Store {
 }
 
 func newTestHandler(cfg pp.Config) http.Handler {
-	if cfg.PriceUSDFC == "" {
-		cfg.PriceUSDFC = "0.01"
+	if cfg.PriceUSDFCPerGB == "" {
+		cfg.PriceUSDFCPerGB = "0.01"
 	}
 	if cfg.ClientQuery == "" {
 		cfg.ClientQuery = "client"
@@ -47,9 +49,16 @@ func newTestHandler(cfg pp.Config) http.Handler {
 		cfg.MaxClockSkew = 30 * time.Second
 	}
 	svc := pp.NewRetrievalService(cfg)
+	const advertisedBytes = 1 << 30
 	pieceHandler := svc.PiecePaymentMiddleware(4096)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body := []byte("DUMMY-CAR\nPATH=" + r.URL.Path + "\n")
 		w.Header().Set("Content-Type", "application/vnd.ipld.car")
+		if r.Method == http.MethodHead {
+			w.Header().Set("Content-Length", strconv.FormatInt(advertisedBytes, 10))
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(body)
 	}))
@@ -214,10 +223,10 @@ func TestQuoteThenPaidSuccess(t *testing.T) {
 	client := crypto.PubkeyToAddress(pk.PublicKey).Hex()
 	mock := &mockPaySettler{}
 	h := newTestHandler(pp.Config{
-		PriceUSDFC:   "0.1",
-		FilecoinPay:  mock,
-		QuotePayee0x: testQuotePayee0x,
-		Store:        s,
+		PriceUSDFCPerGB: "0.1",
+		FilecoinPay:     mock,
+		QuotePayee0x:    testQuotePayee0x,
+		Store:           s,
 	})
 	ts := httptest.NewServer(h)
 	defer ts.Close()
@@ -278,10 +287,10 @@ func TestReplayNonceAllowedWithinPaidWindow(t *testing.T) {
 	client := crypto.PubkeyToAddress(pk.PublicKey).Hex()
 	mock := &mockPaySettler{}
 	h := newTestHandler(pp.Config{
-		PriceUSDFC:   "0.1",
-		FilecoinPay:  mock,
-		QuotePayee0x: testQuotePayee0x,
-		Store:        s,
+		PriceUSDFCPerGB: "0.1",
+		FilecoinPay:     mock,
+		QuotePayee0x:    testQuotePayee0x,
+		Store:           s,
 	})
 	ts := httptest.NewServer(h)
 	defer ts.Close()
@@ -345,10 +354,10 @@ func TestReplayGETAfterPaidAccessTTLReturnsChallenge(t *testing.T) {
 	client := crypto.PubkeyToAddress(pk.PublicKey).Hex()
 	mock := &mockPaySettler{}
 	h := newTestHandler(pp.Config{
-		PriceUSDFC:   "0.1",
-		FilecoinPay:  mock,
-		QuotePayee0x: testQuotePayee0x,
-		Store:        store,
+		PriceUSDFCPerGB: "0.1",
+		FilecoinPay:     mock,
+		QuotePayee0x:    testQuotePayee0x,
+		Store:           store,
 	})
 	ts := httptest.NewServer(h)
 	defer ts.Close()
@@ -421,10 +430,10 @@ func TestRepeatGETWithoutAuthorizationReturnsChallenge(t *testing.T) {
 	client := crypto.PubkeyToAddress(pk.PublicKey).Hex()
 	mock := &mockPaySettler{}
 	h := newTestHandler(pp.Config{
-		PriceUSDFC:   "0.1",
-		FilecoinPay:  mock,
-		QuotePayee0x: testQuotePayee0x,
-		Store:        s,
+		PriceUSDFCPerGB: "0.1",
+		FilecoinPay:     mock,
+		QuotePayee0x:    testQuotePayee0x,
+		Store:           s,
 	})
 	ts := httptest.NewServer(h)
 	defer ts.Close()
@@ -569,7 +578,7 @@ func TestOversizedAuthorizationForbidden(t *testing.T) {
 	}
 }
 
-func TestUpstreamMissingReturnsStatus(t *testing.T) {
+func TestUpstreamHEADFailureReturnsPaymentUnavailable(t *testing.T) {
 	s := newTestStore(t)
 	defer s.Close()
 	cfg := pp.Config{Store: s, FilecoinPay: &mockPaySettler{}, QuotePayee0x: testQuotePayee0x}
@@ -584,13 +593,203 @@ func TestUpstreamMissingReturnsStatus(t *testing.T) {
 	ts := httptest.NewServer(svc.PiecePaymentMiddleware(4096)(next))
 	defer ts.Close()
 
-	res, err := http.Get(ts.URL + "/piece/" + testPieceCID)
+	res, err := http.Get(ts.URL + "/piece/" + testPieceCID + "?client=0x3333333333333333333333333333333333333333")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer res.Body.Close()
-	if res.StatusCode != http.StatusNotFound {
+	if res.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("status %d", res.StatusCode)
+	}
+}
+
+func TestUpstreamHEADNotAllowedReturnsPaymentUnavailable(t *testing.T) {
+	s := newTestStore(t)
+	defer s.Close()
+	cfg := pp.Config{
+		PriceUSDFCPerGB: "0.01",
+		Store:           s,
+		FilecoinPay:     &mockPaySettler{},
+		QuotePayee0x:    testQuotePayee0x,
+		ClientQuery:     "client",
+	}
+	svc := pp.NewRetrievalService(cfg)
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Length", "9")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("DUMMY-CAR"))
+	})
+	ts := httptest.NewServer(svc.PiecePaymentMiddleware(4096)(next))
+	defer ts.Close()
+
+	client := "0x3333333333333333333333333333333333333333"
+	res, err := http.Get(ts.URL + "/piece/" + testPieceCID + "?client=" + client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status %d want 503 when HEAD cannot quote", res.StatusCode)
+	}
+}
+
+func TestQuoteWithoutContentLengthUnavailable(t *testing.T) {
+	s := newTestStore(t)
+	defer s.Close()
+	cfg := pp.Config{
+		PriceUSDFCPerGB: "0.01",
+		Store:           s,
+		FilecoinPay:     &mockPaySettler{},
+		QuotePayee0x:    testQuotePayee0x,
+		ClientQuery:     "client",
+	}
+	svc := pp.NewRetrievalService(cfg)
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	ts := httptest.NewServer(svc.PiecePaymentMiddleware(4096)(next))
+	defer ts.Close()
+
+	client := "0x3333333333333333333333333333333333333333"
+	res, err := http.Get(ts.URL + "/piece/" + testPieceCID + "?client=" + client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status %d", res.StatusCode)
+	}
+	if mustProblemType(t, res) != "https://paymentauth.org/problems/payment-unavailable" {
+		t.Fatal("problem type")
+	}
+}
+
+func TestQuoteZeroContentLengthUnavailable(t *testing.T) {
+	s := newTestStore(t)
+	defer s.Close()
+	cfg := pp.Config{
+		PriceUSDFCPerGB: "0.01",
+		Store:           s,
+		FilecoinPay:     &mockPaySettler{},
+		QuotePayee0x:    testQuotePayee0x,
+		ClientQuery:     "client",
+	}
+	svc := pp.NewRetrievalService(cfg)
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.Header().Set("Content-Length", "0")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	ts := httptest.NewServer(svc.PiecePaymentMiddleware(4096)(next))
+	defer ts.Close()
+
+	client := "0x3333333333333333333333333333333333333333"
+	res, err := http.Get(ts.URL + "/piece/" + testPieceCID + "?client=" + client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status %d", res.StatusCode)
+	}
+}
+
+func TestQuoteNoContentHEADUnavailable(t *testing.T) {
+	s := newTestStore(t)
+	defer s.Close()
+	cfg := pp.Config{
+		PriceUSDFCPerGB: "0.01",
+		Store:           s,
+		FilecoinPay:     &mockPaySettler{},
+		QuotePayee0x:    testQuotePayee0x,
+		ClientQuery:     "client",
+	}
+	svc := pp.NewRetrievalService(cfg)
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	ts := httptest.NewServer(svc.PiecePaymentMiddleware(4096)(next))
+	defer ts.Close()
+
+	client := "0x3333333333333333333333333333333333333333"
+	res, err := http.Get(ts.URL + "/piece/" + testPieceCID + "?client=" + client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status %d", res.StatusCode)
+	}
+}
+
+func TestQuoteIgnoresClientRangeForPricing(t *testing.T) {
+	s := newTestStore(t)
+	defer s.Close()
+	const fullBytes = int64(1 << 30)
+	cfg := pp.Config{
+		PriceUSDFCPerGB: "0.01",
+		Store:           s,
+		FilecoinPay:     &mockPaySettler{},
+		QuotePayee0x:    testQuotePayee0x,
+		ClientQuery:     "client",
+	}
+	svc := pp.NewRetrievalService(cfg)
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			if r.Header.Get("Range") != "" {
+				w.Header().Set("Content-Length", "100")
+				w.WriteHeader(http.StatusPartialContent)
+				return
+			}
+			w.Header().Set("Content-Length", strconv.FormatInt(fullBytes, 10))
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	ts := httptest.NewServer(svc.PiecePaymentMiddleware(4096)(next))
+	defer ts.Close()
+
+	client := "0x3333333333333333333333333333333333333333"
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/piece/"+testPieceCID+"?client="+client, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Range", "bytes=0-99")
+	req.Header.Set("Accept-Encoding", "gzip")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusPaymentRequired {
+		t.Fatalf("status %d", res.StatusCode)
+	}
+	ch, err := mpp.ParseWWWAuthenticate(res.Header.Get("WWW-Authenticate"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPrice, err := paymentheader.PriceUSDFCForBytes("0.01", fullBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ch.Request.PriceUSDFC != wantPrice {
+		t.Fatalf("price_usdfc=%q want %q (full piece, not Range-sized probe)", ch.Request.PriceUSDFC, wantPrice)
 	}
 }
 
@@ -661,7 +860,7 @@ func TestSettlementFailureProblem(t *testing.T) {
 	client := crypto.PubkeyToAddress(pk.PublicKey).Hex()
 	mock := &mockPaySettler{fail: errors.New("insufficient")}
 	h := newTestHandler(pp.Config{
-		PriceUSDFC: "0.1", FilecoinPay: mock, QuotePayee0x: testQuotePayee0x, Store: s,
+		PriceUSDFCPerGB: "0.1", FilecoinPay: mock, QuotePayee0x: testQuotePayee0x, Store: s,
 	})
 	ts := httptest.NewServer(h)
 	defer ts.Close()
@@ -709,13 +908,14 @@ func TestPieceAuthContextAndReceipt(t *testing.T) {
 	client := crypto.PubkeyToAddress(pk.PublicKey).Hex()
 	mock := &mockPaySettler{}
 	cfg := pp.Config{
-		PriceUSDFC: "0.1", FilecoinPay: mock, QuotePayee0x: testQuotePayee0x, Store: s,
+		PriceUSDFCPerGB: "0.1", FilecoinPay: mock, QuotePayee0x: testQuotePayee0x, Store: s,
 		ClientQuery: "client", ClientHeader: "X-Client-Address", MaxClockSkew: 30 * time.Second,
 	}
 	svc := pp.NewRetrievalService(cfg)
 	var sawAuth bool
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodHead {
+			w.Header().Set("Content-Length", strconv.FormatInt(1<<30, 10))
 			w.WriteHeader(http.StatusOK)
 			return
 		}

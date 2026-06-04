@@ -19,13 +19,13 @@ import (
 )
 
 type proxyAppSettings struct {
-	Listen       string
-	DBPath       string
-	PriceUSDFC   string
-	ClientQuery  string
-	ClientHeader string
-	MaxSkewSec   int
-	Verbose      bool
+	Listen          string
+	DBPath          string
+	PriceUSDFCPerGB string
+	ClientQuery     string
+	ClientHeader    string
+	MaxSkewSec      int
+	Verbose         bool
 
 	PayRPCURL          string
 	PayPrivateKey      string
@@ -84,15 +84,15 @@ func buildProxyHandler(
 
 	filTrace := settings.PayDebug || settings.Verbose
 	config := piecepayment.Config{
-		PriceUSDFC:   settings.PriceUSDFC,
-		ClientQuery:  settings.ClientQuery,
-		ClientHeader: settings.ClientHeader,
-		MaxClockSkew: time.Duration(settings.MaxSkewSec) * time.Second,
-		QuotePayee0x: payee,
-		PayDebug:     filTrace,
-		FilecoinPay:  fc,
-		Logger:       logger,
-		Store:        store,
+		PriceUSDFCPerGB: settings.PriceUSDFCPerGB,
+		ClientQuery:     settings.ClientQuery,
+		ClientHeader:    settings.ClientHeader,
+		MaxClockSkew:    time.Duration(settings.MaxSkewSec) * time.Second,
+		QuotePayee0x:    payee,
+		PayDebug:        filTrace,
+		FilecoinPay:     fc,
+		Logger:          logger,
+		Store:           store,
 	}
 	svc := piecepayment.NewRetrievalService(config)
 
@@ -161,7 +161,7 @@ func runProxyApp(settings proxyAppSettings) error {
 
 	logger.Info("filecoin pay", "payments", fc.PaymentsAddress().Hex(), "payee_0x", payee, "settler", fc.SignerAddress().Hex(),
 		"pay_debug_flag", settings.PayDebug, "filpay_trace", filTrace, "pay_http_trace", filTrace)
-	logger.Info("sp-proxy listening", "listen", settings.Listen, "db", settings.DBPath, "price_usdfc", settings.PriceUSDFC, "verbose", settings.Verbose)
+	logger.Info("sp-proxy listening", "listen", settings.Listen, "db", settings.DBPath, "price_usdfc_per_gb", settings.PriceUSDFCPerGB, "verbose", settings.Verbose)
 
 	return proxyListenAndServe(settings.Listen, handler)
 }

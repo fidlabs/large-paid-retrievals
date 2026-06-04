@@ -97,6 +97,7 @@ tasks:
       - |
         set -euo pipefail
         sp_proxy_port=8787
+        sp_proxy_price_per_gb=0.0003
         command -v lsof >/dev/null 2>&1 || {
           echo "lsof is required for sp-proxy cleanup in test:e2e:filpay" >&2
           exit 1
@@ -106,6 +107,7 @@ tasks:
         ./bin/sp-proxy \
           --listen ":${sp_proxy_port}" \
           --db ".task/sp-proxy-test.db" \
+          --price-usdfc-per-gb "${sp_proxy_price_per_gb}" \
           --pay-private-key-file ./sp.key \
           --pay-rpc-url "https://api.calibration.node.glif.io/rpc/v1" \
           --upstream-host "127.0.0.1" \

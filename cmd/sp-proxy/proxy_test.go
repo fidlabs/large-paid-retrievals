@@ -17,6 +17,8 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/fidlabs/paid-retrievals/internal/filpay"
+	"github.com/fidlabs/paid-retrievals/internal/mpp"
+	"github.com/fidlabs/paid-retrievals/internal/paymentheader"
 	"github.com/fidlabs/paid-retrievals/internal/sqlitestore"
 )
 
@@ -250,10 +252,10 @@ func TestBuildProxyHandlerRoutes(t *testing.T) {
 	store := openTestStore(t)
 	stub := defaultStubFilpay()
 	settings := proxyAppSettings{
-		PriceUSDFC:   "0.01",
-		ClientQuery:  "client",
-		ClientHeader: "X-Client-Address",
-		MaxSkewSec:   30,
+		PriceUSDFCPerGB: "0.01",
+		ClientQuery:     "client",
+		ClientHeader:    "X-Client-Address",
+		MaxSkewSec:      30,
 	}
 	h := buildProxyHandler(upURL, host, port, store, stub, testQuotePayee0x, settings, testLogger())
 	ts := httptest.NewServer(h)
@@ -299,7 +301,8 @@ func TestBuildProxyHandlerRoutes(t *testing.T) {
 
 	t.Run("piece issues payment challenge", func(t *testing.T) {
 		client := "0x5555555555555555555555555555555555555555"
-		res, err := http.Get(ts.URL + "/piece/bafytestpiece?client=" + client)
+		const testCID = "bafkreidde4sfyosf2pm6u4vxb65wogjg464a6y6tcg75opo6q5wv34bley"
+		res, err := http.Get(ts.URL + "/piece/" + testCID + "?client=" + client)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -309,6 +312,17 @@ func TestBuildProxyHandlerRoutes(t *testing.T) {
 		}
 		if !strings.Contains(res.Header.Get("WWW-Authenticate"), "Payment") {
 			t.Fatal("missing payment challenge header")
+		}
+		ch, err := mpp.ParseWWWAuthenticate(res.Header.Get("WWW-Authenticate"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantPrice, err := paymentheader.PriceUSDFCForBytes("0.01", 13)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ch.Request.PriceUSDFC != wantPrice {
+			t.Fatalf("price_usdfc=%q want %q (13 bytes bills 1 GiB at 0.01 USDFC/GiB)", ch.Request.PriceUSDFC, wantPrice)
 		}
 	})
 
