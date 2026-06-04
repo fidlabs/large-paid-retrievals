@@ -8,10 +8,10 @@ import (
 
 func TestPricingProbeRequestHeadersStripsRangeAndConditionals(t *testing.T) {
 	in := http.Header{
-		"Range":              []string{"bytes=0-99"},
-		"If-Range":           []string{`"etag"`},
-		"If-None-Match":      []string{`"etag"`},
-		"Accept-Encoding":    []string{"gzip, br"},
+		"Range":            []string{"bytes=0-99"},
+		"If-Range":         []string{`"etag"`},
+		"If-None-Match":    []string{`"etag"`},
+		"Accept-Encoding":  []string{"gzip, br"},
 		"Authorization":    []string{"Payment x"},
 		"X-Client-Address": []string{"0xabc"},
 	}
