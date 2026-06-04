@@ -7,8 +7,8 @@ Small CLI tools for paid piece retrieval over HTTP using:
 - Filecoin Pay rails on FVM (automated creation/finding of rails)
 
 This is primarily built for large (many TiBs) PoRep deals so relies on some basic assumptions:
-- Per-GiB pricing (each GiB or part thereof) with upfront quote from piece size (HEAD `Content-Length`)
-- Most pieces will be full ~32GB with prices in the range of $0.10 to $1.00, so transaction overheads and gas fees are sustainable
+- Per-GiB pricing with upfront quotes (see [Pricing](#pricing) below)
+- Most pieces will be full ~32 GiB with prices in the range of $0.10 to $1.00, so transaction overheads and gas fees are sustainable
 - Quote and fetch one Piece at a time - requires more client-side error handling and consumes more transactions, but has near-term advantages:
   - Copes with large data sets being spread across multiple SPs
   - Works with most existing SP software stacks
@@ -122,6 +122,34 @@ Payment to Storage Providers for retrieval is made in USDFC while Filecoin Pay t
 
 For testing on calibration network you can create and fund each wallet with FIL at https://beryx.io/faucet and fund the client with USDFC at https://forest-explorer.chainsafe.dev/faucet/calibnet_usdfc (your wallet address can be seen in the console messages from the client and storage provider if a retrieval is attempted without both wallets existing and sufficient funds being available).
 
+## Pricing
+
+`sp-proxy` charges in **USDFC per binary GiB** (`2^30` bytes), configured with `--price-usdfc-per-gb`.
+
+**Billing unit:** each GiB of data, or **any fraction of a GiB**, counts as **one billed GiB** (round up). There is no proportional “per byte” charge within a GiB.
+
+**Piece size:** before returning a `402` challenge, the proxy probes the upstream piece URL with `HEAD` and reads `Content-Length`. That byte count is the piece size used for quoting. The probe does not forward client `Range` / `If-*` / `Accept-Encoding` headers, so the quoted size is the full identity-encoded object.
+
+**Formula:**
+
+```text
+billed_gib  = ceil(piece_bytes / 2^30)   # 0 bytes → 0 GiB billed
+price_usdfc = price_usdfc_per_gib × billed_gib
+```
+
+**Examples** at `--price-usdfc-per-gb 0.01`:
+
+| Upstream `Content-Length` | Billed GiB | Challenge `price_usdfc` |
+|---------------------------|------------|-------------------------|
+| 13 bytes                  | 1          | 0.01                    |
+| 1 GiB (2^30 bytes)        | 1          | 0.01                    |
+| 1 GiB + 1 byte            | 2          | 0.02                    |
+| 32 GiB                    | 32         | 0.32                    |
+
+**Settlement:** the `price_usdfc` in the MPP challenge is the **total** charge for that piece. After the client pays, the proxy runs **one** Filecoin Pay settlement for that amount, then serves the full `GET` (no metering or partial charges during download).
+
+**No quote** (`503 payment-unavailable`): upstream `HEAD` missing `Content-Length`, `Content-Length: 0`, `204 No Content`, or other non-quotable size.
+
 ## Run the SP proxy
 
 Minimal example:
@@ -139,7 +167,7 @@ Useful flags:
 
 - `--listen`: HTTP listen address (default `:8787`)
 - `--db`: SQLite file for deal state (default `./sp-proxy.db`)
-- `--price-usdfc-per-gb`: USDFC per GiB; total challenge price is `rate * ceil(piece_bytes / 2^30)` from upstream HEAD `Content-Length`
+- `--price-usdfc-per-gb`: USDFC rate per billed GiB (see [Pricing](#pricing)); default `0.01`
 - `--pay-rpc-url`: FVM RPC for Filecoin Pay interactions
 - `--pay-private-key|--pay-private-key-file|--pay-private-key-env`: settler key source
 - `--pay-payments-address`: optional payments contract override (empty = chain default)
