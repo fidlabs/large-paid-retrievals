@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 )
 
 // GiB is the byte count used for per-GB pricing (binary gigabyte, 1024^3).
@@ -22,10 +23,31 @@ func PriceUSDFCForBytes(pricePerGB string, pieceBytes int64) (string, error) {
 	if perGB.Sign() < 0 {
 		return "", errors.New("price per GB must be non-negative")
 	}
-	if pieceBytes == 0 {
-		return FormatTokenValue(big.NewInt(0)), nil
+	if pieceBytes == 0 || perGB.Sign() == 0 {
+		return formatTokenValueQuoted(big.NewInt(0)), nil
 	}
 	num := new(big.Int).Mul(perGB, big.NewInt(pieceBytes))
 	priceUnits := new(big.Int).Quo(num, big.NewInt(GiB))
-	return FormatTokenValue(priceUnits), nil
+	if priceUnits.Sign() == 0 {
+		// Non-zero piece at a positive rate must not round-trip to a zero settlement.
+		priceUnits = big.NewInt(1)
+	}
+	return formatTokenValueQuoted(priceUnits), nil
+}
+
+// formatTokenValueQuoted formats base units for MPP price_usdfc with up to 18 fractional
+// digits so ParseTokenToBaseUnits round-trips (unlike FormatTokenValue's 6-digit display).
+func formatTokenValueQuoted(baseUnits *big.Int) string {
+	if baseUnits == nil || baseUnits.Sign() == 0 {
+		return "0"
+	}
+	r := new(big.Rat).SetInt(baseUnits)
+	d := new(big.Rat).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
+	r.Quo(r, d)
+	s := r.FloatString(18)
+	if i := strings.IndexByte(s, '.'); i >= 0 {
+		s = strings.TrimRight(s, "0")
+		s = strings.TrimRight(s, ".")
+	}
+	return s
 }

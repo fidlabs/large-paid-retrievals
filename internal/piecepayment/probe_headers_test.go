@@ -42,6 +42,13 @@ func TestPricingProbePieceBytesRejectsNoContent(t *testing.T) {
 	}
 }
 
+func TestProbeResponseTotalBytesRejectsZero(t *testing.T) {
+	h := http.Header{"Content-Length": []string{"0"}}
+	if got := probeResponseTotalBytes(h); got != -1 {
+		t.Fatalf("got %d want -1 for zero Content-Length", got)
+	}
+}
+
 func TestPricingProbePieceBytesOK(t *testing.T) {
 	const want = 1 << 30
 	h := http.Header{"Content-Length": []string{strconv.FormatInt(want, 10)}}

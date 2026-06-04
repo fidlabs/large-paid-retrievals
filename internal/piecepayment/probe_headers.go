@@ -60,7 +60,7 @@ func probeResponseTotalBytes(header http.Header) int64 {
 		return -1
 	}
 	n, err := strconv.ParseInt(cl, 10, 64)
-	if err != nil || n < 0 {
+	if err != nil || n <= 0 {
 		return -1
 	}
 	return n
