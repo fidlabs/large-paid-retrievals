@@ -7,7 +7,7 @@ Small CLI tools for paid piece retrieval over HTTP using:
 - Filecoin Pay rails on FVM (automated creation/finding of rails)
 
 This is primarily built for large (many TiBs) PoRep deals so relies on some basic assumptions:
-- Per-GiB pricing with upfront quote from piece size (HEAD `Content-Length`)
+- Per-GiB pricing (each GiB or part thereof) with upfront quote from piece size (HEAD `Content-Length`)
 - Most pieces will be full ~32GB with prices in the range of $0.10 to $1.00, so transaction overheads and gas fees are sustainable
 - Quote and fetch one Piece at a time - requires more client-side error handling and consumes more transactions, but has near-term advantages:
   - Copes with large data sets being spread across multiple SPs
@@ -139,7 +139,7 @@ Useful flags:
 
 - `--listen`: HTTP listen address (default `:8787`)
 - `--db`: SQLite file for deal state (default `./sp-proxy.db`)
-- `--price-usdfc-per-gb`: USDFC per GiB; total challenge price is computed from upstream HEAD `Content-Length` for that piece
+- `--price-usdfc-per-gb`: USDFC per GiB; total challenge price is `rate * ceil(piece_bytes / 2^30)` from upstream HEAD `Content-Length`
 - `--pay-rpc-url`: FVM RPC for Filecoin Pay interactions
 - `--pay-private-key|--pay-private-key-file|--pay-private-key-env`: settler key source
 - `--pay-payments-address`: optional payments contract override (empty = chain default)

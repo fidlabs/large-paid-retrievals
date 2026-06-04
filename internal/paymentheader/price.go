@@ -10,7 +10,17 @@ import (
 // GiB is the byte count used for per-GB pricing (binary gigabyte, 1024^3).
 const GiB int64 = 1 << 30
 
+// GibsBilled returns the number of whole GiB charged for pieceBytes: each GiB or
+// part thereof counts as one GiB (ceiling division).
+func GibsBilled(pieceBytes int64) int64 {
+	if pieceBytes <= 0 {
+		return 0
+	}
+	return (pieceBytes + GiB - 1) / GiB
+}
+
 // PriceUSDFCForBytes returns the total USDFC charge for pieceBytes at pricePerGB USDFC per GiB.
+// Billing is per whole GiB (or part thereof): total = GibsBilled(pieceBytes) * pricePerGB.
 // pieceBytes must be non-negative; a negative value means the size is unknown.
 func PriceUSDFCForBytes(pricePerGB string, pieceBytes int64) (string, error) {
 	if pieceBytes < 0 {
@@ -23,15 +33,11 @@ func PriceUSDFCForBytes(pricePerGB string, pieceBytes int64) (string, error) {
 	if perGB.Sign() < 0 {
 		return "", errors.New("price per GB must be non-negative")
 	}
-	if pieceBytes == 0 || perGB.Sign() == 0 {
+	gibs := GibsBilled(pieceBytes)
+	if gibs == 0 || perGB.Sign() == 0 {
 		return formatTokenValueQuoted(big.NewInt(0)), nil
 	}
-	num := new(big.Int).Mul(perGB, big.NewInt(pieceBytes))
-	priceUnits := new(big.Int).Quo(num, big.NewInt(GiB))
-	if priceUnits.Sign() == 0 {
-		// Non-zero piece at a positive rate must not round-trip to a zero settlement.
-		priceUnits = big.NewInt(1)
-	}
+	priceUnits := new(big.Int).Mul(perGB, big.NewInt(gibs))
 	return formatTokenValueQuoted(priceUnits), nil
 }
 

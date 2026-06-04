@@ -322,7 +322,7 @@ func TestBuildProxyHandlerRoutes(t *testing.T) {
 			t.Fatal(err)
 		}
 		if ch.Request.PriceUSDFC != wantPrice {
-			t.Fatalf("price_usdfc=%q want %q (13 bytes at 0.01 USDFC/GiB)", ch.Request.PriceUSDFC, wantPrice)
+			t.Fatalf("price_usdfc=%q want %q (13 bytes bills 1 GiB at 0.01 USDFC/GiB)", ch.Request.PriceUSDFC, wantPrice)
 		}
 	})
 

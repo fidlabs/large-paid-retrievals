@@ -5,6 +5,24 @@ import (
 	"testing"
 )
 
+func TestGibsBilled(t *testing.T) {
+	if GibsBilled(0) != 0 {
+		t.Fatal("zero bytes")
+	}
+	if GibsBilled(13) != 1 {
+		t.Fatal("partial GiB counts as one")
+	}
+	if GibsBilled(GiB) != 1 {
+		t.Fatal("exactly one GiB")
+	}
+	if GibsBilled(GiB+1) != 2 {
+		t.Fatal("one byte over one GiB bills two")
+	}
+	if GibsBilled(32<<30) != 32 {
+		t.Fatal("32 GiB")
+	}
+}
+
 func TestPriceUSDFCForBytes(t *testing.T) {
 	t.Run("32 GiB at 0.01 per GB", func(t *testing.T) {
 		got, err := PriceUSDFCForBytes("0.01", 32<<30)
@@ -23,26 +41,22 @@ func TestPriceUSDFCForBytes(t *testing.T) {
 			t.Fatalf("base units %s want %s", units, want)
 		}
 	})
-	t.Run("small piece round-trips base units", func(t *testing.T) {
-		const pieceBytes = 13
-		got, err := PriceUSDFCForBytes("0.01", pieceBytes)
+	t.Run("partial GiB bills one GiB", func(t *testing.T) {
+		got, err := PriceUSDFCForBytes("0.01", 13)
 		if err != nil {
 			t.Fatal(err)
 		}
-		units, err := ParseTokenToBaseUnits(got)
+		if got != "0.01" {
+			t.Fatalf("got %q want 0.01", got)
+		}
+	})
+	t.Run("one byte over GiB bills two", func(t *testing.T) {
+		got, err := PriceUSDFCForBytes("0.01", GiB+1)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if units.Sign() <= 0 {
-			t.Fatalf("expected positive settlement units, got %s from price %q", units, got)
-		}
-		perGB, _ := ParseTokenToBaseUnits("0.01")
-		want := new(big.Int).Quo(new(big.Int).Mul(perGB, big.NewInt(pieceBytes)), big.NewInt(GiB))
-		if want.Sign() == 0 {
-			want = big.NewInt(1)
-		}
-		if units.Cmp(want) != 0 {
-			t.Fatalf("round-trip units %s want %s", units, want)
+		if got != "0.02" {
+			t.Fatalf("got %q want 0.02", got)
 		}
 	})
 	t.Run("unknown size", func(t *testing.T) {
