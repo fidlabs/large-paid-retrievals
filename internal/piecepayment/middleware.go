@@ -6,7 +6,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -165,8 +164,7 @@ func parsePiecePath(path string) (string, bool) {
 func upstreamProbe(next http.Handler, r *http.Request) (exists bool, status int, pieceBytes int64) {
 	probeReq := r.Clone(r.Context())
 	probeReq.Method = http.MethodHead
-	probeReq.Header = r.Header.Clone()
-	probeReq.Header.Del("Authorization")
+	probeReq.Header = pricingProbeRequestHeaders(r.Header)
 	probeReq.ContentLength = 0
 	probeReq.Body = http.NoBody
 	probeReq.GetBody = nil
@@ -177,19 +175,7 @@ func upstreamProbe(next http.Handler, r *http.Request) (exists bool, status int,
 	if status < http.StatusOK || status >= http.StatusMultipleChoices {
 		return false, status, -1
 	}
-	return true, status, probeResponseTotalBytes(rec)
-}
-
-func probeResponseTotalBytes(rec *probeResponseWriter) int64 {
-	cl := strings.TrimSpace(rec.header.Get("Content-Length"))
-	if cl == "" {
-		return -1
-	}
-	n, err := strconv.ParseInt(cl, 10, 64)
-	if err != nil || n < 0 {
-		return -1
-	}
-	return n
+	return true, status, pricingProbePieceBytes(status, rec.header)
 }
 
 type probeResponseWriter struct {

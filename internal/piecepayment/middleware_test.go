@@ -18,6 +18,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/fidlabs/paid-retrievals/internal/mpp"
+	"github.com/fidlabs/paid-retrievals/internal/paymentheader"
 	pp "github.com/fidlabs/paid-retrievals/internal/piecepayment"
 	"github.com/fidlabs/paid-retrievals/internal/sqlitestore"
 )
@@ -633,6 +634,62 @@ func TestQuoteWithoutContentLengthUnavailable(t *testing.T) {
 	}
 	if mustProblemType(t, res) != "https://paymentauth.org/problems/payment-unavailable" {
 		t.Fatal("problem type")
+	}
+}
+
+func TestQuoteIgnoresClientRangeForPricing(t *testing.T) {
+	s := newTestStore(t)
+	defer s.Close()
+	const fullBytes = int64(1 << 30)
+	cfg := pp.Config{
+		PriceUSDFCPerGB: "0.01",
+		Store:           s,
+		FilecoinPay:     &mockPaySettler{},
+		QuotePayee0x:    testQuotePayee0x,
+		ClientQuery:     "client",
+	}
+	svc := pp.NewRetrievalService(cfg)
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			if r.Header.Get("Range") != "" {
+				w.Header().Set("Content-Length", "100")
+				w.WriteHeader(http.StatusPartialContent)
+				return
+			}
+			w.Header().Set("Content-Length", strconv.FormatInt(fullBytes, 10))
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	ts := httptest.NewServer(svc.PiecePaymentMiddleware(4096)(next))
+	defer ts.Close()
+
+	client := "0x3333333333333333333333333333333333333333"
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/piece/"+testPieceCID+"?client="+client, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Range", "bytes=0-99")
+	req.Header.Set("Accept-Encoding", "gzip")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusPaymentRequired {
+		t.Fatalf("status %d", res.StatusCode)
+	}
+	ch, err := mpp.ParseWWWAuthenticate(res.Header.Get("WWW-Authenticate"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPrice, err := paymentheader.PriceUSDFCForBytes("0.01", fullBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ch.Request.PriceUSDFC != wantPrice {
+		t.Fatalf("price_usdfc=%q want %q (full piece, not Range-sized probe)", ch.Request.PriceUSDFC, wantPrice)
 	}
 }
 
