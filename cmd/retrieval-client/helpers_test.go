@@ -87,7 +87,7 @@ func TestCollectCIDs(t *testing.T) {
 	if err := os.WriteFile(cidFile, []byte("bafy1\nbafy2,bafy3\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got, err := collectCIDs([]string{"bafy0,bafy0"}, cidFile, []string{" bafy4 "})
+	got, err := collectCIDs([]string{"bafy0"}, cidFile, []string{" bafy4 "})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,6 +99,13 @@ func TestCollectCIDs(t *testing.T) {
 		if got[i] != w {
 			t.Fatalf("index %d: got %q want %q", i, got[i], w)
 		}
+	}
+}
+
+func TestCollectCIDsRejectsDuplicate(t *testing.T) {
+	_, err := collectCIDs([]string{"bafy0", "bafy0"}, "", nil)
+	if err == nil || !strings.Contains(err.Error(), "duplicate CID") {
+		t.Fatalf("got %v", err)
 	}
 }
 

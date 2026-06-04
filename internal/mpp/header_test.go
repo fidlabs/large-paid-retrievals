@@ -323,6 +323,35 @@ func TestProofPayloadHTTPEncodeDecode(t *testing.T) {
 	}
 }
 
+func TestSetPaymentRequiredDoesNotWriteStatus(t *testing.T) {
+	ch := testChallenge()
+	rec := httptest.NewRecorder()
+	var wroteStatus bool
+	w := &statusTrackingWriter{
+		ResponseWriter: rec,
+		onWriteHeader:  func() { wroteStatus = true },
+	}
+	if err := SetPaymentRequired(w, ch); err != nil {
+		t.Fatal(err)
+	}
+	if wroteStatus {
+		t.Fatal("SetPaymentRequired must not call WriteHeader")
+	}
+	if rec.Header().Get("WWW-Authenticate") == "" {
+		t.Fatal("expected WWW-Authenticate")
+	}
+}
+
+type statusTrackingWriter struct {
+	http.ResponseWriter
+	onWriteHeader func()
+}
+
+func (w *statusTrackingWriter) WriteHeader(code int) {
+	w.onWriteHeader()
+	w.ResponseWriter.WriteHeader(code)
+}
+
 func TestWritePaymentRequired(t *testing.T) {
 	ch := testChallenge()
 	rec := httptest.NewRecorder()

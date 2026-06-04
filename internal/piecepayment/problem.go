@@ -41,6 +41,8 @@ func writeProblem(w http.ResponseWriter, status int, code, detail string) {
 		title = "Malformed Payment Credential"
 	case "invalid-challenge":
 		title = "Invalid Payment Challenge"
+	case "payment-unavailable":
+		title = "Payment Temporarily Unavailable"
 	}
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.WriteHeader(status)
@@ -58,5 +60,9 @@ func failPaymentRequired(w http.ResponseWriter, r *http.Request, deal *Deal, log
 	} else {
 		w.Header().Set("WWW-Authenticate", mpp.AuthScheme+` realm="`+mpp.RealmPrefix+r.Host+`", method="`+mpp.MethodID+`", intent="`+mpp.IntentID+`"`)
 	}
-	writeProblem(w, http.StatusPaymentRequired, code, detail)
+	status := http.StatusPaymentRequired
+	if code == "payment-unavailable" {
+		status = http.StatusServiceUnavailable
+	}
+	writeProblem(w, status, code, detail)
 }

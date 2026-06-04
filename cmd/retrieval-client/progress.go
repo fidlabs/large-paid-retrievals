@@ -22,6 +22,12 @@ const (
 	spinnerDownload
 )
 
+const (
+	spinnerInterval       = 80 * time.Millisecond
+	waitingForSPMessage   = "waiting for SP (payment settlement)"
+	waitingForRespMessage = "waiting for response"
+)
+
 // ProgressUI reports fetch phases, chain waits, and download progress to the user.
 type ProgressUI interface {
 	filpay.TxProgress
@@ -78,12 +84,8 @@ type lineProgress struct {
 	probeEndpointCnt int
 
 	// Download spinner (written/total updated from copy loop)
-	dlCID          string
-	dlWritten      int64
-	dlTotal        int64 // < 0 when Content-Length unknown
-	dlAwaitingHTTP bool
-	dlPaid         bool
-	dlRetries      int
+	dlCID string
+	dl    downloadProgressState
 }
 
 func newProgressUI(out io.Writer, noProgress bool) ProgressUI {
@@ -94,7 +96,7 @@ func newProgressUI(out io.Writer, noProgress bool) ProgressUI {
 	if !ok || !term.IsTerminal(int(f.Fd())) {
 		return noopProgress{}
 	}
-	return &lineProgress{out: out, dlTotal: -1}
+	return &lineProgress{out: out, dl: downloadProgressState{total: -1}}
 }
 
 func (p *lineProgress) Enabled() bool { return true }
@@ -177,20 +179,14 @@ func (p *lineProgress) DownloadAttempt(expectedTotal int64, retries int) {
 func (p *lineProgress) DownloadHeaders(cid string, totalBytes int64) {
 	p.spinMu.Lock()
 	p.dlCID = cid
-	p.dlAwaitingHTTP = false
-	if totalBytes >= 0 {
-		p.dlTotal = totalBytes
-	}
+	p.dl.onHeaders(totalBytes)
 	p.spinMu.Unlock()
 	p.redrawSpinnerLine()
 }
 
 func (p *lineProgress) DownloadProgress(_ string, written, total int64) {
 	p.spinMu.Lock()
-	p.dlWritten = written
-	if total >= 0 {
-		p.dlTotal = total
-	}
+	p.dl.onProgress(written, total)
 	p.spinMu.Unlock()
 }
 
@@ -200,7 +196,7 @@ func (p *lineProgress) DownloadFailed(string) {
 
 func (p *lineProgress) DownloadDone(cid, path string) {
 	p.spinMu.Lock()
-	retries := p.dlRetries
+	retries := p.dl.retries
 	p.spinMu.Unlock()
 	p.stopSpinner()
 	if retries > 0 {
@@ -212,24 +208,11 @@ func (p *lineProgress) DownloadDone(cid, path string) {
 
 func (p *lineProgress) initDownloadAttemptLocked(cid string, expectedTotal int64, paid bool, retries int) {
 	p.dlCID = cid
-	p.dlWritten = 0
-	p.dlTotal = -1
-	if expectedTotal >= 0 {
-		p.dlTotal = expectedTotal
-	}
-	p.dlAwaitingHTTP = true
-	p.dlPaid = paid
-	p.dlRetries = retries
+	p.dl.onStart(expectedTotal, paid, retries)
 }
 
 func (p *lineProgress) updateDownloadAttemptLocked(expectedTotal int64, retries int) {
-	p.dlAwaitingHTTP = true
-	p.dlRetries = retries
-	// Keep existing written/total to avoid spinner regressions between retries.
-	// Only backfill total from probe when unknown.
-	if p.dlTotal < 0 && expectedTotal >= 0 {
-		p.dlTotal = expectedTotal
-	}
+	p.dl.onAttempt(expectedTotal, retries)
 }
 
 func (p *lineProgress) startSpinner(kind spinnerKind, init func()) {
@@ -247,7 +230,7 @@ func (p *lineProgress) startSpinner(kind spinnerKind, init func()) {
 }
 
 func (p *lineProgress) runSpinner(done <-chan struct{}) {
-	ticker := time.NewTicker(80 * time.Millisecond)
+	ticker := time.NewTicker(spinnerInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -276,7 +259,7 @@ func (p *lineProgress) spinnerLineLocked(kind spinnerKind) string {
 	case spinnerProbe:
 		return formatProbeProgress(p.probePieceIdx, p.probePieceTotal, p.probeCID, p.probeDone, p.probeEndpointCnt)
 	case spinnerDownload:
-		return formatDownloadProgress(p.dlCID, p.dlWritten, p.dlTotal, p.dlAwaitingHTTP, p.dlPaid, p.dlRetries)
+		return formatDownloadProgress(p.dlCID, p.dl.written, p.dl.total, p.dl.awaitingHTTP, p.dl.paid, p.dl.retries)
 	default:
 		return ""
 	}
@@ -290,41 +273,11 @@ func formatProbeProgress(pieceIndex, pieceTotal int, cid string, completed, tota
 }
 
 func formatDownloadProgress(cid string, written, total int64, awaitingHTTP, paid bool, retries int) string {
-	if total >= 0 {
-		var line string
-		if total == 0 {
-			line = fmt.Sprintf("%s %s / %s (100%%)", shortCID(cid), formatBytes(written), formatBytes(total))
-		} else {
-			pct := float64(written) / float64(total) * 100
-			line = fmt.Sprintf("%s %s / %s (%.1f%%)", shortCID(cid), formatBytes(written), formatBytes(total), pct)
-		}
-		if awaitingHTTP && paid {
-			line += " — waiting for SP (payment settlement)"
-		}
-		if retries > 0 {
-			line += fmt.Sprintf(" [retry %d]", retries)
-		}
-		return line
+	status := formatDownloadStatus(written, total, awaitingHTTP, paid, retries)
+	if status == "" {
+		return ""
 	}
-	if awaitingHTTP {
-		if paid {
-			line := fmt.Sprintf("%s waiting for SP (payment settlement)", shortCID(cid))
-			if retries > 0 {
-				line += fmt.Sprintf(" [retry %d]", retries)
-			}
-			return line
-		}
-		line := fmt.Sprintf("%s waiting for response", shortCID(cid))
-		if retries > 0 {
-			line += fmt.Sprintf(" [retry %d]", retries)
-		}
-		return line
-	}
-	line := fmt.Sprintf("%s %s received", shortCID(cid), formatBytes(written))
-	if retries > 0 {
-		line += fmt.Sprintf(" [retry %d]", retries)
-	}
-	return line
+	return fmt.Sprintf("%s %s", shortCID(cid), status)
 }
 
 func (p *lineProgress) redrawSpinnerLine() {
@@ -333,7 +286,7 @@ func (p *lineProgress) redrawSpinnerLine() {
 	if p.spinDone == nil || p.spinKind != spinnerDownload {
 		return
 	}
-	line := formatDownloadProgress(p.dlCID, p.dlWritten, p.dlTotal, p.dlAwaitingHTTP, p.dlPaid, p.dlRetries)
+	line := formatDownloadProgress(p.dlCID, p.dl.written, p.dl.total, p.dl.awaitingHTTP, p.dl.paid, p.dl.retries)
 	if line == "" {
 		return
 	}
@@ -391,4 +344,83 @@ func formatBytes(n int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+type downloadProgressState struct {
+	written      int64
+	total        int64 // < 0 when Content-Length unknown
+	awaitingHTTP bool
+	paid         bool
+	retries      int
+}
+
+func (s *downloadProgressState) onStart(expectedTotal int64, paid bool, retries int) {
+	s.written = 0
+	s.total = -1
+	if expectedTotal >= 0 {
+		s.total = expectedTotal
+	}
+	s.awaitingHTTP = true
+	s.paid = paid
+	s.retries = retries
+}
+
+func (s *downloadProgressState) onAttempt(expectedTotal int64, retries int) {
+	s.retries = retries
+	// Only show HTTP-wait text when no bytes received yet; mid-download retries keep progress visible.
+	if s.written == 0 {
+		s.awaitingHTTP = true
+	}
+	// Keep existing written/total to avoid spinner regressions between retries.
+	// Only backfill total from probe when unknown.
+	if s.total < 0 && expectedTotal >= 0 {
+		s.total = expectedTotal
+	}
+}
+
+func (s *downloadProgressState) onHeaders(total int64) {
+	s.awaitingHTTP = false
+	if total >= 0 {
+		s.total = total
+	}
+}
+
+func (s *downloadProgressState) onProgress(written, total int64) {
+	s.written = written
+	if total >= 0 {
+		s.total = total
+	}
+}
+
+func formatDownloadStatus(written, total int64, awaitingHTTP, paid bool, retries int) string {
+	if total >= 0 {
+		line := formatByteProgress(written, total)
+		if awaitingHTTP && paid {
+			line += " — " + waitingForSPMessage
+		}
+		return withRetrySuffix(line, retries)
+	}
+	if awaitingHTTP {
+		status := waitingForRespMessage
+		if paid {
+			status = waitingForSPMessage
+		}
+		return withRetrySuffix(status, retries)
+	}
+	return withRetrySuffix(fmt.Sprintf("%s received", formatBytes(written)), retries)
+}
+
+func formatByteProgress(written, total int64) string {
+	if total == 0 {
+		return fmt.Sprintf("%s / %s (100%%)", formatBytes(written), formatBytes(total))
+	}
+	pct := float64(written) / float64(total) * 100
+	return fmt.Sprintf("%s / %s (%.1f%%)", formatBytes(written), formatBytes(total), pct)
+}
+
+func withRetrySuffix(line string, retries int) string {
+	if retries <= 0 {
+		return line
+	}
+	return fmt.Sprintf("%s [retry %d]", line, retries)
 }

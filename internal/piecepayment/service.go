@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -87,9 +88,17 @@ type Config struct {
 	Store        DealStore
 }
 
+type settlementLockEntry struct {
+	mu   sync.Mutex
+	refs int
+}
+
 type RetrievalService struct {
 	cfg    Config
 	logger *slog.Logger
+
+	settleMu    sync.Mutex
+	settleLocks map[string]*settlementLockEntry
 }
 
 func NewRetrievalService(cfg Config) *RetrievalService {
@@ -100,7 +109,11 @@ func NewRetrievalService(cfg Config) *RetrievalService {
 	if cfg.Store == nil {
 		panic("middleware: ServiceConfig.Store is required")
 	}
-	return &RetrievalService{cfg: cfg, logger: logger}
+	return &RetrievalService{
+		cfg:         cfg,
+		logger:      logger,
+		settleLocks: make(map[string]*settlementLockEntry),
+	}
 }
 
 func (s *RetrievalService) IssueQuote(r *http.Request, cid string) (*QuoteOutcome, error) {
@@ -187,9 +200,11 @@ func (s *RetrievalService) AuthorizeAndSettle(r *http.Request, cid, rawHdr strin
 	}
 	payer := common.HexToAddress(strings.TrimSpace(deal.Client))
 	payeeAddr := common.HexToAddress(strings.TrimSpace(deal.Payee0x))
+	unlock := s.lockSettlementPair(payer, payeeAddr)
+	defer unlock()
 	txHash, err := s.cfg.FilecoinPay.SettleIfFunded(r.Context(), payer, payeeAddr, priceBaseUnits)
 	if err != nil {
-		return nil, &PaymentRequiredError{Deal: deal, Code: "payment-insufficient", Detail: "Filecoin Pay rail or available balance is insufficient for settlement"}
+		return nil, settlementPaymentRequiredError(deal, err)
 	}
 	s.logger.Info("filecoin pay rail settled", "deal_uuid", deal.DealUUID, "settle_tx", txHash, "payer", payer.Hex(), "payee", payeeAddr.Hex())
 
@@ -206,7 +221,7 @@ func issueChallengeForDeal(w http.ResponseWriter, r *http.Request, deal *Deal, l
 		return
 	}
 	challenge := buildChallenge(r.Host, deal.DealUUID, deal.CID, deal.PriceUSDFC, deal.Payee0x)
-	if err := mpp.WritePaymentRequired(w, challenge); err != nil {
+	if err := mpp.SetPaymentRequired(w, challenge); err != nil {
 		logger.Error("failed to write payment challenge", "deal_uuid", challenge.ID, "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
@@ -285,4 +300,43 @@ func sameHexAddress(a, b string) bool {
 		return false
 	}
 	return common.HexToAddress(a) == common.HexToAddress(b)
+}
+
+func (s *RetrievalService) lockSettlementPair(payer, payee common.Address) func() {
+	key := payer.Hex() + "|" + payee.Hex()
+	s.settleMu.Lock()
+	entry, ok := s.settleLocks[key]
+	if !ok {
+		entry = &settlementLockEntry{}
+		s.settleLocks[key] = entry
+	}
+	entry.refs++
+	s.settleMu.Unlock()
+
+	entry.mu.Lock()
+	return func() {
+		entry.mu.Unlock()
+		s.settleMu.Lock()
+		entry.refs--
+		if entry.refs == 0 {
+			delete(s.settleLocks, key)
+		}
+		s.settleMu.Unlock()
+	}
+}
+
+func settlementPaymentRequiredError(deal *Deal, err error) *PaymentRequiredError {
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "insufficient") || strings.Contains(msg, "no active token rail") || strings.Contains(msg, "no funds") {
+		return &PaymentRequiredError{
+			Deal:   deal,
+			Code:   "payment-insufficient",
+			Detail: "Filecoin Pay rail or available balance is insufficient for settlement",
+		}
+	}
+	return &PaymentRequiredError{
+		Deal:   deal,
+		Code:   "payment-unavailable",
+		Detail: "Payment settlement is temporarily unavailable; please retry",
+	}
 }

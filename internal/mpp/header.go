@@ -249,13 +249,23 @@ func DecodeAuthorization(rawAuth string) (*Credential, error) {
 	return &c, nil
 }
 
-func WritePaymentRequired(w http.ResponseWriter, challenge Challenge) error {
+// SetPaymentRequired sets Cache-Control and WWW-Authenticate for a payment challenge
+// without writing the response status. Callers that embed the challenge in a problem
+// response must write the status themselves.
+func SetPaymentRequired(w http.ResponseWriter, challenge Challenge) error {
 	v, err := challenge.WWWAuthenticateValue()
 	if err != nil {
 		return err
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("WWW-Authenticate", v)
+	return nil
+}
+
+func WritePaymentRequired(w http.ResponseWriter, challenge Challenge) error {
+	if err := SetPaymentRequired(w, challenge); err != nil {
+		return err
+	}
 	w.WriteHeader(http.StatusPaymentRequired)
 	return nil
 }

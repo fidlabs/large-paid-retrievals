@@ -6,11 +6,12 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestLineProgressTxLifecycle(t *testing.T) {
 	var buf bytes.Buffer
-	ui := &lineProgress{out: &buf, dlTotal: -1}
+	ui := &lineProgress{out: &buf, dl: downloadProgressState{total: -1}}
 	ui.TxSubmitted("createRail", "0xabcdef1234567890abcdef1234567890abcdef12")
 	time.Sleep(120 * time.Millisecond)
 	ui.TxConfirmed("createRail", "0xabcdef1234567890abcdef1234567890abcdef12", 28*time.Second, "12345")
@@ -41,7 +42,7 @@ func lastSpinnerRedraw(out string) string {
 
 func TestDownloadHeadersReplacesWaitingSpinner(t *testing.T) {
 	var buf bytes.Buffer
-	ui := &lineProgress{out: &buf, dlTotal: -1}
+	ui := &lineProgress{out: &buf, dl: downloadProgressState{total: -1}}
 	const cid = "bafkreidcbkgxoddug6vawnjrzb4aaublfn46sd2rvxnykbxkkarke7y76e"
 	ui.DownloadStart(cid, "http://127.0.0.1/piece", -1, true, 0)
 	time.Sleep(50 * time.Millisecond)
@@ -62,7 +63,7 @@ func TestDownloadHeadersReplacesWaitingSpinner(t *testing.T) {
 
 func TestLineProgressPaidDownloadUnknownTotal(t *testing.T) {
 	var buf bytes.Buffer
-	ui := &lineProgress{out: &buf, dlTotal: -1}
+	ui := &lineProgress{out: &buf, dl: downloadProgressState{total: -1}}
 	const cid = "bafkreidcbkgxoddug6vawnjrzb4aaublfn46sd2rvxnykbxkkarke7y76e"
 	ui.DownloadStart(cid, "http://127.0.0.1/piece", -1, true, 0)
 	ui.DownloadHeaders(cid, -1)
@@ -80,7 +81,7 @@ func TestLineProgressPaidDownloadUnknownTotal(t *testing.T) {
 
 func TestLineProgressDownloadFailed(t *testing.T) {
 	var buf bytes.Buffer
-	ui := &lineProgress{out: &buf, dlTotal: -1}
+	ui := &lineProgress{out: &buf, dl: downloadProgressState{total: -1}}
 	const cid = "bafkreidcbkgxoddug6vawnjrzb4aaublfn46sd2rvxnykbxkkarke7y76e"
 	ui.DownloadStart(cid, "http://127.0.0.1/piece", -1, true, 0)
 	ui.DownloadFailed(cid)
@@ -91,7 +92,7 @@ func TestLineProgressDownloadFailed(t *testing.T) {
 
 func TestLineProgressDownloadSpinner(t *testing.T) {
 	var buf bytes.Buffer
-	ui := &lineProgress{out: &buf, dlTotal: -1}
+	ui := &lineProgress{out: &buf, dl: downloadProgressState{total: -1}}
 	ui.DownloadStart("bafkreidcbkgxoddug6vawnjrzb4aaublfn46sd2rvxnykbxkkarke7y76e", "http://127.0.0.1/piece", -1, true, 0)
 	ui.DownloadHeaders("bafkreidcbkgxoddug6vawnjrzb4aaublfn46sd2rvxnykbxkkarke7y76e", 32<<30)
 	ui.DownloadProgress("bafkreidcbkgxoddug6vawnjrzb4aaublfn46sd2rvxnykbxkkarke7y76e", 1<<30, 32<<30)
@@ -110,7 +111,7 @@ func TestLineProgressDownloadSpinner(t *testing.T) {
 
 func TestLineProgressProbeSpinner(t *testing.T) {
 	var buf bytes.Buffer
-	ui := &lineProgress{out: &buf, dlTotal: -1}
+	ui := &lineProgress{out: &buf, dl: downloadProgressState{total: -1}}
 	ui.ProbeEndpointsStart(1, 2, "bafkreidcbkgxoddug6vawnjrzb4aaublfn46sd2rvxnykbxkkarke7y76e", 4)
 	ui.ProbeEndpointsProgress(1, 2, "bafkreidcbkgxoddug6vawnjrzb4aaublfn46sd2rvxnykbxkkarke7y76e", 2, 4)
 	time.Sleep(120 * time.Millisecond)
@@ -172,7 +173,7 @@ func TestFormatDownloadProgress(t *testing.T) {
 
 func TestDownloadStartShowsProbeTotalWhileWaiting(t *testing.T) {
 	var buf bytes.Buffer
-	ui := &lineProgress{out: &buf, dlTotal: -1}
+	ui := &lineProgress{out: &buf, dl: downloadProgressState{total: -1}}
 	const cid = "bafkreidcbkgxoddug6vawnjrzb4aaublfn46sd2rvxnykbxkkarke7y76e"
 	const probeTotal = 8 << 30
 	ui.DownloadStart(cid, "http://127.0.0.1/piece", probeTotal, true, 0)
@@ -195,9 +196,41 @@ func TestFormatDownloadProgressIncludesRetryCount(t *testing.T) {
 	}
 }
 
+func TestDownloadProgressStateOnAttemptMidDownload(t *testing.T) {
+	var s downloadProgressState
+	s.onStart(32<<30, true, 0)
+	s.onHeaders(32 << 30)
+	s.onProgress(1<<30, 32<<30)
+	s.onAttempt(32<<30, 2)
+
+	if s.awaitingHTTP {
+		t.Fatal("mid-download retry should not revert to HTTP wait")
+	}
+	got := formatDownloadStatus(s.written, s.total, s.awaitingHTTP, s.paid, s.retries)
+	if strings.Contains(got, "waiting for SP") {
+		t.Fatalf("should keep byte progress visible: %q", got)
+	}
+	if !strings.Contains(got, "1.0 GiB / 32.0 GiB") || !strings.Contains(got, "[retry 2]") {
+		t.Fatalf("expected progress with retry suffix: %q", got)
+	}
+}
+
+func TestDownloadProgressStateOnAttemptBeforeBytes(t *testing.T) {
+	var s downloadProgressState
+	s.onStart(-1, true, 0)
+	s.onAttempt(-1, 1)
+	if !s.awaitingHTTP {
+		t.Fatal("pre-body retry should show HTTP wait")
+	}
+	got := formatDownloadStatus(s.written, s.total, s.awaitingHTTP, s.paid, s.retries)
+	if !strings.Contains(got, "waiting for SP") || !strings.Contains(got, "[retry 1]") {
+		t.Fatalf("expected wait line with retry: %q", got)
+	}
+}
+
 func TestDownloadAttemptUpdatesSpinnerWithoutNewDownloadLine(t *testing.T) {
 	var buf bytes.Buffer
-	ui := &lineProgress{out: &buf, dlTotal: -1}
+	ui := &lineProgress{out: &buf, dl: downloadProgressState{total: -1}}
 	const cid = "bafkreidcbkgxoddug6vawnjrzb4aaublfn46sd2rvxnykbxkkarke7y76e"
 	ui.DownloadStart(cid, "http://127.0.0.1/piece", 8<<30, true, 0)
 	time.Sleep(80 * time.Millisecond)
@@ -226,6 +259,21 @@ func TestNoopProgressDisabled(t *testing.T) {
 	}
 	if newProgressUI(os.Stderr, true).Enabled() {
 		t.Fatal("--no-progress should disable progress")
+	}
+}
+
+func TestTruncateRunes(t *testing.T) {
+	const emoji = "é🎉"
+	long := strings.Repeat(emoji, 60)
+	got := truncateRunes(long, 96)
+	if !strings.HasSuffix(got, "...") {
+		t.Fatalf("expected suffix: %q", got)
+	}
+	if utf8.ValidString(strings.TrimSuffix(got, "...")) == false {
+		t.Fatalf("invalid UTF-8 after truncate: %q", got)
+	}
+	if len([]rune(strings.TrimSuffix(got, "..."))) != 96 {
+		t.Fatalf("rune count = %d", len([]rune(strings.TrimSuffix(got, "..."))))
 	}
 }
 

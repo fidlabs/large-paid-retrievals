@@ -281,6 +281,64 @@ func TestPieceAuthFromContext(t *testing.T) {
 	}
 }
 
+func TestLockSettlementPairSerializesSamePair(t *testing.T) {
+	svc := NewRetrievalService(Config{
+		Store:       &mockDealStore{},
+		FilecoinPay: stubSettler{},
+	})
+	payer := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	payee := common.HexToAddress("0x2222222222222222222222222222222222222222")
+
+	unlock1 := svc.lockSettlementPair(payer, payee)
+
+	acquired := make(chan struct{})
+	release := make(chan struct{})
+	go func() {
+		unlock2 := svc.lockSettlementPair(payer, payee)
+		close(acquired)
+		<-release
+		unlock2()
+	}()
+
+	select {
+	case <-acquired:
+		t.Fatal("second lock should block while first is held")
+	case <-time.After(200 * time.Millisecond):
+		// expected blocked
+	}
+
+	unlock1()
+	select {
+	case <-acquired:
+	case <-time.After(1 * time.Second):
+		t.Fatal("second lock did not acquire after first released")
+	}
+	close(release)
+}
+
+func TestLockSettlementPairRemovesIdleEntry(t *testing.T) {
+	svc := NewRetrievalService(Config{
+		Store:       &mockDealStore{},
+		FilecoinPay: stubSettler{},
+	})
+	payer := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	payee := common.HexToAddress("0x2222222222222222222222222222222222222222")
+
+	unlock := svc.lockSettlementPair(payer, payee)
+	svc.settleMu.Lock()
+	if len(svc.settleLocks) != 1 {
+		t.Fatalf("expected one lock entry while held, got %d", len(svc.settleLocks))
+	}
+	svc.settleMu.Unlock()
+
+	unlock()
+	svc.settleMu.Lock()
+	defer svc.settleMu.Unlock()
+	if len(svc.settleLocks) != 0 {
+		t.Fatalf("expected lock table empty after unlock, got %d entries", len(svc.settleLocks))
+	}
+}
+
 func TestIssueQuoteBadClient(t *testing.T) {
 	svc, _, _ := testService(t, &mockDealStore{}, stubSettler{})
 	req := httptest.NewRequest(http.MethodGet, "http://h/piece/"+testPieceCID+"?client=not-an-address", nil)
@@ -396,6 +454,17 @@ func TestAuthorizeAndSettleErrors(t *testing.T) {
 		}
 	})
 
+	t.Run("settlement transient failure", func(t *testing.T) {
+		svc2, pk2, client2 := testService(t, store, stubSettler{err: errors.New("nonce too low")})
+		q2, _ := svc2.IssueQuote(issueQuoteRequest(t, host, testPieceCID, client2), testPieceCID)
+		raw := buildProof(t, pk2, q2.Challenge, client2, testPieceCID, host, "n-pay-2", time.Now().Add(time.Minute).Unix())
+		_, err := svc2.AuthorizeAndSettle(paidRequest(t, host, testPieceCID, raw), testPieceCID, raw)
+		var pe *PaymentRequiredError
+		if !errors.As(err, &pe) || pe.Code != "payment-unavailable" {
+			t.Fatalf("got %v", err)
+		}
+	})
+
 	t.Run("replay nonce", func(t *testing.T) {
 		svc3, pk3, client3 := testService(t, &mockDealStore{}, stubSettler{})
 		q3, _ := svc3.IssueQuote(issueQuoteRequest(t, host, testPieceCID, client3), testPieceCID)
@@ -434,5 +503,29 @@ func TestFailPaymentRequiredWithoutDeal(t *testing.T) {
 	}
 	if !strings.Contains(rec.Header().Get("WWW-Authenticate"), mpp.AuthScheme) {
 		t.Fatal("expected authenticate header")
+	}
+}
+
+func TestFailPaymentUnavailableServiceUnavailable(t *testing.T) {
+	deal := &Deal{
+		DealUUID:   "deal-unavail",
+		Client:     "f1client",
+		CID:        testPieceCID,
+		PriceUSDFC: "0.1",
+		Payee0x:    "0x2222222222222222222222222222222222222222",
+	}
+	for name, dealArg := range map[string]*Deal{"no deal": nil, "with deal": deal} {
+		t.Run(name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/piece/"+testPieceCID, nil)
+			req.Host = "example.com"
+			failPaymentRequired(rec, req, dealArg, nil, "payment-unavailable", "retry later")
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status %d", rec.Code)
+			}
+			if dealArg != nil && rec.Header().Get("WWW-Authenticate") == "" {
+				t.Fatal("expected WWW-Authenticate challenge with deal")
+			}
+		})
 	}
 }

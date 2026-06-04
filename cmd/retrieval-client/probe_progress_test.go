@@ -74,7 +74,7 @@ func TestProbeCallbackFor(t *testing.T) {
 		t.Fatal("disabled UI should not install probe callback")
 	}
 	var buf bytes.Buffer
-	ui := &lineProgress{out: &buf, dlTotal: -1}
+	ui := &lineProgress{out: &buf, dl: downloadProgressState{total: -1}}
 	cb := probeCallbackFor(ui, 2, 5)
 	if cb == nil {
 		t.Fatal("expected callback")
