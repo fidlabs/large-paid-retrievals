@@ -168,18 +168,17 @@ Clients using `retrieval-client` discover your proxy URL and pay in USDFC; you r
 ### Architecture
 
 ```text
-Internet
-   |
-   v
-Client --GET /piece/<cid>--> sp-proxy (0.0.0.0:8787)
-                                   |
-                                   | loopback only
-                                   v
-                            upstream Curio/Boost (127.0.0.1:8788)
-                                   Content-Length on HEAD
-                +-- 402 quote (price_usdfc)
-                +-- verify MPP + SettleIfFunded (USDFC)
-                +-- proxy full GET after settle
+Client                          SP host
+  |                                 |
+  | GET /piece/<cid>                |
+  |----------- Internet -----------> sp-proxy (0.0.0.0:8787)
+  |                                 |  +-- 402 quote (price_usdfc)
+  |                                 |  +-- verify MPP + SettleIfFunded (USDFC)
+  |                                 |  +-- proxy full GET after settle
+  |                                 | loopback only
+  |                                 v
+  |                           Curio/Boost (127.0.0.1:8788)
+  |                                 Content-Length on HEAD
 ```
 
 ### Network layout (recommended)
@@ -194,14 +193,15 @@ Run **two HTTP listeners** on the SP host:
 **Do not** expose Curio/Boost on a public IP or `0.0.0.0`. Clients should only reach your **`sp-proxy`** URL (the address you publish for discovery). Upstream stays on loopback so piece data is only served after settlement.
 
 ```text
-Internet clients
+Client (retrieval-client)
        |
+       |  Internet
        v
-  sp-proxy  :8787  (0.0.0.0 or your public IP)
+sp-proxy :8787 (0.0.0.0, SP host)
        |
        | 127.0.0.1 only
        v
-  Curio / Boost  :8788  (localhost)
+Curio / Boost :8788 (localhost, same host)
 ```
 
 Configure Curio/Boost to listen on **`127.0.0.1:<port>`**, then point `sp-proxy` at it with `--upstream-host 127.0.0.1` and `--upstream-port <port>`.
