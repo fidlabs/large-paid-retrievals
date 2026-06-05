@@ -480,7 +480,7 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 	c.Flags().IntVar(&expiresIn, "expires-in-sec", 120, "Header expiry interval in seconds")
 	c.Flags().BoolVar(&verbose, "verbose", false, "Print detailed probe/download progress (stdout) and retrieval step logs to stderr ([retrieval-client])")
 	c.Flags().BoolVar(&payDebug, "pay-debug", false, "Log Filecoin Pay chain operations to stderr ([filpay-client])")
-	c.Flags().StringVar(&payRPCURL, "pay-rpc-url", getenv("SP_PROXY_PAY_RPC_URL", "https://api.calibration.node.glif.io/rpc/v1"), "Filecoin JSON-RPC URL: FVM payments + Lotus StateMinerInfo for discovery")
+	c.Flags().StringVar(&payRPCURL, "pay-rpc-url", getenv("SP_PROXY_PAY_RPC_URL", "https://api.node.glif.io/rpc/v1"), "Filecoin JSON-RPC URL: FVM payments + Lotus StateMinerInfo for discovery")
 	c.Flags().StringVar(&payPaymentsAddress, "pay-payments-address", getenv("SP_PROXY_PAY_PAYMENTS_ADDRESS", ""), "Filecoin Pay payments contract (0x); empty uses chain default")
 	return c
 }
@@ -712,7 +712,7 @@ func cmdRailCheck(keyOpts *filpayKeyOpts) *cobra.Command {
 	c.Flags().StringArrayVar(&payees, "payee", nil, "Explicit payee 0x address to check (repeatable)")
 	c.Flags().StringVar(&requiredUSDFC, "required-usdfc", "", "Optional required USDFC amount per --payee when no challenges are used")
 	c.Flags().BoolVar(&payDebug, "pay-debug", false, "Log Filecoin Pay operation details to stderr ([filpay-client])")
-	c.Flags().StringVar(&payRPCURL, "pay-rpc-url", getenv("SP_PROXY_PAY_RPC_URL", "https://api.calibration.node.glif.io/rpc/v1"), "Filecoin JSON-RPC URL: FVM payments + Lotus StateMinerInfo for discovery")
+	c.Flags().StringVar(&payRPCURL, "pay-rpc-url", getenv("SP_PROXY_PAY_RPC_URL", "https://api.node.glif.io/rpc/v1"), "Filecoin JSON-RPC URL: FVM payments + Lotus StateMinerInfo for discovery")
 	c.Flags().StringVar(&payPaymentsAddress, "pay-payments-address", getenv("SP_PROXY_PAY_PAYMENTS_ADDRESS", ""), "Filecoin Pay payments contract (0x); empty uses chain default")
 	return c
 }

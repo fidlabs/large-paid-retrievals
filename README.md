@@ -27,11 +27,11 @@ Paid pieces are quoted **up front** (total USDFC in the `402` challenge). You pa
 
 ### What you need
 
-1. **Go 1.22+** (or a pre-built `retrieval-client` binary).
+1. **Go 1.26.4+** or a pre-built `retrieval-client` binary.
 2. A **client private key** (`client.key`) — secp256k1 hex; see [Generate keys](#generate-keys).
-3. **FIL** on Calibration (or your network) for Filecoin Pay transaction gas.
+3. **FIL** on your network (mainnet by default) for Filecoin Pay transaction gas.
 4. **USDFC** in the client wallet for paid retrievals (amount depends on piece sizes and SP rates).
-5. A **JSON-RPC endpoint** (`--pay-rpc-url`; Calibration default in examples below).
+5. A **JSON-RPC endpoint** (`--pay-rpc-url`; mainnet default `https://api.node.glif.io/rpc/v1`).
 
 Fund test wallets: [Beryx FIL faucet](https://beryx.io/faucet), [Calibnet USDFC faucet](https://forest-explorer.chainsafe.dev/faucet/calibnet_usdfc). Your `0x` address appears in client logs if funding is missing.
 
@@ -42,7 +42,6 @@ go build -o bin/retrieval-client ./cmd/retrieval-client
 
 ./bin/retrieval-client fetch \
   --filpay-private-key-file ./client.key \
-  --pay-rpc-url "https://api.calibration.node.glif.io/rpc/v1" \
   --cid baga6ea4seaq... \
   --out-dir ./downloads
 ```
@@ -76,6 +75,8 @@ Use `--yes` to skip the funding confirmation prompt (scripts/CI).
   --sp-base-url "https://my-sp.example.com:8787" \
   --cid baga6ea4seaq...
 ```
+
+For a **local test proxy** funded on Calibration, add `--pay-rpc-url "https://api.calibration.node.glif.io/rpc/v1"`.
 
 ### Quote before you pay
 
@@ -132,7 +133,7 @@ Paid SPs bill in **USDFC per GiB** (binary `2^30` bytes), **rounded up** to whol
 - **Insufficient USDFC / FIL** — fund client wallet; check logs for `0x` address and rail IDs.
 - **No endpoints found** — CID may not be advertised on-chain, or RPC/discovery failed; try `--sp-base-url` if you know a working URL.
 - **Paid fetch fails after quote** — run `rail-check`; ensure operator approval and rail balance.
-- **Verify settlement** — note rail ID from logs; view on [Filecoin Pay (Calibration)](https://pay.filecoin.cloud/calibration/rails/) e.g. `https://pay.filecoin.cloud/calibration/rails/16949`.
+- **Verify settlement** — note rail ID from logs; view on [Filecoin Pay](https://pay.filecoin.cloud/) (mainnet: `/rails/<id>`; Calibration: `/calibration/rails/<id>`).
 
 ---
 
@@ -140,7 +141,7 @@ Paid SPs bill in **USDFC per GiB** (binary `2^30` bytes), **rounded up** to whol
 
 ### What you provide
 
-SPs store deal **pieces** and serve them over HTTP (typically Curio, Boost, or nginx) at:
+SPs store deal **pieces** and serve them over HTTP (typically Curio or Boost) at:
 
 ```text
 GET /piece/<piece-cid>
@@ -152,7 +153,7 @@ GET /piece/<piece-cid>
 2. Verifies the client’s MPP credential and **settles once** on Filecoin Pay.
 3. **Proxies** the upstream `GET` only after settlement succeeds.
 
-Clients using `retrieval-client` discover your proxy URL (or use `--sp-base-url` you publish) and pay in USDFC; you receive settlement to your configured payee address.
+Clients using `retrieval-client` discover your proxy URL and pay in USDFC; you receive settlement to your configured payee address.
 
 ### What you need
 
@@ -165,8 +166,8 @@ Clients using `retrieval-client` discover your proxy URL (or use `--sp-base-url`
 ### Architecture
 
 ```text
-Client  --GET /piece/<cid>-->  sp-proxy  --GET/HEAD-->  upstream (Curio / Boost / nginx)
-                |                                      Content-Length on HEAD
+Client  --GET /piece/<cid>-->  sp-proxy  --GET/HEAD-->  upstream (Curio / Boost)
+                |                                       Content-Length on HEAD
                 +-- 402 quote (price_usdfc)
                 +-- verify MPP + SettleIfFunded (USDFC)
                 +-- proxy full GET after settle
@@ -183,11 +184,10 @@ go build -o bin/sp-proxy ./cmd/sp-proxy
   --price-usdfc-per-gb 0.01 \
   --upstream-host 127.0.0.1 \
   --upstream-port 8788 \
-  --pay-rpc-url "https://api.calibration.node.glif.io/rpc/v1" \
   --pay-private-key-file ./sp.key
 ```
 
-Publish your proxy base URL to clients (e.g. `https://retrieval.my-sp.example:8787`). Clients probe `https://…/piece/<cid>`.
+Clients probe `https://…/piece/<cid>`.
 
 ### Pricing
 
@@ -220,7 +220,7 @@ Optional: expose **`HEAD`** on the public proxy path for client size probes (the
 
 ### Monitoring payments
 
-After a successful retrieval, logs include the Filecoin Pay **rail ID** and settle tx. View rail status on [pay.filecoin.cloud](https://pay.filecoin.cloud/) (Calibration: `/calibration/rails/<id>`).
+After a successful retrieval, logs include the Filecoin Pay **rail ID** and settle tx. View rail status on [pay.filecoin.cloud](https://pay.filecoin.cloud/) (mainnet: `/rails/<id>`; Calibration: `/calibration/rails/<id>`).
 
 Wire format and security model: [docs/mpp-filecoinpay.md](docs/mpp-filecoinpay.md).
 
@@ -256,8 +256,8 @@ task ci            # fmt, vet, lint, test, vuln
 
 **E2E (shell):**
 
-- `task test:e2e:dicovery` — two CIDs from public sp-tool API, mainnet fetch (free paths).
-- `task test:e2e:filpay` — local nginx piece + `sp-proxy` on `:8787`, paid fetch on Calibration (`0.0003` USDFC/GiB).
+- `task test:e2e:discovery` — two CIDs from public sp-tool API, mainnet fetch (free paths).
+- `task test:e2e:filpay` — local nginx piece + envoy router + `sp-proxy` on `:8787`, paid fetch on Calibration (`0.0003` USDFC/GiB).
 
 Local piece server for tests: `task nginx:piece` (32 GiB sparse dummy `/piece/<cid>`).
 
@@ -271,7 +271,7 @@ Implementers and reviewers should read [docs/mpp-filecoinpay.md](docs/mpp-fileco
 |----------|---------|---------|
 | `FILPAY_PRIVATE_KEY_ENV` | retrieval-client | Env var name for client key (default `FILPAY_PRIVATE_KEY`) |
 | `SP_PROXY_PAY_PRIVATE_KEY_ENV` | sp-proxy | Env var name for settler key |
-| `SP_PROXY_PAY_RPC_URL` | sp-proxy | Default FVM RPC if flag unset |
+| `SP_PROXY_PAY_RPC_URL` | both CLIs | Default FVM RPC if flag unset (mainnet: `https://api.node.glif.io/rpc/v1`) |
 | `SP_PROXY_PAY_PAYMENTS_ADDRESS` | sp-proxy | Optional payments contract |
 | `SP_PROXY_PAY_PAYEE_ADDRESS` | sp-proxy | Optional default payee |
 | `SP_PROXY_UPSTREAM_HOST` / `SP_PROXY_UPSTREAM_PORT` | sp-proxy | Default upstream |
@@ -333,4 +333,4 @@ price_usdfc = price_usdfc_per_gib × billed_gib
 
 HTTP payment flow, challenge JSON, and settlement semantics: **[docs/mpp-filecoinpay.md](docs/mpp-filecoinpay.md)**.
 
-**Validation:** confirm rail IDs in client/proxy logs against [Filecoin Pay rails dashboard](https://pay.filecoin.cloud/) (Calibration example: `https://pay.filecoin.cloud/calibration/rails/<RAIL_ID>`).
+**Validation:** confirm rail IDs in client/proxy logs against [Filecoin Pay rails dashboard](https://pay.filecoin.cloud/) (mainnet: `https://pay.filecoin.cloud/rails/<RAIL_ID>`; Calibration: `https://pay.filecoin.cloud/calibration/rails/<RAIL_ID>`).

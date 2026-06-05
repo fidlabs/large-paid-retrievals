@@ -35,7 +35,7 @@ func root() *cobra.Command {
 	c.Flags().IntVar(&settings.MaxSkewSec, "max-clock-skew-sec", 30, "Allowed clock skew in seconds for header expiry")
 	c.Flags().BoolVar(&settings.Verbose, "verbose", false, "Enable debug-level structured logs")
 
-	c.Flags().StringVar(&settings.PayRPCURL, "pay-rpc-url", getenv("SP_PROXY_PAY_RPC_URL", "https://api.calibration.node.glif.io/rpc/v1"), "Filecoin RPC (FVM) for payments contract")
+	c.Flags().StringVar(&settings.PayRPCURL, "pay-rpc-url", getenv("SP_PROXY_PAY_RPC_URL", "https://api.node.glif.io/rpc/v1"), "Filecoin RPC (FVM) for payments contract")
 	c.Flags().StringVar(&settings.PayPrivateKey, "pay-private-key", "", "Hex private key for settleRail txs (prefer env or file)")
 	c.Flags().StringVar(&settings.PayPrivateKeyFile, "pay-private-key-file", "", "File containing hex private key for settleRail")
 	c.Flags().StringVar(&settings.PayPrivateKeyEnv, "pay-private-key-env", getenv("SP_PROXY_PAY_PRIVATE_KEY_ENV", "SP_PROXY_PAY_PRIVATE_KEY"), "Env var for settleRail private key")
