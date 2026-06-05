@@ -165,9 +165,7 @@ GET /piece/<piece-cid>
 2. Verifies the client’s MPP credential and **settles once** on Filecoin Pay.
 3. **Proxies** the upstream `GET` only after settlement succeeds.
 
-**Deployment rule:** publish only the `sp-proxy` base URL to clients; keep Curio/Boost on `127.0.0.1`.
-
-Clients using `retrieval-client` discover your proxy URL and pay in USDFC; you receive settlement to your configured payee address.
+Clients using `retrieval-client` discover your proxy URL, as published by Curio/Boost, and pay in USDFC; you receive settlement to your configured payee address.
 
 ### What you need
 
@@ -186,7 +184,9 @@ Run **two HTTP listeners** on the SP host:
 | **Curio / Boost** | `127.0.0.1` only | `sp-proxy` on the same machine | Serves raw `/piece/<cid>` bytes; **not** payment-aware |
 | **`sp-proxy`** | Public interface, e.g. `0.0.0.0:8787` | Internet clients / `retrieval-client` | Quotes, verifies MPP, settles on Filecoin Pay, then proxies to upstream |
 
-**Do not** expose Curio/Boost on a public IP or `0.0.0.0`. Clients should only reach your **`sp-proxy`** URL (the address you publish for discovery). Upstream stays on loopback so piece data is only served after settlement.
+**Deployment rule:** configure Curio/Boost to advertise your public IP address and TCP port that route to the `sp-proxy`.
+
+**Do not** expose Curio/Boost on a public IP or `0.0.0.0`. Clients should only reach your **`sp-proxy`** URL (the address published for discovery). Upstream stays on loopback so piece data is only served after settlement.
 
 ```text
 Client (retrieval-client)
