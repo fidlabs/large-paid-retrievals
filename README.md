@@ -153,11 +153,13 @@ GET /piece/<piece-cid>
 2. Verifies the client’s MPP credential and **settles once** on Filecoin Pay.
 3. **Proxies** the upstream `GET` only after settlement succeeds.
 
+**Deployment rule:** publish only the `sp-proxy` base URL to clients; keep Curio/Boost on `127.0.0.1`.
+
 Clients using `retrieval-client` discover your proxy URL and pay in USDFC; you receive settlement to your configured payee address.
 
 ### What you need
 
-1. A working **upstream piece HTTP server** (`/piece/<cid>`) reachable from the proxy.
+1. An **upstream piece HTTP server** on **`127.0.0.1` only** (`/piece/<cid>`), reachable from `sp-proxy` on the same machine but **not** from the public internet.
 2. **`sp-proxy`** with a settler private key (`sp.key`) — pays FIL gas for on-chain settlement.
 3. **FIL** on the settler wallet for gas.
 4. A **payee `0x` address** (defaults to settler) that receives USDFC from Filecoin Pay rails.
@@ -166,12 +168,43 @@ Clients using `retrieval-client` discover your proxy URL and pay in USDFC; you r
 ### Architecture
 
 ```text
-Client  --GET /piece/<cid>-->  sp-proxy  --GET/HEAD-->  upstream (Curio / Boost)
-                |                                       Content-Length on HEAD
+Internet
+   |
+   v
+Client --GET /piece/<cid>--> sp-proxy (0.0.0.0:8787)
+                                   |
+                                   | loopback only
+                                   v
+                            upstream Curio/Boost (127.0.0.1:8788)
+                                   Content-Length on HEAD
                 +-- 402 quote (price_usdfc)
                 +-- verify MPP + SettleIfFunded (USDFC)
                 +-- proxy full GET after settle
 ```
+
+### Network layout (recommended)
+
+Run **two HTTP listeners** on the SP host:
+
+| Service | Bind address | Who connects | Role |
+|---------|--------------|--------------|------|
+| **Curio / Boost** | `127.0.0.1` only | `sp-proxy` on the same machine | Serves raw `/piece/<cid>` bytes; **not** payment-aware |
+| **`sp-proxy`** | Public interface, e.g. `0.0.0.0:8787` | Internet clients / `retrieval-client` | Quotes, verifies MPP, settles on Filecoin Pay, then proxies to upstream |
+
+**Do not** expose Curio/Boost on a public IP or `0.0.0.0`. Clients should only reach your **`sp-proxy`** URL (the address you publish for discovery). Upstream stays on loopback so piece data is only served after settlement.
+
+```text
+Internet clients
+       |
+       v
+  sp-proxy  :8787  (0.0.0.0 or your public IP)
+       |
+       | 127.0.0.1 only
+       v
+  Curio / Boost  :8788  (localhost)
+```
+
+Configure Curio/Boost to listen on **`127.0.0.1:<port>`**, then point `sp-proxy` at it with `--upstream-host 127.0.0.1` and `--upstream-port <port>`.
 
 ### Deploy `sp-proxy`
 
@@ -179,7 +212,7 @@ Client  --GET /piece/<cid>-->  sp-proxy  --GET/HEAD-->  upstream (Curio / Boost)
 go build -o bin/sp-proxy ./cmd/sp-proxy
 
 ./bin/sp-proxy \
-  --listen :8787 \
+  --listen 0.0.0.0:8787 \
   --db ./sp-proxy.db \
   --price-usdfc-per-gb 0.01 \
   --upstream-host 127.0.0.1 \
@@ -187,7 +220,7 @@ go build -o bin/sp-proxy ./cmd/sp-proxy
   --pay-private-key-file ./sp.key
 ```
 
-Clients probe `https://…/piece/<cid>`.
+`--listen 0.0.0.0:8787` accepts client connections on all interfaces; use a specific IP or put TLS/reverse-proxy in front in production. `--upstream-host 127.0.0.1` assumes Curio/Boost is bound to localhost on the same host.
 
 ### Pricing
 
@@ -208,10 +241,10 @@ Optional: expose **`HEAD`** on the public proxy path for client size probes (the
 
 | Flag | Purpose |
 |------|---------|
-| `--listen` | Public listen address (default `:8787`) |
+| `--listen` | Client-facing listen address (default `:8787` = all interfaces; use `0.0.0.0:8787` explicitly in production) |
 | `--db` | SQLite deal state |
 | `--price-usdfc-per-gb` | USDFC per billed GiB |
-| `--upstream-host`, `--upstream-port` | Curio/Boost/nginx piece server |
+| `--upstream-host`, `--upstream-port` | Loopback Curio/Boost (`127.0.0.1` + port) |
 | `--pay-rpc-url` | FVM RPC |
 | `--pay-private-key-file` | Settler key |
 | `--pay-payee-address` | Payee advertised in challenges (default: settler) |
@@ -245,6 +278,24 @@ docs/
   mpp-filecoinpay.md  HTTP + payment protocol contract
 ```
 
+### `sp-proxy` design: payment as middleware
+
+Paid retrieval is implemented as **HTTP middleware** in `internal/piecepayment`, not as ad-hoc logic inside the reverse proxy. `PiecePaymentMiddleware` wraps a `next http.Handler`: it issues `402` quotes, verifies MPP credentials, settles on Filecoin Pay, then calls `next` only when payment is satisfied.
+
+In `cmd/sp-proxy`, that `next` handler is the upstream reverse proxy to Curio/Boost:
+
+```text
+request --> PiecePaymentMiddleware --> httputil.ReverseProxy --> upstream /piece/<cid>
+```
+
+Keeping quote, authorize, and settle in a composable middleware layer means:
+
+- **`sp-proxy` stays thin** — wiring, flags, SQLite store, and upstream proxy only.
+- **Payment behaviour is reusable** — the same middleware can wrap any handler that serves `/piece/<cid>`.
+- **Future upstream integration** — Curio, Boost, or other piece servers could embed `piecepayment` directly in their HTTP stack instead of running a separate `sp-proxy` process, as long as they expose the same MPP/`402` contract ([docs/mpp-filecoinpay.md](docs/mpp-filecoinpay.md)).
+
+Today the standalone proxy is the supported deployment path; middleware extraction is a deliberate design choice to keep that option open.
+
 ### Build and test
 
 ```bash
@@ -259,7 +310,7 @@ task ci            # fmt, vet, lint, test, vuln
 - `task test:e2e:discovery` — two CIDs from public sp-tool API, mainnet fetch (free paths).
 - `task test:e2e:filpay` — local nginx piece + envoy router + `sp-proxy` on `:8787`, paid fetch on Calibration (`0.0003` USDFC/GiB).
 
-Local piece server for tests: `task nginx:piece` (32 GiB sparse dummy `/piece/<cid>`).
+Local piece server for tests: `task nginx:piece` (32 GiB sparse dummy `/piece/<cid>` with envoy router to mock network instability).
 
 ### Protocol
 
