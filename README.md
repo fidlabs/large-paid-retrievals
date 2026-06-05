@@ -1,132 +1,309 @@
 # PoRep paid-retrievals
 
-Small CLI tools for paid piece retrieval over HTTP using:
+HTTP tools for retrieving Filecoin **piece** data (CAR files) from storage providers (SPs), including **free** endpoints and **paid** retrievals settled on-chain via Filecoin Pay.
 
-- Thin proxy sitting in front of Curio or Boost HTTP `.../piece/...` endpoint to broker payments
-- MPP payment headers with EVM-style signing
-- Filecoin Pay rails on FVM (automated creation/finding of rails)
+| If you are… | Start here |
+|-------------|------------|
+| **Dataset consumer** — download pieces from public or paid SPs | [For dataset consumers](#for-dataset-consumers) |
+| **Storage provider** — charge for serving stored pieces | [For storage providers](#for-storage-providers) |
+| **Developer** — maintain or extend this repo | [For developers](#for-developers) |
 
-This is primarily built for large (many TiBs) PoRep deals so relies on some basic assumptions:
-- Per-GiB pricing with upfront quotes (see [Pricing](#pricing) below)
-- Most pieces will be full ~32 GiB with prices in the range of $0.10 to $1.00, so transaction overheads and gas fees are sustainable
-- Quote and fetch one Piece at a time - requires more client-side error handling and consumes more transactions, but has near-term advantages:
-  - Copes with large data sets being spread across multiple SPs
-  - Works with most existing SP software stacks
+**Binaries:** `retrieval-client` (fetch) and `sp-proxy` (paid gateway in front of an SP piece server).
 
-## Contents
+**Design context:** built for large PoRep datasets (many TiBs): per-piece quotes, per-GiB billing, one settlement per piece, discovery across multiple SP HTTP bases. See [Pricing](#pricing) and [Protocol](#protocol).
 
-This repo builds two binaries:
+---
 
-- `sp-proxy`: serves `/piece/<cid>` with 402 MPP challenge + paid GET flow
-- `retrieval-client`: discovers sources, gets MPP challenges, signs proof headers, downloads CAR files
+## For dataset consumers
 
-## Prerequisites
+### What you get
 
-- Go `1.22+`
-- A Filecoin JSON-RPC endpoint (Calibration by default in this repo)
-- Funded private keys for:
-  - SP settler/payee wallet
-  - client payer wallet
+`retrieval-client fetch` takes piece CIDs (or a manifest), **discovers** SP HTTP endpoints, **probes** each for availability and price, then **downloads** `.car` files:
 
-## Build
+- **`200 OK`** on probe → piece is **free**; downloaded immediately.
+- **`402 Payment Required`** → piece is **paid**; client funds a Filecoin Pay rail, signs an MPP credential, retries the GET, and downloads after settlement.
 
-From repo root:
+Paid pieces are quoted **up front** (total USDFC in the `402` challenge). You pay once per piece; there is no per-byte metering during download.
+
+### What you need
+
+1. **Go 1.22+** (or a pre-built `retrieval-client` binary).
+2. A **client private key** (`client.key`) — secp256k1 hex; see [Generate keys](#generate-keys).
+3. **FIL** on Calibration (or your network) for Filecoin Pay transaction gas.
+4. **USDFC** in the client wallet for paid retrievals (amount depends on piece sizes and SP rates).
+5. A **JSON-RPC endpoint** (`--pay-rpc-url`; Calibration default in examples below).
+
+Fund test wallets: [Beryx FIL faucet](https://beryx.io/faucet), [Calibnet USDFC faucet](https://forest-explorer.chainsafe.dev/faucet/calibnet_usdfc). Your `0x` address appears in client logs if funding is missing.
+
+### Quick start
+
+```bash
+go build -o bin/retrieval-client ./cmd/retrieval-client
+
+./bin/retrieval-client fetch \
+  --filpay-private-key-file ./client.key \
+  --pay-rpc-url "https://api.calibration.node.glif.io/rpc/v1" \
+  --cid baga6ea4seaq... \
+  --out-dir ./downloads
+```
+
+Use `--yes` to skip the funding confirmation prompt (scripts/CI).
+
+### Fetching options
+
+**Multiple CIDs** — repeat `--cid` or pass CIDs as positional arguments:
+
+```bash
+./bin/retrieval-client fetch \
+  --filpay-private-key-file ./client.key \
+  --cid baga6ea4seaq... \
+  --cid baga6ea7dk3b...
+```
+
+**Manifest** — JSON with `pieces[].piece_cid` (mutually exclusive with `--cid` / `--cid-file`):
+
+```bash
+./bin/retrieval-client fetch \
+  --filpay-private-key-file ./client.key \
+  --manifest ./super-manifest.json
+```
+
+**Single known SP/proxy** — skip discovery and probe only one base URL (testing or a curated provider):
+
+```bash
+./bin/retrieval-client fetch \
+  --filpay-private-key-file ./client.key \
+  --sp-base-url "https://my-sp.example.com:8787" \
+  --cid baga6ea4seaq...
+```
+
+### Quote before you pay
+
+**Dry run** — probe and print prices; no rails, no downloads:
+
+```bash
+./bin/retrieval-client fetch --dry-run \
+  --filpay-private-key-file ./client.key \
+  --cid baga6ea4seaq...
+```
+
+**Rail check** — verify Filecoin Pay operator approval and rails without fetching:
+
+```bash
+./bin/retrieval-client rail-check \
+  --filpay-private-key-file ./client.key \
+  --payee 0x... \
+  --required-usdfc 0.5
+```
+
+### How `fetch` chooses a source
+
+For each piece CID (unless `--sp-base-url` is set):
+
+1. Discover candidate HTTP bases (on-chain miner info + configured RPC).
+2. Probe endpoints in parallel (`HEAD` for size; `GET` without auth for free vs paid).
+3. Prefer **free** if any endpoint returns `200`.
+4. Among paid `402` responses, pick the **lowest** quoted `price_usdfc`.
+5. Fund rails and download each paid piece with `Authorization: Payment …`.
+
+Outputs: `<cid>.car` under `--out-dir` (default `.`).
+
+### Understanding cost
+
+Paid SPs bill in **USDFC per GiB** (binary `2^30` bytes), **rounded up** to whole GiB. The `402` challenge contains the **total** `price_usdfc` for that piece. Details: [Pricing](#pricing).
+
+### Useful flags
+
+| Flag | Purpose |
+|------|---------|
+| `--cid`, `--cid-file`, positional CIDs | Pieces to retrieve |
+| `--manifest` | Manifest-driven piece list |
+| `--out-dir` | Output directory for `.car` files |
+| `--sp-base-url` | Force one provider base URL |
+| `--pay-rpc-url` / `--rpc-url` | FVM RPC for payments and discovery |
+| `--filpay-private-key-file` | Client identity + MPP signing |
+| `--yes` | Skip confirm prompt |
+| `--dry-run` | Quote only |
+| `--expires-in-sec` | MPP proof expiry |
+| `--pay-debug`, `--verbose` | Diagnostics |
+
+### Troubleshooting
+
+- **Insufficient USDFC / FIL** — fund client wallet; check logs for `0x` address and rail IDs.
+- **No endpoints found** — CID may not be advertised on-chain, or RPC/discovery failed; try `--sp-base-url` if you know a working URL.
+- **Paid fetch fails after quote** — run `rail-check`; ensure operator approval and rail balance.
+- **Verify settlement** — note rail ID from logs; view on [Filecoin Pay (Calibration)](https://pay.filecoin.cloud/calibration/rails/) e.g. `https://pay.filecoin.cloud/calibration/rails/16949`.
+
+---
+
+## For storage providers
+
+### What you provide
+
+SPs store deal **pieces** and serve them over HTTP (typically Curio, Boost, or nginx) at:
+
+```text
+GET /piece/<piece-cid>
+```
+
+**`sp-proxy`** sits in front of that upstream server. It:
+
+1. Returns **`402`** with an MPP challenge (quoted `price_usdfc`) when a client requests a piece without payment.
+2. Verifies the client’s MPP credential and **settles once** on Filecoin Pay.
+3. **Proxies** the upstream `GET` only after settlement succeeds.
+
+Clients using `retrieval-client` discover your proxy URL (or use `--sp-base-url` you publish) and pay in USDFC; you receive settlement to your configured payee address.
+
+### What you need
+
+1. A working **upstream piece HTTP server** (`/piece/<cid>`) reachable from the proxy.
+2. **`sp-proxy`** with a settler private key (`sp.key`) — pays FIL gas for on-chain settlement.
+3. **FIL** on the settler wallet for gas.
+4. A **payee `0x` address** (defaults to settler) that receives USDFC from Filecoin Pay rails.
+5. **SQLite** path for deal/quote state (`--db`).
+
+### Architecture
+
+```text
+Client  --GET /piece/<cid>-->  sp-proxy  --GET/HEAD-->  upstream (Curio / Boost / nginx)
+                |                                      Content-Length on HEAD
+                +-- 402 quote (price_usdfc)
+                +-- verify MPP + SettleIfFunded (USDFC)
+                +-- proxy full GET after settle
+```
+
+### Deploy `sp-proxy`
 
 ```bash
 go build -o bin/sp-proxy ./cmd/sp-proxy
-go build -o bin/retrieval-client ./cmd/retrieval-client
+
+./bin/sp-proxy \
+  --listen :8787 \
+  --db ./sp-proxy.db \
+  --price-usdfc-per-gb 0.01 \
+  --upstream-host 127.0.0.1 \
+  --upstream-port 8788 \
+  --pay-rpc-url "https://api.calibration.node.glif.io/rpc/v1" \
+  --pay-private-key-file ./sp.key
 ```
 
-Or install to your Go bin path:
+Publish your proxy base URL to clients (e.g. `https://retrieval.my-sp.example:8787`). Clients probe `https://…/piece/<cid>`.
 
-```bash
-go install ./cmd/sp-proxy
-go install ./cmd/retrieval-client
+### Pricing
+
+Set **`--price-usdfc-per-gb`** to your USDFC rate per **billed GiB** (each GiB or fraction counts as one GiB). The proxy computes the total `price_usdfc` in each `402` from upstream `HEAD` `Content-Length`. Full rules: [Pricing](#pricing).
+
+### Upstream requirements (important)
+
+For paid quoting to work, upstream **`HEAD /piece/<cid>`** must:
+
+- Return **`200`** with a positive **`Content-Length`** (identity-encoded full piece size).
+- Not rely on client `Range` / `Accept-Encoding` for sizing — the proxy strips those on its internal probe.
+
+If `HEAD` is missing, returns `405`, `Content-Length: 0`, `204`, etc., the proxy returns **`503 payment-unavailable`** (no quote). **`GET`** may still work for already-paid clients; unpaid clients cannot obtain a price.
+
+Optional: expose **`HEAD`** on the public proxy path for client size probes (the proxy forwards client `HEAD` without charging).
+
+### SP proxy flags
+
+| Flag | Purpose |
+|------|---------|
+| `--listen` | Public listen address (default `:8787`) |
+| `--db` | SQLite deal state |
+| `--price-usdfc-per-gb` | USDFC per billed GiB |
+| `--upstream-host`, `--upstream-port` | Curio/Boost/nginx piece server |
+| `--pay-rpc-url` | FVM RPC |
+| `--pay-private-key-file` | Settler key |
+| `--pay-payee-address` | Payee advertised in challenges (default: settler) |
+| `--pay-payments-address` | Optional payments contract override |
+| `--pay-debug`, `--verbose` | Diagnostics |
+
+### Monitoring payments
+
+After a successful retrieval, logs include the Filecoin Pay **rail ID** and settle tx. View rail status on [pay.filecoin.cloud](https://pay.filecoin.cloud/) (Calibration: `/calibration/rails/<id>`).
+
+Wire format and security model: [docs/mpp-filecoinpay.md](docs/mpp-filecoinpay.md).
+
+---
+
+## For developers
+
+### Repository layout
+
+```text
+cmd/
+  retrieval-client/   CLI: discovery, probe, quote, pay, download
+  sp-proxy/           CLI: MPP 402 gateway + Filecoin Pay settlement + reverse proxy
+internal/
+  piecepayment/       Quote, 402 middleware, authorize + settle
+  pieceurls/          SP discovery, parallel probe, cheapest paid selection
+  filpay/             Filecoin Pay client (rails, deposit, settle)
+  mpp/                MPP challenge / credential wire types
+  paymentheader/      Token amounts + per-GiB price helpers
+  sqlitestore/        sp-proxy deal persistence
+docs/
+  mpp-filecoinpay.md  HTTP + payment protocol contract
 ```
 
-## Generate keys
-
-Keys are plain secp256k1 private keys as 32-byte hex strings (with or without `0x`).
-As ever, these need to be funded in order to get an ActorID on the Filecoin blockchain.
-
-### Option A: OpenSSL (simple)
+### Build and test
 
 ```bash
-# SP key
+go build -o bin/ ./cmd/retrieval-client ./cmd/sp-proxy
+go test ./...
+task test          # coverage report
+task ci            # fmt, vet, lint, test, vuln
+```
+
+**E2E (shell):**
+
+- `task test:e2e:dicovery` — two CIDs from public sp-tool API, mainnet fetch (free paths).
+- `task test:e2e:filpay` — local nginx piece + `sp-proxy` on `:8787`, paid fetch on Calibration (`0.0003` USDFC/GiB).
+
+Local piece server for tests: `task nginx:piece` (32 GiB sparse dummy `/piece/<cid>`).
+
+### Protocol
+
+Implementers and reviewers should read [docs/mpp-filecoinpay.md](docs/mpp-filecoinpay.md) for the `402` / `Authorization: Payment` flow, challenge schema, and settle-before-serve guarantees.
+
+### Environment variables
+
+| Variable | Used by | Purpose |
+|----------|---------|---------|
+| `FILPAY_PRIVATE_KEY_ENV` | retrieval-client | Env var name for client key (default `FILPAY_PRIVATE_KEY`) |
+| `SP_PROXY_PAY_PRIVATE_KEY_ENV` | sp-proxy | Env var name for settler key |
+| `SP_PROXY_PAY_RPC_URL` | sp-proxy | Default FVM RPC if flag unset |
+| `SP_PROXY_PAY_PAYMENTS_ADDRESS` | sp-proxy | Optional payments contract |
+| `SP_PROXY_PAY_PAYEE_ADDRESS` | sp-proxy | Optional default payee |
+| `SP_PROXY_UPSTREAM_HOST` / `SP_PROXY_UPSTREAM_PORT` | sp-proxy | Default upstream |
+
+### Generate keys
+
+Keys are secp256k1 private keys as 32-byte hex (with or without `0x`). Both binaries need funded on-chain actors.
+
+**OpenSSL:**
+
+```bash
 openssl rand -hex 32 > sp.key
-
-# client key
 openssl rand -hex 32 > client.key
 ```
 
-### Option B: Foundry cast (if you already use it)
+**Foundry cast:**
 
 ```bash
-cast wallet new --json > sp-wallet.json
-cast wallet new --json > client-wallet.json
+cast wallet new --json   # copy private_key to sp.key / client.key
 ```
 
-Then copy the `"private_key"` values into `sp.key` and `client.key`.
+**Lotus** — create `secp256k1` wallets, `lotus wallet export`, then extract the 32-byte hex `PrivateKey` field into `sp.key` / `client.key`. Keep `*.key` out of git.
 
-### Option C: Lotus wallet (`lotus wallet new` + export)
-
-Create secp256k1 wallets:
-
-```bash
-# SP wallet
-lotus wallet new secp256k1
-
-# client wallet
-lotus wallet new secp256k1
-```
-
-Export each wallet key (replace with your addresses):
-
-```bash
-lotus wallet export f1SP_ADDRESS > sp-lotus-export.json
-lotus wallet export f1CLIENT_ADDRESS > client-lotus-export.json
-```
-
-Convert Lotus export into raw 32-byte hex key files used by this project:
-
-```bash
-python3 - <<'PY'
-import base64, json, re
-
-def convert(infile, outfile):
-    raw = json.load(open(infile, "r"))
-    v = (raw.get("PrivateKey") or "").strip()
-    if not v:
-        raise SystemExit(f"{infile}: missing PrivateKey")
-    if re.fullmatch(r"0x[0-9a-fA-F]+|[0-9a-fA-F]+", v):
-        h = v[2:] if v.startswith("0x") else v
-    else:
-        h = base64.b64decode(v).hex()
-    if len(h) != 64:
-        raise SystemExit(f"{infile}: expected 32-byte private key, got {len(h)//2} bytes")
-    open(outfile, "w").write(h + "\n")
-
-convert("sp-lotus-export.json", "sp.key")
-convert("client-lotus-export.json", "client.key")
-print("wrote sp.key and client.key")
-PY
-```
-
-> Keep key files out of git. Add `*.key` (or your chosen names) to `.gitignore`.
-
-## Fund your wallets with tokens
-
-In order to procure paid retrievals both the client wallet and service provider wallet must exist and the client wallet will need to be funded with both FIL and USDFC tokens.
-
-Payment to Storage Providers for retrieval is made in USDFC while Filecoin Pay transaction costs are paid in FIL.
-
-For testing on calibration network you can create and fund each wallet with FIL at https://beryx.io/faucet and fund the client with USDFC at https://forest-explorer.chainsafe.dev/faucet/calibnet_usdfc (your wallet address can be seen in the console messages from the client and storage provider if a retrieval is attempted without both wallets existing and sufficient funds being available).
+---
 
 ## Pricing
 
+Shared reference for consumers (interpreting quotes) and SPs (setting rates).
+
 `sp-proxy` charges in **USDFC per binary GiB** (`2^30` bytes), configured with `--price-usdfc-per-gb`.
 
-**Billing unit:** each GiB of data, or **any fraction of a GiB**, counts as **one billed GiB** (round up). There is no proportional “per byte” charge within a GiB.
+**Billing unit:** each GiB of data, or **any fraction of a GiB**, counts as **one billed GiB** (round up). There is no proportional per-byte charge within a GiB.
 
 **Piece size:** before returning a `402` challenge, the proxy probes the upstream piece URL with `HEAD` and reads `Content-Length`. That byte count is the piece size used for quoting. The probe does not forward client `Range` / `If-*` / `Accept-Encoding` headers, so the quoted size is the full identity-encoded object.
 
@@ -150,108 +327,10 @@ price_usdfc = price_usdfc_per_gib × billed_gib
 
 **No quote** (`503 payment-unavailable`): the proxy cannot obtain a positive piece size from `HEAD`, including non-`200` responses (e.g. `404`, `405 Method Not Allowed`), missing or zero `Content-Length`, `204 No Content`, or `206 Partial Content`. These cases do not use the formula above.
 
-## Run the SP proxy
+---
 
-Minimal example:
+## Protocol
 
-```bash
-./bin/sp-proxy \
-  --listen :8787 \
-  --db ./sp-proxy.db \
-  --price-usdfc-per-gb 0.01 \
-  --pay-rpc-url "https://api.calibration.node.glif.io/rpc/v1" \
-  --pay-private-key-file ./sp.key
-```
+HTTP payment flow, challenge JSON, and settlement semantics: **[docs/mpp-filecoinpay.md](docs/mpp-filecoinpay.md)**.
 
-Useful flags:
-
-- `--listen`: HTTP listen address (default `:8787`)
-- `--db`: SQLite file for deal state (default `./sp-proxy.db`)
-- `--price-usdfc-per-gb`: USDFC rate per billed GiB (see [Pricing](#pricing)); default `0.01`
-- `--pay-rpc-url`: FVM RPC for Filecoin Pay interactions
-- `--pay-private-key|--pay-private-key-file|--pay-private-key-env`: settler key source
-- `--pay-payments-address`: optional payments contract override (empty = chain default)
-- `--pay-payee-address`: optional payee 0x address advertised to clients (default = settler address)
-- `--pay-debug`: verbose payment/settlement logs
-- `--verbose`: debug-level structured logs
-
-## Run the retrieval client
-
-### Fetch by CID
-
-```bash
-./bin/retrieval-client fetch \
-  --filpay-private-key-file ./client.key \
-  --pay-rpc-url "https://api.calibration.node.glif.io/rpc/v1" \
-  --cid baga6ea4seaq...
-  --cid baga6ea7dk3b...
-```
-
-### Use a manifest
-
-```bash
-./bin/retrieval-client fetch \
-  --filpay-private-key-file ./client.key \
-  --manifest ./path/to/super-manifest.json
-```
-
-`--manifest` is mutually exclusive with positional CIDs / `--cid` / `--cid-file`.
-Only `pieces[].piece_cid` is used.
-
-### Force one SP/proxy URL for testing
-
-If you want to ignore discovered endpoints and only probe one base URL (eg your local test proxy):
-
-```bash
-./bin/retrieval-client fetch \
-  --filpay-private-key-file ./client.key \
-  --pay-rpc-url "https://api.calibration.node.glif.io/rpc/v1" \
-  --sp-base-url "http://127.0.0.1:8787" \
-  --cid baga6ea4seaq...
-```
-
-### What `fetch` does
-
-1. Resolve candidate providers for each piece CID (via discovery, unless `--sp-base-url` override is set).
-2. Probe each location:
-  - `200 OK` => free download (saved immediately)
-  - `402` => parse MPP challenge and keep cheapest usable one
-3. Prepare and charge Filecoin Pay rails for paid pieces.
-4. Send paid GET with `Authorization: Payment <credential>`.
-
-### `fetch` flags (most-used)
-
-- `--cid` (repeatable), `--cid-file`, or positional CIDs
-- `--manifest` (alternative input)
-- `--out-dir` (default `.`)
-- `--sp-base-url` (force one base URL)
-- `--rpc-url` (shared RPC for FVM payments + discovery miner info lookups)
-- `--pay-payments-address` (optional contract override)
-- `--filpay-private-key|--filpay-private-key-file|--filpay-private-key-env` (client key source)
-- `--yes` (skip confirm prompt)
-- `--expires-in-sec` (MPP proof header expiry)
-- `--pay-debug`, `--verbose`
-
-## E2E shell tasks
-
-- `task test:e2e:dicovery`: discovers two working piece URLs from `sp-tool`, extracts CIDs, and runs `retrieval-client fetch` against mainnet RPC.
-- `task test:e2e:filpay`: starts local nginx (`task nginx:piece`), launches `sp-proxy` on `:8787` at `0.0003` USDFC/GiB, and runs a paid fetch on Calibration through the proxy.
-
-## Validation
-
-To verify that the system is working, check the logs for the client and / or storage provider proxy and identify the rail ID.
-The rail stats can then be viewed in the filecoin cloud.
-
-For calibration network use https://pay.filecoin.cloud/calibration/rails/[RAIL_ID] e.g. https://pay.filecoin.cloud/calibration/rails/16949
-
-## Environment variables
-
-Defaults are wired for convenience:
-
-- `FILPAY_PRIVATE_KEY_ENV` (default key env var name for client)
-- `SP_PROXY_PAY_PRIVATE_KEY_ENV` (default key env var name for proxy)
-- `SP_PROXY_PAY_RPC_URL` (default RPC URL if `--rpc-url` / `--pay-rpc-url` not set)
-- `SP_PROXY_PAY_PAYMENTS_ADDRESS` (optional default payments contract override)
-- `SP_PROXY_PAY_PAYEE_ADDRESS` (optional default proxy payee address)
-
-
+**Validation:** confirm rail IDs in client/proxy logs against [Filecoin Pay rails dashboard](https://pay.filecoin.cloud/) (Calibration example: `https://pay.filecoin.cloud/calibration/rails/<RAIL_ID>`).

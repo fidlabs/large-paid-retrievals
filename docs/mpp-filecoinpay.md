@@ -2,6 +2,8 @@
 
 This document defines the wire contract used by this project when gating piece retrievals with MPP semantics while settling payments through Filecoin Pay.
 
+**Audience:** storage providers operating `sp-proxy`, client authors, and developers extending payment middleware. For operator setup and CLI usage, see the [README](../README.md) sections for [dataset consumers](../README.md#for-dataset-consumers), [storage providers](../README.md#for-storage-providers), and [developers](../README.md#for-developers).
+
 ## Goals
 
 - Use MPP challenge/proof style HTTP flow (`402` -> retried paid `GET`)
