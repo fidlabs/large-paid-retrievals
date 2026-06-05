@@ -10,7 +10,19 @@ HTTP tools for retrieving Filecoin **piece** data (CAR files) from storage provi
 
 **Binaries:** `retrieval-client` (fetch) and `sp-proxy` (paid gateway in front of an SP piece server).
 
-**Design context:** built for large PoRep datasets (many TiBs): per-piece quotes, per-GiB billing, one settlement per piece, discovery across multiple SP HTTP bases. See [Pricing](#pricing) and [Protocol](#protocol).
+### Design context
+
+This repo targets **large PoRep retrievals** (many TiBs): pieces are usually full ~32 GiB CARs, often spread across several SP HTTP bases. The workflow is deliberately **per-piece** — quote, pay, and settle once per CID — which adds client-side retry logic but keeps gas and rail usage viable at typical $0.10–$1.00 per piece. Clients **discover** endpoints, **probe** for free (`200`) vs paid (`402`), and select the cheapest valid offer. Billing is **per GiB, rounded up** ([Pricing](#pricing)).
+
+Payments use the **Machine Payments Protocol (MPP)**: an HTTP challenge/proof flow built on the **`Payment` authentication scheme** — `402 Payment Required`, a `WWW-Authenticate: Payment` challenge quoting the charge, and a retried request with `Authorization: Payment` carrying a signed credential. The credential binds the client’s EVM identity to that specific `GET /piece/<cid>` (method, path, host, CID, price, nonce). The server verifies the proof, runs **one Filecoin Pay settlement** for the quoted USDFC on FVM, and only then proxies piece bytes (**settle-before-serve**). At the HTTP layer MPP is payment-method agnostic; this implementation uses **`method="filecoinpay"`** with Filecoin Pay rails as the settlement backend.
+
+Typical paid flow:
+
+1. Client `GET /piece/<cid>` → `402` + MPP challenge (`price_usdfc`, `payee_0x`, …).
+2. Client funds a Filecoin Pay rail and signs the MPP credential.
+3. Client retries `GET` with `Authorization: Payment …` → proxy settles on-chain → `200` + CAR stream + `Payment-Receipt`.
+
+Wire format, challenge schema, and validation rules: [docs/mpp-filecoinpay.md](docs/mpp-filecoinpay.md) ([Protocol](#protocol)).
 
 ---
 
@@ -164,22 +176,6 @@ Clients using `retrieval-client` discover your proxy URL and pay in USDFC; you r
 3. **FIL** on the settler wallet for gas.
 4. A **payee `0x` address** (defaults to settler) that receives USDFC from Filecoin Pay rails.
 5. **SQLite** path for deal/quote state (`--db`).
-
-### Architecture
-
-```text
-Client                          SP host
-  |                                 |
-  | GET /piece/<cid>                |
-  |----------- Internet -----------> sp-proxy (0.0.0.0:8787)
-  |                                 |  +-- 402 quote (price_usdfc)
-  |                                 |  +-- verify MPP + SettleIfFunded (USDFC)
-  |                                 |  +-- proxy full GET after settle
-  |                                 | loopback only
-  |                                 v
-  |                           Curio/Boost (127.0.0.1:8788)
-  |                                 Content-Length on HEAD
-```
 
 ### Network layout (recommended)
 
