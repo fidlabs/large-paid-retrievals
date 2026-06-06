@@ -186,7 +186,7 @@ Run **two HTTP listeners** on the SP host:
 
 **Deployment rule:** configure Curio/Boost to advertise your public IP address and TCP port that route to the `sp-proxy`.
 
-**Do not** expose Curio/Boost on a public IP or `0.0.0.0`. Clients should only reach your **`sp-proxy`** URL (the address published for discovery). Upstream stays on loopback so piece data is only served after settlement.
+**Do not** expose Curio/Boost's HTTP service on a public IP or `0.0.0.0`. Clients should only reach your **`sp-proxy`** URL (the address published for discovery). Upstream stays on loopback so piece data is only served after settlement.
 
 ```text
 Client (retrieval-client)
