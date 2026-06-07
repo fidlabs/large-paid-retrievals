@@ -38,13 +38,13 @@ func TestParallelProgressFailureLinesStayShort(t *testing.T) {
 	ui0.DownloadStart(cid0, "http://127.0.0.1/piece", 32<<30, true, 0)
 	ui1 := pui.bind(cid1, true)
 	ui1.DownloadStart(cid1, "http://127.0.0.1/piece", 32<<30, true, 0)
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(spinnerInterval)
 
 	longErr := fmt.Errorf(`download %s failed: 402 Payment Required {"type":"https://paymentauth.org/problems/verification-failed","detail":"Credential payload failed validation"}`, cid0)
 	ui0.DownloadAttempt(32<<30, 5)
 	pui.setFailed(cid0, longErr)
 	pui.setFailed(cid1, longErr)
-	time.Sleep(120 * time.Millisecond)
+	time.Sleep(2 * spinnerInterval)
 
 	close(stop)
 	<-done
@@ -87,14 +87,14 @@ func TestParallelProgressStaggeredFailuresNoDuplicateBlock(t *testing.T) {
 		ui := pui.bind(cid, true)
 		ui.DownloadStart(cid, "http://127.0.0.1/piece", 32<<30, true, 0)
 	}
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(spinnerInterval)
 
 	pui.setFailed(cid0, fmt.Errorf("failed"))
 	pui.setFailed(cid2, fmt.Errorf("failed"))
 	pui.setFailed(cid3, fmt.Errorf("failed"))
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(spinnerInterval)
 	pui.setFailed(cid1, fmt.Errorf("failed"))
-	time.Sleep(150 * time.Millisecond)
+	time.Sleep(3 * spinnerInterval)
 
 	close(stop)
 	<-done
@@ -128,10 +128,10 @@ func TestParallelProgressFreezesWhenAllTerminal(t *testing.T) {
 	ui := pui.bind(cid, true)
 	ui.DownloadStart(cid, "http://127.0.0.1/piece", 32<<30, true, 0)
 	pui.setFailed(cid, fmt.Errorf("download failed"))
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(2 * spinnerInterval)
 
 	before := buf.String()
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(3 * spinnerInterval)
 	after := buf.String()
 	if before != after {
 		t.Fatalf("expected frozen output after terminal state; before len=%d after len=%d", len(before), len(after))

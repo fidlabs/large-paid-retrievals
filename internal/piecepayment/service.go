@@ -259,7 +259,7 @@ func (s *RetrievalService) AuthorizeAndSettle(r *http.Request, cid, rawHdr strin
 	// If this deal was already settled recently, skip nonce consumption and on-chain
 	// settlement and serve the piece immediately — supports resumable downloads and
 	// parallel/range retries without charging the client again.
-	since := time.Now().Add(-paidAccessTTL).Unix()
+	since := now.Add(-paidAccessTTL).Unix()
 	if paid, err := s.cfg.Store.IsDealPaidSince(r.Context(), deal.DealUUID, deal.Client, deal.CID, since); err == nil && paid {
 		s.logger.Info("paid retrieval reused", "deal_uuid", deal.DealUUID, "client", deal.Client, "cid", cid)
 		return &PaidOutcome{Deal: deal, CID: cid, TxHash: deal.LastPaidTxHash}, nil
