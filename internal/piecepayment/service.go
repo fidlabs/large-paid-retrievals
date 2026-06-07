@@ -178,7 +178,7 @@ func (s *RetrievalService) AuthorizeAndSettle(r *http.Request, cid, rawHdr strin
 		)
 		return nil, &PaymentRequiredError{Code: "payment-expired", Detail: "Credential expiry is too far in the future"}
 	}
-	if strings.ToUpper(hdr.Method) != http.MethodGet || hdr.Path != r.URL.Path || !hostMatches(hdr.Host, r.Host) {
+	if r.Method != http.MethodGet || strings.ToUpper(hdr.Method) != http.MethodGet || hdr.Path != r.URL.Path || !hostMatches(hdr.Host, r.Host) {
 		s.logCredentialValidationFailure("request_fields_mismatch",
 			"deal_uuid", hdr.DealUUID,
 			"cid", hdr.CID,

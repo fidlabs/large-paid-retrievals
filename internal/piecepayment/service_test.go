@@ -432,6 +432,18 @@ func TestAuthorizeAndSettleErrors(t *testing.T) {
 		}
 	})
 
+	t.Run("non-GET request", func(t *testing.T) {
+		raw := buildProof(t, pk, ch, client, testPieceCID, host, "n-post-req", time.Now().Add(time.Minute).Unix())
+		req := httptest.NewRequest(http.MethodPost, "http://"+host+"/piece/"+testPieceCID, nil)
+		req.Host = host
+		req.Header.Set("Authorization", raw)
+		_, err := svc.AuthorizeAndSettle(req, testPieceCID, raw)
+		var pe *PaymentRequiredError
+		if !errors.As(err, &pe) || pe.Code != "verification-failed" {
+			t.Fatalf("got %v", err)
+		}
+	})
+
 	t.Run("wrong request fields", func(t *testing.T) {
 		hdr := &mpp.ProofPayload{
 			Version: mpp.VersionV1, ChallengeID: ch.ID, DealUUID: ch.ID,
