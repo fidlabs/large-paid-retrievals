@@ -159,18 +159,17 @@ func (s *RetrievalService) AuthorizeAndSettle(r *http.Request, cid, rawHdr strin
 		return nil, &PaymentRequiredError{Code: "invalid-challenge", Detail: "Challenge id does not match deal id"}
 	}
 	now := time.Now()
-	if err := hdr.ValidateAt(now); err != nil {
-		s.logCredentialValidationFailure("payload_validate_at",
+	if err := hdr.Validate(); err != nil {
+		s.logCredentialValidationFailure("payload_validate",
 			"error", err.Error(),
 			"deal_uuid", hdr.DealUUID,
 			"cid", hdr.CID,
-			"expires_unix", hdr.ExpiresUnix,
-			"now_unix", now.Unix(),
 		)
 		return nil, &PaymentRequiredError{Code: "verification-failed", Detail: "Credential payload failed validation"}
 	}
-	if hdr.ExpiresUnix > now.Add(10*time.Minute).Unix()+int64(s.cfg.MaxClockSkew.Seconds()) {
+	if err := hdr.ValidateExpiresWithinFutureBound(now, challengeTTL, s.cfg.MaxClockSkew); err != nil {
 		s.logCredentialValidationFailure("payload_expiry_too_far",
+			"error", err.Error(),
 			"deal_uuid", hdr.DealUUID,
 			"cid", hdr.CID,
 			"expires_unix", hdr.ExpiresUnix,
@@ -257,12 +256,28 @@ func (s *RetrievalService) AuthorizeAndSettle(r *http.Request, cid, rawHdr strin
 		)
 		return nil, &PaymentRequiredError{Deal: deal, Code: "verification-failed", Detail: "Credential signature verification failed"}
 	}
+	// If this deal was already settled recently, skip nonce consumption and on-chain
+	// settlement and serve the piece immediately — supports resumable downloads and
+	// parallel/range retries without charging the client again.
 	since := time.Now().Add(-paidAccessTTL).Unix()
 	if paid, err := s.cfg.Store.IsDealPaidSince(r.Context(), deal.DealUUID, deal.Client, deal.CID, since); err == nil && paid {
 		s.logger.Info("paid retrieval reused", "deal_uuid", deal.DealUUID, "client", deal.Client, "cid", cid)
 		return &PaidOutcome{Deal: deal, CID: cid, TxHash: deal.LastPaidTxHash}, nil
 	} else if err != nil {
 		return nil, fmt.Errorf("check paid window: %w", err)
+	}
+	// Past-expiry is checked only on the first-settlement path. After a successful payment,
+	// clients may retry large downloads with the same (possibly expired) credential while
+	// paidAccessTTL covers the deal; settlement already happened and must not be re-required.
+	if err := hdr.ValidateExpiresNotPast(now); err != nil {
+		s.logCredentialValidationFailure("payload_expired",
+			"error", err.Error(),
+			"deal_uuid", hdr.DealUUID,
+			"cid", hdr.CID,
+			"expires_unix", hdr.ExpiresUnix,
+			"now_unix", now.Unix(),
+		)
+		return nil, &PaymentRequiredError{Code: "verification-failed", Detail: "Credential payload failed validation"}
 	}
 	priceBaseUnits, err := paymentheader.ParseTokenToBaseUnits(deal.PriceUSDFC)
 	if err != nil {

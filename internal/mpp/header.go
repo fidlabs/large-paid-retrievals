@@ -101,14 +101,27 @@ func (h *ProofPayload) Validate() error {
 	return nil
 }
 
-func (h *ProofPayload) ValidateAt(now time.Time) error {
-	if err := h.Validate(); err != nil {
-		return err
-	}
+// ValidateExpiresNotPast rejects credentials whose expires_unix is before now.
+func (h *ProofPayload) ValidateExpiresNotPast(now time.Time) error {
 	if now.Unix() > h.ExpiresUnix {
 		return fmt.Errorf("%w: expired", ErrInvalidHeader)
 	}
 	return nil
+}
+
+// ValidateExpiresWithinFutureBound rejects credentials whose expires_unix exceeds now+maxTTL+clockSkew.
+func (h *ProofPayload) ValidateExpiresWithinFutureBound(now time.Time, maxTTL, clockSkew time.Duration) error {
+	if h.ExpiresUnix > now.Add(maxTTL).Add(clockSkew).Unix() {
+		return fmt.Errorf("%w: expiry too far in future", ErrInvalidHeader)
+	}
+	return nil
+}
+
+func (h *ProofPayload) ValidateAt(now time.Time) error {
+	if err := h.Validate(); err != nil {
+		return err
+	}
+	return h.ValidateExpiresNotPast(now)
 }
 
 func (h *ProofPayload) CanonicalMessage() []byte {

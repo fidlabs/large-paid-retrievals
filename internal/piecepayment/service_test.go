@@ -398,6 +398,31 @@ func TestAuthorizeAndSettleErrors(t *testing.T) {
 		}
 	})
 
+	t.Run("expired credential allowed when already paid", func(t *testing.T) {
+		paidStore := &mockDealStore{}
+		svcPaid, pkPaid, clientPaid := testService(t, paidStore, stubSettler{})
+		qPaid, err := svcPaid.IssueQuote(issueQuoteRequest(t, host, testPieceCID, clientPaid), testPieceCID, testQuotePieceGiB)
+		if err != nil {
+			t.Fatal(err)
+		}
+		chPaid := qPaid.Challenge
+		const paidTx = "0xpaidreuse"
+		now := time.Now().Unix()
+		paidStore.lastPaidAt = map[string]int64{chPaid.ID: now}
+		paidStore.lastPaidTxHash = map[string]string{chPaid.ID: paidTx}
+		if d, ok := paidStore.deals[chPaid.ID]; ok {
+			d.LastPaidTxHash = paidTx
+		}
+		raw := buildProof(t, pkPaid, chPaid, clientPaid, testPieceCID, host, "n-exp-paid", time.Now().Add(-time.Hour).Unix())
+		out, err := svcPaid.AuthorizeAndSettle(paidRequest(t, host, testPieceCID, raw), testPieceCID, raw)
+		if err != nil {
+			t.Fatalf("expected paid reuse with expired credential, got %v", err)
+		}
+		if out.TxHash != paidTx {
+			t.Fatalf("tx hash %q want %q", out.TxHash, paidTx)
+		}
+	})
+
 	t.Run("expiry too far", func(t *testing.T) {
 		raw := buildProof(t, pk, ch, client, testPieceCID, host, "n-far", time.Now().Add(48*time.Hour).Unix())
 		_, err := svc.AuthorizeAndSettle(paidRequest(t, host, testPieceCID, raw), testPieceCID, raw)
