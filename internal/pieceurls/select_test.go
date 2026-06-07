@@ -67,7 +67,7 @@ func TestSelectBestPieceSource_Cheapest402(t *testing.T) {
 	}
 
 	c := NewClient(&http.Client{Timeout: 30 * time.Second})
-	sel, err := c.SelectBestPieceSource(context.Background(), cid, "0x3333333333333333333333333333333333333333", []*url.URL{uHigh, uLow}, nil, nil)
+	sel, err := c.SelectBestPieceSource(context.Background(), cid, []*url.URL{uHigh, uLow}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestSelectBestPieceSource_FreeBeatsPaid(t *testing.T) {
 
 	dir := t.TempDir()
 	c := NewClient(&http.Client{Timeout: 30 * time.Second})
-	sel, err := c.SelectBestPieceSource(context.Background(), cid, "0x5555555555555555555555555555555555555555", []*url.URL{uPaid, uFree}, nil, nil)
+	sel, err := c.SelectBestPieceSource(context.Background(), cid, []*url.URL{uPaid, uFree}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestSelectBestPieceSource_FreeBeatsPaid(t *testing.T) {
 
 func TestSelectBestPieceSource_NoBases(t *testing.T) {
 	c := NewClient(&http.Client{})
-	_, err := c.SelectBestPieceSource(context.Background(), "bafy", "0x1", nil, nil, nil)
+	_, err := c.SelectBestPieceSource(context.Background(), "bafy", nil, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "no candidate bases") {
 		t.Fatalf("got %v", err)
 	}
@@ -145,7 +145,7 @@ func TestSelectBestPieceSource_NoUsableEndpoint(t *testing.T) {
 	defer srv.Close()
 	u, _ := url.Parse(srv.URL)
 	c := NewClient(srv.Client())
-	_, err := c.SelectBestPieceSource(context.Background(), cid, "0x2", []*url.URL{u}, nil, nil)
+	_, err := c.SelectBestPieceSource(context.Background(), cid, []*url.URL{u}, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "no usable endpoint") {
 		t.Fatalf("got %v", err)
 	}
@@ -162,7 +162,7 @@ func TestSelectBestPieceSource_Bad402Header(t *testing.T) {
 	var logs []string
 	logFn := func(format string, args ...any) { logs = append(logs, format) }
 	c := NewClient(srv.Client())
-	_, err := c.SelectBestPieceSource(context.Background(), cid, "0x3", []*url.URL{u}, logFn, nil)
+	_, err := c.SelectBestPieceSource(context.Background(), cid, []*url.URL{u}, logFn, nil)
 	if err == nil || !strings.Contains(err.Error(), "no usable endpoint") {
 		t.Fatalf("got %v", err)
 	}
@@ -180,15 +180,41 @@ func TestSelectBestPieceSource_InvalidChallengePayload(t *testing.T) {
 	defer srv.Close()
 	u, _ := url.Parse(srv.URL)
 	c := NewClient(srv.Client())
-	_, err := c.SelectBestPieceSource(context.Background(), cid, "0x4", []*url.URL{u}, nil, nil)
+	_, err := c.SelectBestPieceSource(context.Background(), cid, []*url.URL{u}, nil, nil)
 	if err == nil {
 		t.Fatal("expected no usable endpoint")
 	}
 }
 
+func TestSelectBestPieceSource_BareGETProbe(t *testing.T) {
+	const cid = "bafkreidcbkgxoddug6vawnjrzb4aaublfn46sd2rvxnykbxkkarke7y76e"
+	const payee = "0x2222222222222222222222222222222222222222"
+
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			gotQuery = r.URL.RawQuery
+		}
+		mpp402Handler(cid, "11111111-1111-1111-1111-111111111111", "0.01", payee)(w, r)
+	}))
+	defer srv.Close()
+
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := NewClient(srv.Client())
+	if _, err := c.SelectBestPieceSource(context.Background(), cid, []*url.URL{u}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if gotQuery != "" {
+		t.Fatalf("probe GET query = %q, want bare path", gotQuery)
+	}
+}
+
 func TestSelectBestPieceSource_NilClient(t *testing.T) {
 	var c *Client
-	_, err := c.SelectBestPieceSource(context.Background(), "bafy", "0x1", []*url.URL{{Scheme: "http", Host: "h"}}, nil, nil)
+	_, err := c.SelectBestPieceSource(context.Background(), "bafy", []*url.URL{{Scheme: "http", Host: "h"}}, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "nil") {
 		t.Fatalf("got %v", err)
 	}

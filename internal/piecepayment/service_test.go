@@ -70,7 +70,7 @@ func (m *mockDealStore) ConsumeNonce(_ context.Context, dealUUID, nonce string, 
 	return nil
 }
 
-func (m *mockDealStore) MarkPaid(_ context.Context, dealUUID, txHash string) error {
+func (m *mockDealStore) MarkPaid(_ context.Context, dealUUID, client, txHash string) error {
 	if m.markPaidErr == nil {
 		if m.lastPaidAt == nil {
 			m.lastPaidAt = map[string]int64{}
@@ -82,6 +82,7 @@ func (m *mockDealStore) MarkPaid(_ context.Context, dealUUID, txHash string) err
 		m.lastPaidTxHash[dealUUID] = txHash
 		if d, ok := m.deals[dealUUID]; ok {
 			d.LastPaidTxHash = txHash
+			d.Client = client
 		}
 	}
 	return m.markPaidErr
@@ -207,24 +208,32 @@ func TestNewRetrievalServiceRequiresStore(t *testing.T) {
 	_ = NewRetrievalService(Config{Store: nil})
 }
 
-func TestIdentifyClientAndSanitize(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "http://example/piece/x?client=0xAbCd", nil)
-	if got := identifyClient(req, "client", "X-Client"); got != "0xAbCd" {
-		t.Fatalf("query: %q", got)
+func TestQuoteClientAndSanitize(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "http://example/piece/x?client=0x1111111111111111111111111111111111111111", nil)
+	client, err := quoteClient(req, "client", "X-Client")
+	if err != nil || client != "0x1111111111111111111111111111111111111111" {
+		t.Fatalf("query: client=%q err=%v", client, err)
 	}
 	req = httptest.NewRequest(http.MethodGet, "http://example/piece/x", nil)
 	req.Header.Set("X-Client", "0x1111111111111111111111111111111111111111")
-	if got := identifyClient(req, "client", "X-Client"); got != "0x1111111111111111111111111111111111111111" {
-		t.Fatalf("header: %q", got)
+	client, err = quoteClient(req, "client", "X-Client")
+	if err != nil || client != "0x1111111111111111111111111111111111111111" {
+		t.Fatalf("header: client=%q err=%v", client, err)
 	}
 	req = httptest.NewRequest(http.MethodGet, "http://example/piece/x", nil)
 	req.RemoteAddr = "203.0.113.5:12345"
-	if got := identifyClient(req, "client", "X-Client"); got != "203.0.113.5" {
-		t.Fatalf("remote: %q", got)
+	client, err = quoteClient(req, "client", "X-Client")
+	if err != nil || client != "" {
+		t.Fatalf("anonymous: client=%q err=%v", client, err)
 	}
-	req.RemoteAddr = "badaddr"
-	if got := identifyClient(req, "client", "X-Client"); got != "badaddr" {
-		t.Fatalf("remote no port: %q", got)
+	req = httptest.NewRequest(http.MethodGet, "http://example/piece/x?client=not-valid", nil)
+	_, err = quoteClient(req, "client", "X-Client")
+	if err == nil {
+		t.Fatal("expected bad client error")
+	}
+	var bad *BadRequestError
+	if !errors.As(err, &bad) {
+		t.Fatalf("got %T %v", err, err)
 	}
 	if sanitizeClient("  ") != "unknown" {
 		t.Fatal("empty sanitize")
@@ -353,6 +362,24 @@ func TestIssueQuoteBadClient(t *testing.T) {
 	var bad *BadRequestError
 	if !errors.As(err, &bad) {
 		t.Fatalf("got %T %v", err, err)
+	}
+}
+
+func TestIssueQuoteWithoutClient(t *testing.T) {
+	store := &mockDealStore{deals: map[string]*Deal{}}
+	svc, _, _ := testService(t, store, stubSettler{})
+	req := httptest.NewRequest(http.MethodGet, "http://h/piece/"+testPieceCID, nil)
+	req.Host = "h"
+	out, err := svc.IssueQuote(req, testPieceCID, testQuotePieceGiB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Challenge.ID == "" || out.Challenge.Request.CID != testPieceCID {
+		t.Fatalf("challenge: %+v", out.Challenge)
+	}
+	deal := store.deals[out.Challenge.ID]
+	if deal == nil || deal.Client != "" {
+		t.Fatalf("anonymous quote stored client=%q", deal.Client)
 	}
 }
 

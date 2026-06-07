@@ -121,13 +121,13 @@ func (s *Store) IsDealPaidSince(ctx context.Context, dealUUID, client, cid strin
 	return n > 0, nil
 }
 
-func (s *Store) MarkPaid(ctx context.Context, dealUUID, txHash string) error {
+func (s *Store) MarkPaid(ctx context.Context, dealUUID, client, txHash string) error {
 	now := time.Now().Unix()
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE deals
-		SET last_paid_at = ?, last_paid_tx_hash = ?, paid_seen = paid_seen + 1
+		SET last_paid_at = ?, last_paid_tx_hash = ?, paid_seen = paid_seen + 1, client = ?
 		WHERE deal_uuid = ?
-	`, now, txHash, dealUUID)
+	`, now, txHash, client, dealUUID)
 	if err != nil {
 		return err
 	}

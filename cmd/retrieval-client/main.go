@@ -225,7 +225,7 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 					}
 				}
 
-				sel, err := pieceProber.SelectBestPieceSource(ctx, cid, client, bases, probeLog, probeCallbackFor(ui, i+1, len(allCIDs)))
+				sel, err := pieceProber.SelectBestPieceSource(ctx, cid, bases, probeLog, probeCallbackFor(ui, i+1, len(allCIDs)))
 				if err != nil {
 					if ui.Enabled() {
 						ui.ProbeEndpointsEnd(i+1, len(allCIDs), cid, "")
@@ -579,7 +579,7 @@ func cmdRailCheck(keyOpts *filpayKeyOpts) *cobra.Command {
 							return fmt.Errorf("discover: no HTTP endpoints for CID %s; use --sp-base-url to force a proxy", cid)
 						}
 					}
-					sel, err := pieceProber.SelectBestPieceSource(ctx, cid, client, bases, probeLog, nil)
+					sel, err := pieceProber.SelectBestPieceSource(ctx, cid, bases, probeLog, nil)
 					if err != nil {
 						return fmt.Errorf("no usable source for CID %s: %w", cid, err)
 					}
