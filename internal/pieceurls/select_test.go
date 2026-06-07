@@ -190,10 +190,10 @@ func TestSelectBestPieceSource_BareGETProbe(t *testing.T) {
 	const cid = "bafkreidcbkgxoddug6vawnjrzb4aaublfn46sd2rvxnykbxkkarke7y76e"
 	const payee = "0x2222222222222222222222222222222222222222"
 
-	var gotQuery string
+	gotQueryCh := make(chan string, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
-			gotQuery = r.URL.RawQuery
+			gotQueryCh <- r.URL.RawQuery
 		}
 		mpp402Handler(cid, "11111111-1111-1111-1111-111111111111", "0.01", payee)(w, r)
 	}))
@@ -207,7 +207,7 @@ func TestSelectBestPieceSource_BareGETProbe(t *testing.T) {
 	if _, err := c.SelectBestPieceSource(context.Background(), cid, []*url.URL{u}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if gotQuery != "" {
+	if gotQuery := <-gotQueryCh; gotQuery != "" {
 		t.Fatalf("probe GET query = %q, want bare path", gotQuery)
 	}
 }
