@@ -41,6 +41,7 @@ func TestParallelProgressFailureLinesStayShort(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	longErr := fmt.Errorf(`download %s failed: 402 Payment Required {"type":"https://paymentauth.org/problems/verification-failed","detail":"Credential payload failed validation"}`, cid0)
+	ui0.DownloadAttempt(32<<30, 5)
 	pui.setFailed(cid0, longErr)
 	pui.setFailed(cid1, longErr)
 	time.Sleep(120 * time.Millisecond)
@@ -63,6 +64,9 @@ func TestParallelProgressFailureLinesStayShort(t *testing.T) {
 		if strings.Contains(line, "failed:") {
 			t.Fatalf("unexpected inline failure detail: %q", line)
 		}
+	}
+	if !strings.Contains(final, "failed [retry 5]") {
+		t.Fatalf("expected retry count on failed terminal line, got:\n%s", final)
 	}
 }
 

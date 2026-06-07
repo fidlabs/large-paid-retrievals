@@ -124,14 +124,12 @@ func (p *parallelDownloadProgress) formatPieceLine(i int, final bool) string {
 	ps := p.pieces[i]
 	prefix := fmt.Sprintf("piece %d/%d %s", i+1, len(p.pieces), shortCID(ps.cid))
 	if ps.done {
+		suffix := terminalRetrySuffix(ps.dl.retries)
 		if ps.failed {
 			// Keep failure lines short during live redraws; full errors are in the CLI exit message.
-			return fmt.Sprintf("✗ %s failed", prefix)
+			return fmt.Sprintf("✗ %s failed%s", prefix, suffix)
 		}
-		if ps.dl.retries > 0 {
-			return fmt.Sprintf("✓ %s done [retry %d]", prefix, ps.dl.retries)
-		}
-		return fmt.Sprintf("✓ %s done", prefix)
+		return fmt.Sprintf("✓ %s done%s", prefix, suffix)
 	}
 	if !ps.started {
 		return fmt.Sprintf("  %s queued", prefix)
@@ -229,6 +227,13 @@ func (b *boundParallelPieceProgress) DownloadProgress(_ string, written, total i
 func (b *boundParallelPieceProgress) DownloadFailed(string) {}
 func (b *boundParallelPieceProgress) DownloadDone(_, _ string) {
 	b.parent.setDone(b.cid)
+}
+
+func terminalRetrySuffix(retries int) string {
+	if retries <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(" [retry %d]", retries)
 }
 
 func truncateRunes(s string, maxRunes int) string {

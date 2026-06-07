@@ -143,24 +143,62 @@ func (s *RetrievalService) IssueQuote(r *http.Request, cid string, pieceBytes in
 func (s *RetrievalService) AuthorizeAndSettle(r *http.Request, cid, rawHdr string) (*PaidOutcome, error) {
 	cred, err := mpp.DecodeAuthorization(rawHdr)
 	if err != nil {
+		s.logCredentialValidationFailure("decode_authorization",
+			"error", err.Error(),
+			"auth_len", len(strings.TrimSpace(rawHdr)),
+		)
 		return nil, &PaymentRequiredError{Code: "malformed-credential", Detail: "Invalid Payment authorization credential format"}
 	}
 	hdr := cred.Payload
 	if cred.Challenge.ID != hdr.ChallengeID || hdr.ChallengeID != hdr.DealUUID {
+		s.logCredentialValidationFailure("challenge_id_mismatch",
+			"challenge_id", cred.Challenge.ID,
+			"payload_challenge_id", hdr.ChallengeID,
+			"payload_deal_uuid", hdr.DealUUID,
+		)
 		return nil, &PaymentRequiredError{Code: "invalid-challenge", Detail: "Challenge id does not match deal id"}
 	}
 	now := time.Now()
 	if err := hdr.ValidateAt(now); err != nil {
+		s.logCredentialValidationFailure("payload_validate_at",
+			"error", err.Error(),
+			"deal_uuid", hdr.DealUUID,
+			"cid", hdr.CID,
+			"expires_unix", hdr.ExpiresUnix,
+			"now_unix", now.Unix(),
+		)
 		return nil, &PaymentRequiredError{Code: "verification-failed", Detail: "Credential payload failed validation"}
 	}
 	if hdr.ExpiresUnix > now.Add(10*time.Minute).Unix()+int64(s.cfg.MaxClockSkew.Seconds()) {
+		s.logCredentialValidationFailure("payload_expiry_too_far",
+			"deal_uuid", hdr.DealUUID,
+			"cid", hdr.CID,
+			"expires_unix", hdr.ExpiresUnix,
+			"now_unix", now.Unix(),
+			"max_clock_skew_sec", int64(s.cfg.MaxClockSkew.Seconds()),
+		)
 		return nil, &PaymentRequiredError{Code: "payment-expired", Detail: "Credential expiry is too far in the future"}
 	}
 	if strings.ToUpper(hdr.Method) != http.MethodGet || hdr.Path != r.URL.Path || !hostMatches(hdr.Host, r.Host) {
+		s.logCredentialValidationFailure("request_fields_mismatch",
+			"deal_uuid", hdr.DealUUID,
+			"cid", hdr.CID,
+			"cred_method", hdr.Method,
+			"req_method", r.Method,
+			"cred_path", hdr.Path,
+			"req_path", r.URL.Path,
+			"cred_host", hdr.Host,
+			"req_host", r.Host,
+		)
 		return nil, &PaymentRequiredError{Code: "verification-failed", Detail: "Credential request fields do not match"}
 	}
 	deal, err := s.cfg.Store.GetDeal(r.Context(), hdr.DealUUID)
 	if err != nil {
+		s.logCredentialValidationFailure("unknown_deal",
+			"deal_uuid", hdr.DealUUID,
+			"cid", hdr.CID,
+			"error", err.Error(),
+		)
 		return nil, &PaymentRequiredError{Code: "invalid-challenge", Detail: "Challenge is unknown or expired"}
 	}
 	expectedReqB64, err := mpp.CanonicalRequestB64(mpp.PaymentRequest{
@@ -178,16 +216,45 @@ func (s *RetrievalService) AuthorizeAndSettle(r *http.Request, cid, rawHdr strin
 	if !strings.EqualFold(cred.Challenge.Method, mpp.MethodID) ||
 		!strings.EqualFold(cred.Challenge.Intent, mpp.IntentID) ||
 		cred.Challenge.Request != expectedReqB64 {
+		s.logCredentialValidationFailure("challenge_params_mismatch",
+			"deal_uuid", deal.DealUUID,
+			"cid", cid,
+			"cred_method", cred.Challenge.Method,
+			"cred_intent", cred.Challenge.Intent,
+			"expected_method", mpp.MethodID,
+			"expected_intent", mpp.IntentID,
+			"cred_request", cred.Challenge.Request,
+			"expected_request", expectedReqB64,
+		)
 		return nil, &PaymentRequiredError{Deal: deal, Code: "invalid-challenge", Detail: "Credential challenge parameters do not match issued challenge"}
 	}
 	if !sameHexAddress(hdr.ClientAddress, deal.Client) || deal.CID != cid || (hdr.CID != "" && hdr.CID != cid) {
+		s.logCredentialValidationFailure("deal_binding_mismatch",
+			"deal_uuid", deal.DealUUID,
+			"cred_client", hdr.ClientAddress,
+			"deal_client", deal.Client,
+			"req_cid", cid,
+			"deal_cid", deal.CID,
+			"cred_cid", hdr.CID,
+		)
 		return nil, &PaymentRequiredError{Deal: deal, Code: "verification-failed", Detail: "Credential does not match quoted deal"}
 	}
 	if !strings.EqualFold(strings.TrimSpace(hdr.SigType), mpp.SigTypeEVM) {
+		s.logCredentialValidationFailure("unsupported_sig_type",
+			"deal_uuid", deal.DealUUID,
+			"cid", cid,
+			"sig_type", hdr.SigType,
+		)
 		return nil, &PaymentRequiredError{Deal: deal, Code: "method-unsupported", Detail: "Only evm signature type is supported"}
 	}
 	verifier := mpp.EVMVerifier{}
 	if err := verifier.Verify(hdr.ClientAddress, hdr.CanonicalMessage(), hdr.Signature); err != nil {
+		s.logCredentialValidationFailure("signature_verification",
+			"deal_uuid", deal.DealUUID,
+			"cid", cid,
+			"client", hdr.ClientAddress,
+			"error", err.Error(),
+		)
 		return nil, &PaymentRequiredError{Deal: deal, Code: "verification-failed", Detail: "Credential signature verification failed"}
 	}
 	since := time.Now().Add(-paidAccessTTL).Unix()
@@ -203,6 +270,12 @@ func (s *RetrievalService) AuthorizeAndSettle(r *http.Request, cid, rawHdr strin
 	}
 	if err := s.cfg.Store.ConsumeNonce(r.Context(), deal.DealUUID, hdr.Nonce, hdr.ExpiresUnix); err != nil {
 		if err == ErrReplayNonce {
+			s.logCredentialValidationFailure("nonce_replay",
+				"deal_uuid", deal.DealUUID,
+				"cid", cid,
+				"nonce", hdr.Nonce,
+				"expires_unix", hdr.ExpiresUnix,
+			)
 			return nil, &PaymentRequiredError{Deal: deal, Code: "invalid-challenge", Detail: "Credential nonce has already been used"}
 		}
 		return nil, fmt.Errorf("consume nonce: %w", err)
@@ -296,6 +369,16 @@ func sanitizeClient(v string) string {
 			return -1
 		}
 	}, v)
+}
+
+func (s *RetrievalService) logCredentialValidationFailure(reason string, attrs ...any) {
+	if s == nil || s.logger == nil {
+		return
+	}
+	args := make([]any, 0, len(attrs)+2)
+	args = append(args, "reason", reason)
+	args = append(args, attrs...)
+	s.logger.Debug("credential validation failed", args...)
 }
 
 func hostMatches(hdrHost, reqHost string) bool {
