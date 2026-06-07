@@ -32,7 +32,7 @@ func TestDownloadCARFormatsProblemDetails(t *testing.T) {
 	if !strings.Contains(msg, "Amount too low") {
 		t.Fatalf("expected detail in error, got %q", msg)
 	}
-	if !strings.Contains(msg, "https://paymentauth.org/problems/payment-insufficient") {
-		t.Fatalf("expected type in error, got %q", msg)
+	if strings.Contains(msg, "{") {
+		t.Fatalf("raw problem JSON should not appear in error, got %q", msg)
 	}
 }

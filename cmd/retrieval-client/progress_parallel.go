@@ -22,9 +22,11 @@ type parallelDownloadProgress struct {
 	out      io.Writer
 	piecePos map[string]int
 
-	mu     sync.Mutex
-	pieces []parallelPieceState
-	frame  int
+	mu      sync.Mutex
+	writeMu sync.Mutex
+	pieces  []parallelPieceState
+	frame   int
+	frozen  bool
 }
 
 func newParallelDownloadProgress(out io.Writer, cids []string) *parallelDownloadProgress {
@@ -59,27 +61,58 @@ func (p *parallelDownloadProgress) renderLoop(stop <-chan struct{}, done chan<- 
 	for {
 		select {
 		case <-stop:
-			p.render(true)
+			p.mu.Lock()
+			frozen := p.frozen
+			p.mu.Unlock()
+			if !frozen {
+				p.render(true)
+			}
 			return
 		case <-ticker.C:
+			p.mu.Lock()
+			frozen := p.frozen
+			p.mu.Unlock()
+			if frozen {
+				continue
+			}
+			if p.allTerminal() {
+				p.render(true)
+				p.mu.Lock()
+				p.frozen = true
+				p.mu.Unlock()
+				continue
+			}
 			p.render(false)
 		}
 	}
 }
 
+func (p *parallelDownloadProgress) allTerminal() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i := range p.pieces {
+		if !p.pieces[i].done {
+			return false
+		}
+	}
+	return len(p.pieces) > 0
+}
+
 func (p *parallelDownloadProgress) render(final bool) {
 	p.mu.Lock()
 	p.frame++
-	frame := p.frame
 	n := len(p.pieces)
-	moveUp := frame > 1
 	lines := make([]string, n)
 	for i := range p.pieces {
 		lines[i] = p.formatPieceLine(i, final)
 	}
+	overwrite := p.frame > 1
 	p.mu.Unlock()
 
-	if moveUp {
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
+
+	if overwrite {
 		fmt.Fprintf(p.out, "\033[%dA", n)
 	}
 	for _, line := range lines {
@@ -91,16 +124,12 @@ func (p *parallelDownloadProgress) formatPieceLine(i int, final bool) string {
 	ps := p.pieces[i]
 	prefix := fmt.Sprintf("piece %d/%d %s", i+1, len(p.pieces), shortCID(ps.cid))
 	if ps.done {
+		suffix := terminalRetrySuffix(ps.dl.retries)
 		if ps.failed {
-			if ps.lastError != "" {
-				return fmt.Sprintf("✗ %s failed: %s", prefix, ps.lastError)
-			}
-			return fmt.Sprintf("✗ %s failed", prefix)
+			// Keep failure lines short during live redraws; full errors are in the CLI exit message.
+			return fmt.Sprintf("✗ %s failed%s", prefix, suffix)
 		}
-		if ps.dl.retries > 0 {
-			return fmt.Sprintf("✓ %s done [retry %d]", prefix, ps.dl.retries)
-		}
-		return fmt.Sprintf("✓ %s done", prefix)
+		return fmt.Sprintf("✓ %s done%s", prefix, suffix)
 	}
 	if !ps.started {
 		return fmt.Sprintf("  %s queued", prefix)
@@ -195,11 +224,16 @@ func (b *boundParallelPieceProgress) DownloadHeaders(_ string, total int64) {
 func (b *boundParallelPieceProgress) DownloadProgress(_ string, written, total int64) {
 	b.parent.setProgress(b.cid, written, total)
 }
-func (b *boundParallelPieceProgress) DownloadFailed(_ string) {
-	b.parent.setFailed(b.cid, nil)
-}
+func (b *boundParallelPieceProgress) DownloadFailed(string) {}
 func (b *boundParallelPieceProgress) DownloadDone(_, _ string) {
 	b.parent.setDone(b.cid)
+}
+
+func terminalRetrySuffix(retries int) string {
+	if retries <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(" [retry %d]", retries)
 }
 
 func truncateRunes(s string, maxRunes int) string {

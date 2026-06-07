@@ -100,6 +100,30 @@ func TestProofPayloadValidateAndCanonicalMessage(t *testing.T) {
 	}
 }
 
+func TestProofPayloadValidateExpires(t *testing.T) {
+	now := time.Now()
+	p := signedProofPayload(t, testChallenge())
+
+	if err := p.ValidateExpiresNotPast(now); err != nil {
+		t.Fatalf("ValidateExpiresNotPast: %v", err)
+	}
+	p.ExpiresUnix = now.Add(-time.Minute).Unix()
+	if err := p.ValidateExpiresNotPast(now); !errors.Is(err, ErrInvalidHeader) {
+		t.Fatalf("ValidateExpiresNotPast past = %v, want ErrInvalidHeader", err)
+	}
+
+	p = signedProofPayload(t, testChallenge())
+	p.ExpiresUnix = now.Add(5 * time.Minute).Unix()
+	maxTTL := 10 * time.Minute
+	if err := p.ValidateExpiresWithinFutureBound(now, maxTTL, 0); err != nil {
+		t.Fatalf("ValidateExpiresWithinFutureBound: %v", err)
+	}
+	p.ExpiresUnix = now.Add(48 * time.Hour).Unix()
+	if err := p.ValidateExpiresWithinFutureBound(now, maxTTL, 0); !errors.Is(err, ErrInvalidHeader) {
+		t.Fatalf("ValidateExpiresWithinFutureBound far = %v, want ErrInvalidHeader", err)
+	}
+}
+
 func TestProofPayloadValidateErrors(t *testing.T) {
 	valid := signedProofPayload(t, testChallenge())
 
