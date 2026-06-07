@@ -26,12 +26,11 @@ func TestNewDownloadFailuresErrorMultiLine(t *testing.T) {
 		cid0 = "baga6ea4seaqchqdzwxltukzwbtajfugthjhikv2ezg46qjvsevzbe7nghsxtmbj"
 		cid1 = "baga6ea4seaqchqdzwxltukzwbtajfugthjhikv2ezg46qjvsevzbe7nghsxtmbk"
 	)
-	items := []challengeItem{{CID: cid0}, {CID: cid1}}
 	failures := []pieceDownloadFailure{
 		{idx: 1, cid: cid1, err: errors.New("download " + cid1 + " failed: 402 Payment Required {\"title\":\"Payment Verification Failed\",\"type\":\"https://paymentauth.org/problems/verification-failed\",\"detail\":\"bad sig\"}")},
 		{idx: 0, cid: cid0, err: errors.New("download " + cid0 + " failed: connection reset")},
 	}
-	msg := newDownloadFailuresError(items, failures).Error()
+	msg := newDownloadFailuresError(failures).Error()
 	if !strings.Contains(msg, "download failed for 2 piece(s):") {
 		t.Fatalf("header missing: %q", msg)
 	}

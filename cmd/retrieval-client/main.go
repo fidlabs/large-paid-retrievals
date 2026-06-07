@@ -466,7 +466,7 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 				}
 			}
 			if len(failures) > 0 {
-				return newDownloadFailuresError(items, failures)
+				return newDownloadFailuresError(failures)
 			}
 			fmt.Println("Fetch complete.")
 			return nil

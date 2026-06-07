@@ -14,7 +14,7 @@ type pieceDownloadFailure struct {
 	err error
 }
 
-func newDownloadFailuresError(items []challengeItem, failures []pieceDownloadFailure) error {
+func newDownloadFailuresError(failures []pieceDownloadFailure) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "download failed for %d piece(s):", len(failures))
 	sort.Slice(failures, func(i, j int) bool { return failures[i].idx < failures[j].idx })
