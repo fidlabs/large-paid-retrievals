@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -123,20 +122,7 @@ func downloadCAROnce(cli *http.Client, req *http.Request, cid, outDir string, ex
 		if verbose {
 			retrievalLog("GET error body (truncated): %s", truncateForLog(string(b), 512))
 		}
-		trimmed := strings.TrimSpace(string(b))
-		var pd problemDetails
-		if err := json.Unmarshal(b, &pd); err == nil && pd.Type != "" {
-			msg := fmt.Sprintf("download %s failed: %s", cid, res.Status)
-			if pd.Title != "" {
-				msg += " - " + pd.Title
-			}
-			if pd.Detail != "" {
-				msg += ": " + pd.Detail
-			}
-			msg += fmt.Sprintf(" (type=%s)", pd.Type)
-			return errors.New(msg)
-		}
-		return fmt.Errorf("download %s failed: %s %s", cid, res.Status, trimmed)
+		return formatHTTPDownloadProblem(cid, res.Status, b)
 	}
 
 	outPath := filepath.Join(outDir, sanitizeFilename(cid)+".car")

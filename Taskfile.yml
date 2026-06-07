@@ -69,18 +69,22 @@ tasks:
         urls="$(curl -fsS 'https://api.sp-tool.allocator.tech/providers?limit=10&has_working_url=true&is_consistent=true&extended=true' | jq -r '.providers[] | select(.is_reliable == true) | .working_url')"
         cid1="$(printf '%s\n' "${urls}" | sed -n '1p' | sed -E 's#/*$##' | awk -F'/' '{print $NF}')"
         cid2="$(printf '%s\n' "${urls}" | sed -n '2p' | sed -E 's#/*$##' | awk -F'/' '{print $NF}')"
-        if [[ -z "${cid1}" || -z "${cid2}" ]]; then
+        cid3="$(printf '%s\n' "${urls}" | sed -n '3p' | sed -E 's#/*$##' | awk -F'/' '{print $NF}')"
+        cid4="$(printf '%s\n' "${urls}" | sed -n '4p' | sed -E 's#/*$##' | awk -F'/' '{print $NF}')"
+        if [[ -z "${cid1}" || -z "${cid2}" || -z "${cid3}" || -z "${cid4}" ]]; then
           echo "failed to determine two CIDs from providers API" >&2
           exit 1
         fi
-        echo "** discovered CIDs: ${cid1}, ${cid2}"
+        echo "** discovered CIDs: ${cid1}, ${cid2}, ${cid3}, ${cid4}"
         ./bin/retrieval-client fetch \
           --filpay-private-key-file ./client.key \
           --pay-rpc-url "https://api.node.glif.io/rpc/v1" \
           --yes \
           --cid "${cid1}" \
-          --cid "${cid2}"
-        for piece in "${cid1}" "${cid2}"; do
+          --cid "${cid2}" \
+          --cid "${cid3}" \
+          --cid "${cid4}"
+        for piece in "${cid1}" "${cid2}" "${cid3}" "${cid4}"; do
           echo "** inspecting ${piece}.car"
           "{{.LOCAL_BIN}}/car" inspect "${piece}.car"
           "{{.LOCAL_BIN}}/car" verify "${piece}.car"
@@ -135,7 +139,9 @@ tasks:
           --sp-base-url "http://127.0.0.1:${sp_proxy_port}" \
           --yes \
           --cid baga6ea4seaqchqdzwxltukzwbtajfugthjhikv2ezg46qjvsevzbe7nghsxtmbj \
-          --cid baga6ea4seaqchqdzwxltukzwbtajfugthjhikv2ezg46qjvsevzbe7nghsxtmbk
+          --cid baga6ea4seaqchqdzwxltukzwbtajfugthjhikv2ezg46qjvsevzbe7nghsxtmbk \
+          --cid baga6ea4seaqchqdzwxltukzwbtajfugthjhikv2ezg46qjvsevzbe7nghsxtmbm \
+          --cid baga6ea4seaqchqdzwxltukzwbtajfugthjhikv2ezg46qjvsevzbe7nghsxtmbn
         # we fetch a dummy CAR file which is all zeros so we can't usefully verify it
         echo "*** piece fetched ***"
 

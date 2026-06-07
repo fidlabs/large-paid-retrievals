@@ -454,15 +454,19 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 				<-doneUI
 			}
 
-			var errs []string
+			var failures []pieceDownloadFailure
 			for i := 0; i < len(items); i++ {
 				r := <-results
 				if r.err != nil {
-					errs = append(errs, fmt.Sprintf("%s: %v", items[r.idx].CID, r.err))
+					failures = append(failures, pieceDownloadFailure{
+						idx: r.idx,
+						cid: items[r.idx].CID,
+						err: r.err,
+					})
 				}
 			}
-			if len(errs) > 0 {
-				return fmt.Errorf("download failed for %d piece(s): %s", len(errs), strings.Join(errs, "; "))
+			if len(failures) > 0 {
+				return newDownloadFailuresError(items, failures)
 			}
 			fmt.Println("Fetch complete.")
 			return nil
