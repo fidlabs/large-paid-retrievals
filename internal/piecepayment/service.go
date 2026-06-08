@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
-	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -42,7 +41,7 @@ type DealStore interface {
 	GetDeal(ctx context.Context, dealUUID string) (*Deal, error)
 	IsDealPaidSince(ctx context.Context, dealUUID, client, cid string, sinceUnix int64) (bool, error)
 	ConsumeNonce(ctx context.Context, dealUUID, nonce string, expiresUnix int64) error
-	MarkPaid(ctx context.Context, dealUUID, txHash string) error
+	MarkPaid(ctx context.Context, dealUUID, client, txHash string) error
 }
 
 type FilecoinPaySettler interface {
@@ -118,10 +117,9 @@ func NewRetrievalService(cfg Config) *RetrievalService {
 }
 
 func (s *RetrievalService) IssueQuote(r *http.Request, cid string, pieceBytes int64) (*QuoteOutcome, error) {
-	client := identifyClient(r, s.cfg.ClientQuery, s.cfg.ClientHeader)
-	if !common.IsHexAddress(strings.TrimSpace(client)) {
-		s.logger.Warn("bad request: client must be 0x FVM address", "client", client)
-		return nil, &BadRequestError{Message: "bad request: client must be a 0x FVM address"}
+	client, err := quoteClient(r, s.cfg.ClientQuery, s.cfg.ClientHeader)
+	if err != nil {
+		return nil, err
 	}
 	if pieceBytes < 0 {
 		return nil, ErrPieceSizeUnknown
@@ -227,7 +225,20 @@ func (s *RetrievalService) AuthorizeAndSettle(r *http.Request, cid, rawHdr strin
 		)
 		return nil, &PaymentRequiredError{Deal: deal, Code: "invalid-challenge", Detail: "Credential challenge parameters do not match issued challenge"}
 	}
-	if !sameHexAddress(hdr.ClientAddress, deal.Client) || deal.CID != cid || (hdr.CID != "" && hdr.CID != cid) {
+	payerClient, err := dealPayerClient(deal, hdr)
+	if err != nil {
+		s.logCredentialValidationFailure("deal_binding_mismatch",
+			"deal_uuid", deal.DealUUID,
+			"cred_client", hdr.ClientAddress,
+			"deal_client", deal.Client,
+			"req_cid", cid,
+			"deal_cid", deal.CID,
+			"cred_cid", hdr.CID,
+			"error", err.Error(),
+		)
+		return nil, &PaymentRequiredError{Deal: deal, Code: "verification-failed", Detail: err.Error()}
+	}
+	if deal.CID != cid || (hdr.CID != "" && hdr.CID != cid) {
 		s.logCredentialValidationFailure("deal_binding_mismatch",
 			"deal_uuid", deal.DealUUID,
 			"cred_client", hdr.ClientAddress,
@@ -260,8 +271,8 @@ func (s *RetrievalService) AuthorizeAndSettle(r *http.Request, cid, rawHdr strin
 	// settlement and serve the piece immediately — supports resumable downloads and
 	// parallel/range retries without charging the client again.
 	since := now.Add(-paidAccessTTL).Unix()
-	if paid, err := s.cfg.Store.IsDealPaidSince(r.Context(), deal.DealUUID, deal.Client, deal.CID, since); err == nil && paid {
-		s.logger.Info("paid retrieval reused", "deal_uuid", deal.DealUUID, "client", deal.Client, "cid", cid)
+	if paid, err := s.cfg.Store.IsDealPaidSince(r.Context(), deal.DealUUID, payerClient, deal.CID, since); err == nil && paid {
+		s.logger.Info("paid retrieval reused", "deal_uuid", deal.DealUUID, "client", payerClient, "cid", cid)
 		return &PaidOutcome{Deal: deal, CID: cid, TxHash: deal.LastPaidTxHash}, nil
 	} else if err != nil {
 		return nil, fmt.Errorf("check paid window: %w", err)
@@ -295,7 +306,7 @@ func (s *RetrievalService) AuthorizeAndSettle(r *http.Request, cid, rawHdr strin
 		}
 		return nil, fmt.Errorf("consume nonce: %w", err)
 	}
-	payer := common.HexToAddress(strings.TrimSpace(deal.Client))
+	payer := common.HexToAddress(payerClient)
 	payeeAddr := common.HexToAddress(strings.TrimSpace(deal.Payee0x))
 	unlock := s.lockSettlementPair(payer, payeeAddr)
 	defer unlock()
@@ -305,11 +316,11 @@ func (s *RetrievalService) AuthorizeAndSettle(r *http.Request, cid, rawHdr strin
 	}
 	s.logger.Info("filecoin pay rail settled", "deal_uuid", deal.DealUUID, "settle_tx", txHash, "payer", payer.Hex(), "payee", payeeAddr.Hex())
 
-	if err := s.cfg.Store.MarkPaid(r.Context(), deal.DealUUID, txHash); err != nil {
+	if err := s.cfg.Store.MarkPaid(r.Context(), deal.DealUUID, payerClient, txHash); err != nil {
 		// We don't return an error here because we want to continue serving the piece even if marking paid fails as payment has been settled.
 		s.logger.Error("failed to mark deal paid", "error", err, "deal_uuid", deal.DealUUID)
 	}
-	s.logger.Info("paid retrieval authorized", "deal_uuid", deal.DealUUID, "client", deal.Client, "cid", cid)
+	s.logger.Info("paid retrieval authorized", "deal_uuid", deal.DealUUID, "client", payerClient, "cid", cid)
 	return &PaidOutcome{Deal: deal, CID: cid, TxHash: txHash}, nil
 }
 
@@ -348,18 +359,40 @@ func buildChallenge(host, dealID, cid, priceUSDFC, payee string) mpp.Challenge {
 	}
 }
 
-func identifyClient(r *http.Request, clientQuery, clientHeader string) string {
+// quoteClient returns the payer address for a new quote. When the client query
+// parameter or header is omitted, the quote is anonymous and the payer is taken
+// from the signed credential at settlement time.
+func quoteClient(r *http.Request, clientQuery, clientHeader string) (string, error) {
 	if v := strings.TrimSpace(r.URL.Query().Get(clientQuery)); v != "" {
-		return sanitizeClient(v)
+		client := sanitizeClient(v)
+		if !common.IsHexAddress(client) {
+			return "", &BadRequestError{Message: "bad request: client must be a 0x FVM address"}
+		}
+		return client, nil
 	}
 	if v := strings.TrimSpace(r.Header.Get(clientHeader)); v != "" {
-		return sanitizeClient(v)
+		client := sanitizeClient(v)
+		if !common.IsHexAddress(client) {
+			return "", &BadRequestError{Message: "bad request: client must be a 0x FVM address"}
+		}
+		return client, nil
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return sanitizeClient(r.RemoteAddr)
+	return "", nil
+}
+
+func dealPayerClient(deal *Deal, hdr mpp.ProofPayload) (string, error) {
+	quoted := strings.TrimSpace(deal.Client)
+	signed := strings.TrimSpace(hdr.ClientAddress)
+	if quoted != "" {
+		if !sameHexAddress(signed, quoted) {
+			return "", errors.New("Credential does not match quoted deal")
+		}
+		return quoted, nil
 	}
-	return sanitizeClient(host)
+	if !common.IsHexAddress(signed) {
+		return "", errors.New("Credential client must be a 0x FVM address")
+	}
+	return signed, nil
 }
 
 func sanitizeClient(v string) string {

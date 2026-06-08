@@ -190,10 +190,11 @@ func (s *expiredPaidDealStore) ConsumeNonce(_ context.Context, dealUUID, nonce s
 	return nil
 }
 
-func (s *expiredPaidDealStore) MarkPaid(_ context.Context, dealUUID, txHash string) error {
+func (s *expiredPaidDealStore) MarkPaid(_ context.Context, dealUUID, client, txHash string) error {
 	s.paidAt[dealUUID] = s.paidTime().Unix()
 	if d, ok := s.deals[dealUUID]; ok {
 		d.LastPaidTxHash = txHash
+		d.Client = client
 	}
 	return nil
 }
@@ -342,6 +343,81 @@ func TestReplayNonceAllowedWithinPaidWindow(t *testing.T) {
 	defer res2.Body.Close()
 	if res2.StatusCode != http.StatusOK {
 		t.Fatalf("expected replay 200 got %d", res2.StatusCode)
+	}
+}
+
+func TestAnonymousQuoteReplayWithinPaidWindow(t *testing.T) {
+	s := newTestStore(t)
+	defer s.Close()
+
+	pk, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := crypto.PubkeyToAddress(pk.PublicKey).Hex()
+	mock := &mockPaySettler{}
+	h := newTestHandler(pp.Config{
+		PriceUSDFCPerGB: "0.1",
+		FilecoinPay:     mock,
+		QuotePayee0x:    testQuotePayee0x,
+		Store:           s,
+	})
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	const replayCID = "bafkreif6in2d6leqaxf45b4x6s2x5qncg2puu6n2v4f7rfz4gbx2yldl3e"
+	qres, err := http.Get(ts.URL + "/piece/" + replayCID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer qres.Body.Close()
+	if qres.StatusCode != http.StatusPaymentRequired {
+		t.Fatalf("quote status %d", qres.StatusCode)
+	}
+	challenge := mustChallengeFromResponse(t, qres)
+	hdr := &mpp.ProofPayload{
+		Version:       mpp.VersionV1,
+		ChallengeID:   challenge.ID,
+		DealUUID:      challenge.Request.DealUUID,
+		ClientAddress: client,
+		CID:           replayCID,
+		Method:        http.MethodGet,
+		Path:          "/piece/" + replayCID,
+		Host:          mustHostFromURL(t, ts.URL),
+		Nonce:         "anon-same-nonce",
+		ExpiresUnix:   time.Now().Add(time.Minute).Unix(),
+	}
+	st, sig, err := mpp.SignEVM(pk, hdr.CanonicalMessage())
+	if err != nil {
+		t.Fatal(err)
+	}
+	hdr.SigType = st
+	hdr.Signature = sig
+	raw := mustAuthorization(t, *challenge, hdr)
+
+	req1, _ := http.NewRequest(http.MethodGet, ts.URL+"/piece/"+replayCID, nil)
+	req1.Header.Set("Authorization", raw)
+	res1, err := http.DefaultClient.Do(req1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res1.Body.Close()
+	if res1.StatusCode != http.StatusOK {
+		t.Fatalf("expected first 200 got %d", res1.StatusCode)
+	}
+
+	req2, _ := http.NewRequest(http.MethodGet, ts.URL+"/piece/"+replayCID, nil)
+	req2.Header.Set("Authorization", raw)
+	res2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res2.Body.Close()
+	if res2.StatusCode != http.StatusOK {
+		t.Fatalf("expected replay 200 got %d", res2.StatusCode)
+	}
+	if mock.called != 1 {
+		t.Fatalf("expected settle called once, got %d", mock.called)
 	}
 }
 
@@ -534,6 +610,26 @@ func TestBadClientAddress(t *testing.T) {
 	}
 	if mustProblemType(t, res) != "https://paymentauth.org/problems/bad-request" {
 		t.Fatal("problem type")
+	}
+}
+
+func TestRawGETIssues402(t *testing.T) {
+	s := newTestStore(t)
+	defer s.Close()
+	h := newTestHandler(pp.Config{Store: s, FilecoinPay: &mockPaySettler{}, QuotePayee0x: testQuotePayee0x})
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	res, err := http.Get(ts.URL + "/piece/" + testPieceCID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusPaymentRequired {
+		t.Fatalf("status %d", res.StatusCode)
+	}
+	if _, err := mpp.ParseWWWAuthenticate(res.Header.Get("WWW-Authenticate")); err != nil {
+		t.Fatalf("WWW-Authenticate: %v", err)
 	}
 }
 

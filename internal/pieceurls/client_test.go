@@ -10,7 +10,7 @@ func TestNewClientRequiresHTTP(t *testing.T) {
 	if _, err := NewClient(nil).DiscoverPieceHTTPBases(context.Background(), "bafy1"); err == nil {
 		t.Fatal("expected error for nil HTTP client")
 	}
-	if _, err := NewClient(nil).SelectBestPieceSource(context.Background(), "bafy", "0x1", nil, nil, nil); err == nil {
+	if _, err := NewClient(nil).SelectBestPieceSource(context.Background(), "bafy", nil, nil, nil); err == nil {
 		t.Fatal("expected error for nil HTTP client on select")
 	}
 }

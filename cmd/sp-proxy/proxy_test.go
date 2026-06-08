@@ -326,6 +326,21 @@ func TestBuildProxyHandlerRoutes(t *testing.T) {
 		}
 	})
 
+	t.Run("raw GET issues payment challenge", func(t *testing.T) {
+		const testCID = "bafkreidde4sfyosf2pm6u4vxb65wogjg464a6y6tcg75opo6q5wv34bley"
+		res, err := http.Get(ts.URL + "/piece/" + testCID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		if res.StatusCode != http.StatusPaymentRequired {
+			t.Fatalf("expected 402 got %d", res.StatusCode)
+		}
+		if _, err := mpp.ParseWWWAuthenticate(res.Header.Get("WWW-Authenticate")); err != nil {
+			t.Fatalf("WWW-Authenticate: %v", err)
+		}
+	})
+
 	t.Run("piece HEAD proxied to upstream", func(t *testing.T) {
 		req, err := http.NewRequest(http.MethodHead, ts.URL+"/piece/bafytestpiece", nil)
 		if err != nil {

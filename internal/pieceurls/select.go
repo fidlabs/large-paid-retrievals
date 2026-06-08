@@ -32,11 +32,11 @@ type Selection struct {
 	TotalBytes int64
 }
 
-// SelectBestPieceSource probes each base with HEAD (size) and GET {base}/piece/{cid}?client=… (concurrently).
+// SelectBestPieceSource probes each base with HEAD (size) and bare GET {base}/piece/{cid} (concurrently).
 // Any GET 200 marks the piece as free (response body is not downloaded during probe).
 // Among 402 responses with a valid MPP WWW-Authenticate challenge, the lowest price_usdfc (parsed as base units) wins.
 // Other status codes and failures are ignored.
-func (c *Client) SelectBestPieceSource(ctx context.Context, pieceCID, client0x string, bases []*url.URL, log func(string, ...any), probe ProbeCallback) (*Selection, error) {
+func (c *Client) SelectBestPieceSource(ctx context.Context, pieceCID string, bases []*url.URL, log func(string, ...any), probe ProbeCallback) (*Selection, error) {
 	if c == nil || c.HTTP == nil {
 		return nil, fmt.Errorf("pieceurls: client or HTTP client is nil")
 	}
@@ -93,7 +93,7 @@ func (c *Client) SelectBestPieceSource(ctx context.Context, pieceCID, client0x s
 				}
 			}()
 
-			sel, err := c.probePieceEndpoint(ctx, b, pieceCID, client0x, log, &freeClaimed, &freeResult, cancel)
+			sel, err := c.probePieceEndpoint(ctx, b, pieceCID, log, &freeClaimed, &freeResult, cancel)
 			if err != nil || sel == nil {
 				return
 			}
@@ -134,13 +134,16 @@ func cloneURLBase(b *url.URL) *url.URL {
 	return &u
 }
 
-func (c *Client) probePieceEndpoint(ctx context.Context, base *url.URL, cid, client0x string, log func(string, ...any), freeClaimed *atomic.Bool, freeResult *atomic.Pointer[Selection], cancel context.CancelFunc) (*Selection, error) {
+func pieceProbeURL(base *url.URL, cid string) string {
 	u := *base
 	u.Path = "/piece/" + cid
-	q := u.Query()
-	q.Set("client", client0x)
-	u.RawQuery = q.Encode()
-	full := u.String()
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
+}
+
+func (c *Client) probePieceEndpoint(ctx context.Context, base *url.URL, cid string, log func(string, ...any), freeClaimed *atomic.Bool, freeResult *atomic.Pointer[Selection], cancel context.CancelFunc) (*Selection, error) {
+	full := pieceProbeURL(base, cid)
 	if log != nil {
 		log("probing endpoint %s", full)
 	}
