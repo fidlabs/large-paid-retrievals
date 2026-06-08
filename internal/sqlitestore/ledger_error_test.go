@@ -11,6 +11,33 @@ import (
 	pp "github.com/fidlabs/paid-retrievals/internal/piecepayment"
 )
 
+func TestCreditSettlementInvalidSettled(t *testing.T) {
+	s, err := OpenStore(filepath.Join(t.TempDir(), "sp.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	const (
+		payer = "0x1111111111111111111111111111111111111111"
+		payee = "0x2222222222222222222222222222222222222222"
+	)
+	if err := s.CreditSettlement(ctx, pp.SettlementCredit{
+		Payer: payer, Payee: payee, SettleTxHash: "0xcr-1", CreditedBaseUnits: big.NewInt(1),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE settlement_pools SET settled_base_units = 'bad' WHERE payer = ? AND payee = ?`, payer, payee); err != nil {
+		t.Fatal(err)
+	}
+	err = s.CreditSettlement(ctx, pp.SettlementCredit{
+		Payer: payer, Payee: payee, SettleTxHash: "0xcr-2", CreditedBaseUnits: big.NewInt(1),
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid settled_base_units") {
+		t.Fatalf("got %v", err)
+	}
+}
+
 func TestTryAllocateDealInvalidRemaining(t *testing.T) {
 	s, err := OpenStore(filepath.Join(t.TempDir(), "sp.db"))
 	if err != nil {

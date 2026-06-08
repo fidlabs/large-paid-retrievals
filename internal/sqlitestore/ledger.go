@@ -237,7 +237,7 @@ func openPoolForPair(ctx context.Context, tx *sql.Tx, payer, payee string) (pool
 func addBaseUnitsString(current string, add *big.Int) (*big.Int, error) {
 	base, ok := new(big.Int).SetString(strings.TrimSpace(current), 10)
 	if !ok {
-		base = big.NewInt(0)
+		return nil, fmt.Errorf("sqlitestore: invalid settled_base_units %q", current)
 	}
 	_, total, err := addBaseUnits(base, add)
 	return total, err

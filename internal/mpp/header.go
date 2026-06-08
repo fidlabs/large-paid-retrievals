@@ -57,7 +57,7 @@ type ProofPayload struct {
 	Host          string `json:"host"`
 	Nonce         string `json:"nonce"`
 	ExpiresUnix   int64  `json:"expires_unix"`
-	PaymentTxHash string `json:"payment_tx_hash,omitempty"`
+	PaymentTxHash string `json:"payment_tx_hash"`
 	SigType       string `json:"sig_type"`
 	Signature     string `json:"sig"`
 }
