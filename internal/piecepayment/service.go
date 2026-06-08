@@ -273,11 +273,13 @@ func (s *RetrievalService) AuthorizeAndSettle(r *http.Request, cid, rawHdr strin
 	if alloc, err := s.cfg.Store.GetActiveAllocation(r.Context(), deal.DealUUID, payerClient, deal.CID, now.Unix()); err != nil {
 		return nil, fmt.Errorf("check paid access: %w", err)
 	} else if alloc != nil {
+		payerHex := common.HexToAddress(payerClient).Hex()
+		payeeHex := common.HexToAddress(strings.TrimSpace(deal.Payee0x)).Hex()
 		s.logLedger(r.Context(), "access_reuse",
 			"deal_uuid", deal.DealUUID,
 			"client", payerClient,
-			"payer", payerClient,
-			"payee", strings.TrimSpace(deal.Payee0x),
+			"payer", payerHex,
+			"payee", payeeHex,
 			"cid", cid,
 			"pool_id", alloc.PoolID,
 			"price_base_units", alloc.PriceBaseUnits,

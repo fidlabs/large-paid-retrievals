@@ -13,7 +13,22 @@ import (
 
 const railOneTimePaymentProcessedABI = `[{"anonymous":false,"inputs":[{"indexed":true,"internalType":"uint256","name":"railId","type":"uint256"},{"indexed":false,"internalType":"uint256","name":"netPayeeAmount","type":"uint256"},{"indexed":false,"internalType":"uint256","name":"operatorCommission","type":"uint256"},{"indexed":false,"internalType":"uint256","name":"networkFee","type":"uint256"}],"name":"RailOneTimePaymentProcessed","type":"event"}]`
 
-var railOneTimePaymentProcessedTopic = crypto.Keccak256Hash([]byte("RailOneTimePaymentProcessed(uint256,uint256,uint256,uint256)"))
+var (
+	railOneTimePaymentProcessedTopic = crypto.Keccak256Hash([]byte("RailOneTimePaymentProcessed(uint256,uint256,uint256,uint256)"))
+	railOneTimePaymentProcessedEvent abi.Event
+)
+
+func init() {
+	parsed, err := abi.JSON(strings.NewReader(railOneTimePaymentProcessedABI))
+	if err != nil {
+		panic(fmt.Sprintf("filpay: parse RailOneTimePaymentProcessed abi: %v", err))
+	}
+	ev, ok := parsed.Events["RailOneTimePaymentProcessed"]
+	if !ok {
+		panic("filpay: RailOneTimePaymentProcessed event missing from abi")
+	}
+	railOneTimePaymentProcessedEvent = ev
+}
 
 // sumRailOneTimePaymentGross sums the gross one-time charge per rail from
 // RailOneTimePaymentProcessed logs: netPayeeAmount + operatorCommission + networkFee.
@@ -27,14 +42,7 @@ func sumRailOneTimePaymentGross(receipt *types.Receipt, paymentsAddr common.Addr
 	if receipt.Status != types.ReceiptStatusSuccessful {
 		return nil, fmt.Errorf("filpay: payment tx failed")
 	}
-	parsed, err := abi.JSON(strings.NewReader(railOneTimePaymentProcessedABI))
-	if err != nil {
-		return nil, fmt.Errorf("filpay: parse RailOneTimePaymentProcessed abi: %w", err)
-	}
-	ev, ok := parsed.Events["RailOneTimePaymentProcessed"]
-	if !ok {
-		return nil, fmt.Errorf("filpay: RailOneTimePaymentProcessed event missing from abi")
-	}
+	ev := railOneTimePaymentProcessedEvent
 
 	byRail := map[string]*big.Int{}
 	for _, lg := range receipt.Logs {

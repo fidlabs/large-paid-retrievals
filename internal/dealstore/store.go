@@ -11,7 +11,7 @@ var (
 	ErrDealNotFound     = errors.New("deal not found")
 	ErrReplayNonce      = errors.New("nonce already used")
 	ErrInsufficientPool = errors.New("settlement pool balance insufficient")
-	ErrZeroSettlement   = errors.New("settlement credited zero to payee")
+	ErrZeroSettlement   = errors.New("settlement credit amount must be positive")
 )
 
 type Deal struct {
