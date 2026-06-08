@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -263,6 +264,8 @@ func (s *expiredPaidDealStore) ConsumeNonce(_ context.Context, dealUUID, nonce s
 	s.nonces[key] = struct{}{}
 	return nil
 }
+
+func (*expiredPaidDealStore) DumpState(context.Context, io.Writer) error { return nil }
 
 func mustProblemType(t *testing.T, res *http.Response) string {
 	t.Helper()

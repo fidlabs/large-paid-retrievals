@@ -2,6 +2,7 @@ package piecepayment
 
 import (
 	"context"
+	"io"
 	"math/big"
 	"time"
 
@@ -146,6 +147,8 @@ func (m *mockDealStore) ConsumeNonce(_ context.Context, dealUUID, nonce string, 
 	m.deals[key] = &Deal{}
 	return nil
 }
+
+func (*mockDealStore) DumpState(context.Context, io.Writer) error { return nil }
 
 type stubSettler struct {
 	creditRef string

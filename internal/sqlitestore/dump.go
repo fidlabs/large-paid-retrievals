@@ -8,7 +8,8 @@ import (
 	"time"
 )
 
-// DumpState writes all deals (quotes) and settlement ledger rows to w for operator diagnostics.
+// DumpState implements dealstore.DealStore. It writes all deals (quotes) and settlement
+// ledger rows to w for operator diagnostics.
 func (s *Store) DumpState(ctx context.Context, w io.Writer) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	if _, err := fmt.Fprintf(w, "=== sp-proxy state dump (%s) ===\n", now); err != nil {

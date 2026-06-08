@@ -18,6 +18,7 @@ package dealstore
 import (
 	"context"
 	"errors"
+	"io"
 	"math/big"
 	"time"
 )
@@ -51,6 +52,8 @@ type DealStore interface {
 	CreditSettlement(ctx context.Context, credit SettlementCredit) error
 	OpenSettlementPool(ctx context.Context, payer, payee string) (*SettlementPoolSnapshot, error)
 	ConsumeNonce(ctx context.Context, dealUUID, nonce string, expiresUnix int64) error
+	// DumpState writes quotes, pools, credits, and allocations to w (e.g. SIGUSR1 diagnostics).
+	DumpState(ctx context.Context, w io.Writer) error
 }
 
 // DealAllocation is the paid-access grant created when a pool is debited for a deal.
