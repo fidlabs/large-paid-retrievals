@@ -33,7 +33,7 @@ func (s *Store) DumpState(ctx context.Context, w io.Writer) error {
 func (s *Store) dumpDeals(ctx context.Context, w io.Writer) error {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT deal_uuid, client, cid, price_usdfc, payee_0x, created_at, last_quoted_at,
-		       last_paid_at, last_paid_tx_hash, quoted_seen, paid_seen
+		       last_paid_at, last_paid_tx_hash
 		FROM deals
 		ORDER BY last_quoted_at DESC, deal_uuid
 	`)
@@ -49,18 +49,18 @@ func (s *Store) dumpDeals(ctx context.Context, w io.Writer) error {
 	for rows.Next() {
 		var (
 			dealUUID, client, cid, priceUSDFC, payee0x, lastPaidTx string
-			createdAt, lastQuotedAt, quotedSeen, paidSeen          int64
-			lastPaidAt                                             sql.NullInt64
+			createdAt, lastQuotedAt                                  int64
+			lastPaidAt                                               sql.NullInt64
 		)
 		if err := rows.Scan(&dealUUID, &client, &cid, &priceUSDFC, &payee0x, &createdAt, &lastQuotedAt,
-			&lastPaidAt, &lastPaidTx, &quotedSeen, &paidSeen); err != nil {
+			&lastPaidAt, &lastPaidTx); err != nil {
 			return fmt.Errorf("dump deals scan: %w", err)
 		}
 		_, err := fmt.Fprintf(w,
-			"deal_uuid=%s client=%s cid=%s price_usdfc=%s payee_0x=%s created_at=%s last_quoted_at=%s last_paid_at=%s last_paid_tx_hash=%s quoted_seen=%d paid_seen=%d\n",
+			"deal_uuid=%s client=%s cid=%s price_usdfc=%s payee_0x=%s created_at=%s last_quoted_at=%s last_paid_at=%s last_paid_tx_hash=%s\n",
 			dealUUID, client, cid, priceUSDFC, payee0x,
 			formatUnix(createdAt), formatUnix(lastQuotedAt), formatNullUnix(lastPaidAt),
-			lastPaidTx, quotedSeen, paidSeen,
+			lastPaidTx,
 		)
 		if err != nil {
 			return err

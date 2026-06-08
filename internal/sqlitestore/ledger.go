@@ -185,7 +185,7 @@ func (s *Store) TryAllocateDeal(ctx context.Context, req dealstore.AllocateDealR
 
 	res, err := tx.ExecContext(ctx, `
 		UPDATE deals
-		SET last_paid_at = ?, last_paid_tx_hash = ?, paid_seen = paid_seen + 1, client = ?
+		SET last_paid_at = ?, last_paid_tx_hash = ?, client = ?
 		WHERE deal_uuid = ?
 	`, now, settleTx, req.Client, req.DealUUID)
 	if err != nil {

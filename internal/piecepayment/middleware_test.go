@@ -413,6 +413,147 @@ func TestReplayNonceAllowedWithinPaidWindow(t *testing.T) {
 	}
 }
 
+func TestDownloadRetryStopsAfterPaidAccessTTL(t *testing.T) {
+	s := newTestStore(t)
+	defer s.Close()
+
+	pk, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := crypto.PubkeyToAddress(pk.PublicKey).Hex()
+	mock := &mockPaySettler{}
+	h := newTestHandler(pp.Config{
+		PriceUSDFCPerGB: "0.1",
+		FilecoinPay:     mock,
+		QuotePayee0x:    testQuotePayee0x,
+		Store:           s,
+	})
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	const cid = "bafkreif6in2d6leqaxf45b4x6s2x5qncg2puu6n2v4f7rfz4gbx2yldl3e"
+	qres, err := http.Get(ts.URL + "/piece/" + cid + "?client=" + client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer qres.Body.Close()
+	challenge := mustChallengeFromResponse(t, qres)
+	host := mustHostFromURL(t, ts.URL)
+	expires := time.Now().Add(time.Minute).Unix()
+
+	buildAuth := func(nonce string) string {
+		hdr := &mpp.ProofPayload{
+			Version:       mpp.VersionV1,
+			ChallengeID:   challenge.ID,
+			DealUUID:      challenge.Request.DealUUID,
+			ClientAddress: client,
+			CID:           cid,
+			Method:        http.MethodGet,
+			Path:          "/piece/" + cid,
+			Host:          host,
+			Nonce:         nonce,
+			ExpiresUnix:   expires,
+			PaymentTxHash: testPaymentTxHash,
+		}
+		st, sig, err := mpp.SignEVM(pk, hdr.CanonicalMessage())
+		if err != nil {
+			t.Fatal(err)
+		}
+		hdr.SigType = st
+		hdr.Signature = sig
+		return mustAuthorization(t, *challenge, hdr)
+	}
+
+	paidGET := func(auth string) *http.Response {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/piece/"+cid, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", auth)
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+
+	raw := buildAuth("ttl-nonce-1")
+	res1 := paidGET(raw)
+	defer res1.Body.Close()
+	if res1.StatusCode != http.StatusOK {
+		t.Fatalf("expected first 200 got %d", res1.StatusCode)
+	}
+	if mock.called != 1 {
+		t.Fatalf("expected one settlement, got %d", mock.called)
+	}
+
+	res2 := paidGET(raw)
+	defer res2.Body.Close()
+	if res2.StatusCode != http.StatusOK {
+		t.Fatalf("expected in-window replay 200 got %d", res2.StatusCode)
+	}
+	if mock.called != 1 {
+		t.Fatalf("expected no second settlement during paid window, got %d", mock.called)
+	}
+
+	if err := s.SetAllocationAccessExpiresForTest(context.Background(), challenge.ID, time.Now().Add(-time.Hour).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	alloc, err := s.GetActiveAllocation(context.Background(), challenge.ID, client, cid, time.Now().Unix())
+	if err != nil || alloc != nil {
+		t.Fatalf("expected expired allocation: %+v err=%v", alloc, err)
+	}
+
+	res3 := paidGET(raw)
+	defer res3.Body.Close()
+	if res3.StatusCode != http.StatusPaymentRequired {
+		t.Fatalf("expected post-ttl replay 402 got %d", res3.StatusCode)
+	}
+	if mock.called != 1 {
+		t.Fatalf("expected no settlement on expired replay with reused nonce, got %d", mock.called)
+	}
+
+	// Same deal cannot be re-allocated once its window expired; client must obtain a new quote.
+	qres2, err := http.Get(ts.URL + "/piece/" + cid + "?client=" + client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer qres2.Body.Close()
+	challenge2 := mustChallengeFromResponse(t, qres2)
+	hdr2 := &mpp.ProofPayload{
+		Version:       mpp.VersionV1,
+		ChallengeID:   challenge2.ID,
+		DealUUID:      challenge2.Request.DealUUID,
+		ClientAddress: client,
+		CID:           cid,
+		Method:        http.MethodGet,
+		Path:          "/piece/" + cid,
+		Host:          host,
+		Nonce:         "ttl-nonce-2",
+		ExpiresUnix:   time.Now().Add(time.Minute).Unix(),
+		PaymentTxHash: testPaymentTxHash,
+	}
+	st2, sig2, err := mpp.SignEVM(pk, hdr2.CanonicalMessage())
+	if err != nil {
+		t.Fatal(err)
+	}
+	hdr2.SigType = st2
+	hdr2.Signature = sig2
+	raw2 := mustAuthorization(t, *challenge2, hdr2)
+
+	res4 := paidGET(raw2)
+	defer res4.Body.Close()
+	if res4.StatusCode != http.StatusOK {
+		t.Fatalf("expected new quote after ttl 200 got %d", res4.StatusCode)
+	}
+	alloc2, err := s.GetActiveAllocation(context.Background(), challenge2.ID, client, cid, time.Now().Unix())
+	if err != nil || alloc2 == nil {
+		t.Fatalf("expected active allocation on new deal: %+v err=%v", alloc2, err)
+	}
+}
+
 func TestAnonymousQuoteReplayWithinPaidWindow(t *testing.T) {
 	s := newTestStore(t)
 	defer s.Close()

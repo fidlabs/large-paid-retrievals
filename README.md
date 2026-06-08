@@ -37,6 +37,12 @@ Wire format, challenge schema, and validation rules: [docs/mpp-filecoinpay.md](d
 
 Paid pieces are quoted **up front** (total USDFC in the `402` challenge). You pay once per piece; there is no per-byte metering during download.
 
+### Paid access window (retries)
+
+After the first successful payment for a quote (`deal_uuid`), the SP keeps **paid access** for that piece for **12 hours** (not configurable on the client). During that window you may **retry the same `GET /piece/<cid>`** with the same `Authorization: Payment` credential — to resume a large CAR download, retry after a network error, or run parallel/range requests — **without paying again**. `retrieval-client` reuses the credential automatically for paid downloads in this window.
+
+When the window expires, paid retries stop: request a **new** `402` quote (new `deal_uuid`) and settle again before downloading. The MPP proof `expires` field in the credential is separate; once paid, an expired proof may still authorize retries until the 12h paid-access window ends.
+
 ### What you need
 
 1. **Go 1.26.4+** or a pre-built `retrieval-client` binary.

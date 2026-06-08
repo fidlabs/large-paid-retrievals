@@ -46,9 +46,7 @@ func (s *Store) migrate() error {
 			created_at INTEGER NOT NULL,
 			last_quoted_at INTEGER NOT NULL,
 			last_paid_at INTEGER,
-			last_paid_tx_hash TEXT NOT NULL DEFAULT '',
-			quoted_seen INTEGER NOT NULL DEFAULT 1,
-			paid_seen INTEGER NOT NULL DEFAULT 0
+			last_paid_tx_hash TEXT NOT NULL DEFAULT ''
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_deals_cid_client ON deals(cid, client);`,
 		`CREATE TABLE IF NOT EXISTS used_nonces (
@@ -115,8 +113,8 @@ func (s *Store) migrate() error {
 func (s *Store) InsertQuote(ctx context.Context, dealUUID, client, cid, priceUSDFC, payee0x string) error {
 	now := time.Now().Unix()
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO deals(deal_uuid, client, cid, price_usdfc, payee_0x, created_at, last_quoted_at, quoted_seen)
-		VALUES(?,?,?,?,?,?,?,1)
+		INSERT INTO deals(deal_uuid, client, cid, price_usdfc, payee_0x, created_at, last_quoted_at)
+		VALUES(?,?,?,?,?,?,?)
 	`, dealUUID, client, cid, priceUSDFC, payee0x, now, now)
 	return err
 }
@@ -159,4 +157,12 @@ func (s *Store) ConsumeNonce(ctx context.Context, dealUUID, nonce string, expire
 		return err
 	}
 	return tx.Commit()
+}
+
+// SetAllocationAccessExpiresForTest updates access_expires_at on a deal allocation (integration tests only).
+func (s *Store) SetAllocationAccessExpiresForTest(ctx context.Context, dealUUID string, accessExpiresAt int64) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE deal_allocations SET access_expires_at = ?, allocated_at = ? WHERE deal_uuid = ?
+	`, accessExpiresAt, accessExpiresAt, dealUUID)
+	return err
 }

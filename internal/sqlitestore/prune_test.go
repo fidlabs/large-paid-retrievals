@@ -165,8 +165,5 @@ func setDealQuotedAt(ctx context.Context, s *Store, dealUUID string, quotedAt in
 }
 
 func setAllocationAccessExpires(ctx context.Context, s *Store, dealUUID string, accessExpiresAt int64) error {
-	_, err := s.db.ExecContext(ctx, `
-		UPDATE deal_allocations SET access_expires_at = ?, allocated_at = ? WHERE deal_uuid = ?
-	`, accessExpiresAt, accessExpiresAt, dealUUID)
-	return err
+	return s.SetAllocationAccessExpiresForTest(ctx, dealUUID, accessExpiresAt)
 }
