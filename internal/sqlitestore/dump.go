@@ -49,8 +49,8 @@ func (s *Store) dumpDeals(ctx context.Context, w io.Writer) error {
 	for rows.Next() {
 		var (
 			dealUUID, client, cid, priceUSDFC, payee0x, lastPaidTx string
-			createdAt, lastQuotedAt                                  int64
-			lastPaidAt                                               sql.NullInt64
+			createdAt, lastQuotedAt                                int64
+			lastPaidAt                                             sql.NullInt64
 		)
 		if err := rows.Scan(&dealUUID, &client, &cid, &priceUSDFC, &payee0x, &createdAt, &lastQuotedAt,
 			&lastPaidAt, &lastPaidTx); err != nil {
