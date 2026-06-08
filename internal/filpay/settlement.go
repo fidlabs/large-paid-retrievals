@@ -95,10 +95,10 @@ type Client struct {
 	txProgress   TxProgress
 
 	// Optional test hooks (nil uses eth / bind.WaitMined / ERC20 bind).
-	rails       paymentsRailsTransactor
-	waitMined   func(ctx context.Context, tx *types.Transaction) (*types.Receipt, error)
-	usdfc       erc20API
-	blockNumber func(ctx context.Context) (uint64, error)
+	rails              paymentsRailsTransactor
+	waitMined          func(ctx context.Context, tx *types.Transaction) (*types.Receipt, error)
+	transactionReceipt func(ctx context.Context, txHash common.Hash) (*types.Receipt, error)
+	usdfc              erc20API
 }
 
 type OperatorApprovalStatus struct {
@@ -469,6 +469,15 @@ func (c *Client) WithdrawTokenAvailable(ctx context.Context, owner common.Addres
 	return h, avail, nil
 }
 
+// WithdrawPayeeProceeds moves available USDFC from the payee's Filecoin Pay account to their wallet.
+// When payee is not the filpay signer, this is a no-op.
+func (c *Client) WithdrawPayeeProceeds(ctx context.Context, payee common.Address) (txHash string, amountBaseUnits *big.Int, err error) {
+	if payee != c.signerAddr {
+		return "", big.NewInt(0), nil
+	}
+	return c.WithdrawTokenAvailable(ctx, payee)
+}
+
 // EnsurePayerTokenBalance deposits missing USDFC into the payer's Filecoin Pay account.
 func (c *Client) EnsurePayerTokenBalance(ctx context.Context, payer common.Address, requiredBaseUnits *big.Int) error {
 	if requiredBaseUnits == nil || requiredBaseUnits.Sign() <= 0 {
@@ -689,56 +698,69 @@ func (c *Client) FindActiveTokenRail(ctx context.Context, payer, payee common.Ad
 	return nil, fmt.Errorf("filpay: no active token rail from %s to %s", payer.Hex(), payee.Hex())
 }
 
-// SettleIfFunded checks rail + payer balance, then submits settleRail through current epoch.
-func (c *Client) SettleIfFunded(ctx context.Context, payer, payee common.Address, priceBaseUnits *big.Int) (txHash string, err error) {
-	if priceBaseUnits == nil || priceBaseUnits.Sign() <= 0 {
-		return "", errors.New("filpay: invalid price base units")
+// CreditRailPayment verifies a client modifyRailPayment tx and returns the gross charge
+// parsed from RailOneTimePaymentProcessed for the payer→payee rail (net payee amount plus
+// operator commission and network fee). The settlement ledger credits the payer pool at this
+// gross so it matches the quoted price; only the net payee amount is withdrawable on-chain
+// and the SP absorbs commission and network fees as transaction costs.
+func (c *Client) CreditRailPayment(ctx context.Context, payer, payee common.Address, paymentTxHash string) (creditRef string, creditedBaseUnits *big.Int, err error) {
+	txHash := strings.TrimSpace(paymentTxHash)
+	c.payInfo("CreditRailPayment start", "payer", payer.Hex(), "payee", payee.Hex(), "payment_tx_hash", txHash)
+	if len(txHash) != 66 || !strings.HasPrefix(txHash, "0x") {
+		return "", nil, fmt.Errorf("filpay: invalid payment tx hash %q", paymentTxHash)
 	}
-	c.payInfo("SettleIfFunded start", "payer", payer.Hex(), "payee", payee.Hex(), "required_price_base_units", priceBaseUnits.String())
-	railID, err := c.FindActiveTokenRail(ctx, payer, payee)
+	txHashBytes := common.FromHex(txHash)
+	if len(txHashBytes) != common.HashLength {
+		return "", nil, fmt.Errorf("filpay: invalid payment tx hash %q", paymentTxHash)
+	}
+	receipt, err := c.fetchTransactionReceipt(ctx, common.BytesToHash(txHashBytes))
 	if err != nil {
-		return "", err
+		return "", nil, fmt.Errorf("filpay: payment tx receipt: %w", err)
 	}
-	avail, err := c.PayerTokenAvailable(ctx, payer)
+	byRail, err := sumRailOneTimePaymentGross(receipt, c.paymentsAddr)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
-	if avail.Cmp(priceBaseUnits) < 0 {
-		c.payInfo("payer balance below quoted price; proceeding to settleRail", "available_base_units", avail.String(), "quoted_required_base_units", priceBaseUnits.String())
-	} else {
-		c.payInfo("balance check ok", "available_base_units", avail.String(), "required_base_units", priceBaseUnits.String())
+	if len(byRail) == 0 {
+		return "", nil, fmt.Errorf("filpay: payment tx has no RailOneTimePaymentProcessed events")
 	}
-	until, err := c.latestBlockNumber(ctx)
-	if err != nil {
-		return "", fmt.Errorf("filpay: latest block number: %w", err)
-	}
-	untilEpoch := new(big.Int).SetUint64(until)
-	expectedEpoch := synpayments.CurrentEpoch(c.chainID.Int64())
-	c.payDebug("settle epoch source", "rpc_block_number", untilEpoch.String(), "computed_epoch", expectedEpoch.String())
-	fee := big.NewInt(0)
-	c.payInfo("submitting settleRail", "rail_id", railID.String(), "until_epoch", untilEpoch.String(),
-		"settlement_fee_base_units", fee.String(), "signer", c.signerAddr.Hex())
-	opts, err := bind.NewKeyedTransactorWithChainID(c.signerKey, c.chainID)
-	if err != nil {
-		return "", fmt.Errorf("filpay: transactor: %w", err)
-	}
-	opts.Context = ctx
-	opts.Value = fee
-	tx, err := c.payments.SettleRail(opts, railID, untilEpoch)
-	if err != nil {
-		c.payInfo("settleRail failed", "error", err.Error())
-		return "", fmt.Errorf("filpay: settleRail: %w", err)
-	}
-	h := tx.Hash().Hex()
-	c.payInfo("settleRail tx submitted", "tx_hash", h, "rail_id", railID.String())
-	if payee == c.signerAddr {
-		withdrawTx, amountBaseUnits, werr := c.WithdrawTokenAvailable(ctx, payee)
-		if werr != nil {
-			return "", fmt.Errorf("filpay: settle ok but withdraw failed: %w", werr)
+
+	total := new(big.Int)
+	var matchedRail string
+	for railKey, gross := range byRail {
+		if gross == nil || gross.Sign() <= 0 {
+			continue
 		}
-		c.payInfo("withdraw after settle", "withdraw_tx", withdrawTx, "amount_base_units", amountBaseUnits.String(), "owner", payee.Hex())
+		railID, ok := new(big.Int).SetString(railKey, 10)
+		if !ok {
+			return "", nil, fmt.Errorf("filpay: invalid rail id %q in payment receipt", railKey)
+		}
+		view, err := c.payments.GetRail(ctx, railID)
+		if err != nil {
+			return "", nil, fmt.Errorf("filpay: get rail %s from payment tx: %w", railKey, err)
+		}
+		if view.Token != c.paymentToken || view.From != payer || view.To != payee {
+			continue
+		}
+		total.Add(total, gross)
+		matchedRail = railKey
 	}
-	return h, nil
+	if total.Sign() <= 0 {
+		return "", nil, fmt.Errorf("filpay: payment tx has no RailOneTimePaymentProcessed for rail from %s to %s", payer.Hex(), payee.Hex())
+	}
+	c.payInfo("CreditRailPayment complete", "payment_tx_hash", txHash, "rail_id", matchedRail,
+		"credited_base_units", total.String(), "payer", payer.Hex(), "payee", payee.Hex())
+	return txHash, total, nil
+}
+
+func (c *Client) fetchTransactionReceipt(ctx context.Context, txHash common.Hash) (*types.Receipt, error) {
+	if c.transactionReceipt != nil {
+		return c.transactionReceipt(ctx, txHash)
+	}
+	if c.eth == nil {
+		return nil, errors.New("filpay: no eth client for tx receipt")
+	}
+	return c.eth.TransactionReceipt(ctx, txHash)
 }
 
 func (c *Client) erc20() (erc20API, error) {
@@ -754,16 +776,6 @@ func (c *Client) erc20() (erc20API, error) {
 		return nil, fmt.Errorf("filpay: bind USDFC: %w", err)
 	}
 	return erc, nil
-}
-
-func (c *Client) latestBlockNumber(ctx context.Context) (uint64, error) {
-	if c.blockNumber != nil {
-		return c.blockNumber(ctx)
-	}
-	if c.eth == nil {
-		return 0, errors.New("filpay: no eth client for block number")
-	}
-	return c.eth.BlockNumber(ctx)
 }
 
 func (c *Client) receiptForTx(ctx context.Context, tx *types.Transaction) (*types.Receipt, error) {

@@ -123,7 +123,7 @@ Outputs: `<cid>.car` under `--out-dir` (default `.`).
 
 ### Understanding cost
 
-Paid SPs bill in **USDFC per GiB** (binary `2^30` bytes), **rounded up** to whole GiB. The `402` challenge contains the **total** `price_usdfc` for that piece. Details: [Pricing](#pricing).
+Paid SPs bill in **USDFC per GiB** (binary `2^30` bytes), **rounded up** to whole GiB. The `402` challenge contains the **total** `price_usdfc` for that piece — that is exactly what you pay; there is no operator commission and no surcharge on top of the quote (you still need **FIL** for Filecoin Pay transaction gas). Details: [Pricing](#pricing).
 
 ### Useful flags
 
@@ -220,7 +220,7 @@ go build -o bin/sp-proxy ./cmd/sp-proxy
 
 ### Pricing
 
-Set **`--price-usdfc-per-gb`** to your USDFC rate per **billed GiB** (each GiB or fraction counts as one GiB). The proxy computes the total `price_usdfc` in each `402` from upstream `HEAD` `Content-Length`. Full rules: [Pricing](#pricing).
+Set **`--price-usdfc-per-gb`** to your USDFC rate per **billed GiB** (each GiB or fraction counts as one GiB). The proxy computes the total `price_usdfc` in each `402` from upstream `HEAD` `Content-Length`. Clients pay that quoted amount in full; Filecoin Pay deducts a **network fee** from the charge (there is **no operator commission** in this design). Your payee account receives the net proceeds — see [Pricing](#pricing) for how that maps to your rate.
 
 ### Upstream requirements (important)
 
@@ -239,6 +239,8 @@ Optional: expose **`HEAD`** on the public proxy path for client size probes (the
 |------|---------|
 | `--listen` | Client-facing listen address (default `:8787` = all interfaces; use `0.0.0.0:8787` explicitly in production) |
 | `--db` | SQLite deal state |
+| `--db-retention` | Max age of SQLite rows before automatic pruning (default `168h` / 1 week); `0` disables |
+| `--pay-withdraw-interval` | Background batch withdraw of Filecoin Pay proceeds to the settler wallet (default `1h`); `0` disables |
 | `--price-usdfc-per-gb` | USDFC per billed GiB |
 | `--upstream-host`, `--upstream-port` | Loopback Curio/Boost (`127.0.0.1` + port) |
 | `--pay-rpc-url` | FVM RPC |
@@ -250,6 +252,25 @@ Optional: expose **`HEAD`** on the public proxy path for client size probes (the
 ### Monitoring payments
 
 After a successful retrieval, logs include the Filecoin Pay **rail ID** and settle tx. View rail status on [pay.filecoin.cloud](https://pay.filecoin.cloud/) (mainnet: `/rails/<id>`; Calibration: `/calibration/rails/<id>`).
+
+### Inspecting quotes and ledger state (`SIGUSR1`)
+
+`sp-proxy` handles **`SIGUSR1`** by printing all deals (quotes), settlement pools, credits, and allocations from the SQLite database to **stderr** — useful for debugging payment or ledger issues without stopping the process.
+
+```bash
+kill -USR1 $(pidof sp-proxy)
+# or: kill -USR1 <pid>
+```
+
+The dump is also noted in the startup log (`sigusr1_dump=…`).
+
+### Database retention
+
+A background task runs every hour (and once at startup) to prune SQLite rows older than **`--db-retention`** (default **1 week**): expired nonces, expired deal allocations, unpaid/old deals, and closed settlement pools with their credits. **`VACUUM`** runs after each prune to reclaim disk. Open pools and deals with active paid-access windows are kept. Set `--db-retention 0` to disable automatic pruning.
+
+### Payee withdraw
+
+A background worker withdraws available USDFC from the settler’s Filecoin Pay account to wallet on **`--pay-withdraw-interval`** (default **1 hour**), including once at startup. This batches on-chain proceeds so concurrent retrievals from multiple client rails do not race on withdraw nonces. Set `--pay-withdraw-interval 0` to disable automatic withdraw.
 
 Wire format and security model: [docs/mpp-filecoinpay.md](docs/mpp-filecoinpay.md).
 
@@ -266,10 +287,10 @@ cmd/
 internal/
   piecepayment/       Quote, 402 middleware, authorize + settle
   pieceurls/          SP discovery, parallel probe, cheapest paid selection
-  filpay/             Filecoin Pay client (rails, deposit, settle)
+  filpay/             Filecoin Pay client (rails, deposit, rail charge verification)
   mpp/                MPP challenge / credential wire types
   paymentheader/      Token amounts + per-GiB price helpers
-  sqlitestore/        sp-proxy deal persistence
+  sqlitestore/        sp-proxy deal persistence + settlement ledger
 docs/
   mpp-filecoinpay.md  HTTP + payment protocol contract
 ```
@@ -291,6 +312,19 @@ Keeping quote, authorize, and settle in a composable middleware layer means:
 - **Future upstream integration** — Curio, Boost, or other piece servers could embed `piecepayment` directly in their HTTP stack instead of running a separate `sp-proxy` process, as long as they expose the same MPP/`402` contract ([docs/mpp-filecoinpay.md](docs/mpp-filecoinpay.md)).
 
 Today the standalone proxy is the supported deployment path; middleware extraction is a deliberate design choice to keep that option open.
+
+### SP settlement ledger
+
+`sp-proxy` tracks paid access in a **local SQLite settlement ledger** (`internal/sqlitestore`, orchestrated by `internal/piecepayment`).
+
+For each `(payer, payee)` pair the ledger maintains an open **settlement pool** with a `remaining_base_units` balance. On authorize:
+
+1. **`TryAllocateDeal`** debits the quoted piece price from the pool (or returns insufficient balance).
+2. If the pool is short, **`CreditRailPayment`** (`internal/filpay`) fetches the client’s `modifyRailPayment` receipt, parses `RailOneTimePaymentProcessed`, and verifies the gross charge for the payer→payee rail.
+3. **`CreditSettlement`** credits the pool at that gross amount (idempotent on `payment_tx_hash`), then allocation retries.
+4. After a successful allocation, the client gets a **paid-access window** (default 12h) so large downloads can retry without re-charging; nonce consumption still prevents credential replay on first settlement.
+
+This ledger is an **interim SP-side bookkeeping layer**: it ties MPP credentials to verified on-chain rail charges and enforces settle-before-serve without trusting client-reported balances. It will be **replaced** by full **Filecoin Pay Operators and Validator** in a future update.
 
 ### Build and test
 
@@ -370,7 +404,21 @@ price_usdfc = price_usdfc_per_gib × billed_gib
 | 1 GiB + 1 byte            | 2          | 0.02                    |
 | 32 GiB                    | 32         | 0.32                    |
 
-**Settlement:** the `price_usdfc` in the MPP challenge is the **total** charge for that piece. After the client pays, the proxy runs **one** Filecoin Pay settlement for that amount, then serves the full `GET` (no metering or partial charges during download).
+**What the client pays:** the `price_usdfc` in the MPP challenge is the **gross** charge for that piece. The client pays that exact amount via Filecoin Pay `modifyRailPayment` — there is **no operator commission** in this design (the client is the rail operator and rails are created with zero commission rate), and nothing is added on top of the quote besides **FIL gas** for on-chain transactions.
+
+**Filecoin Pay network fee:** Filecoin Pay deducts a **network fee** from each one-time rail charge. On chain, the gross charge splits into:
+
+```text
+gross (quoted price_usdfc) = net_payee_amount + network_fee
+```
+
+(`operator_commission` is zero in this design.)
+
+- **Client** debits **gross** from rail lockup (the quoted `price_usdfc`).
+- **SP payee account** receives **net** USDFC (gross minus network fee).
+- **SP settlement ledger** credits the payer pool at **gross** so retrieval authorization matches the quoted price; the SP absorbs the network fee as a cost of using Filecoin Pay.
+
+There is no per-byte metering during download: one quote, one charge, one served `GET`.
 
 **No quote** (`503 payment-unavailable`): the proxy cannot obtain a positive piece size from `HEAD`, including non-`200` responses (e.g. `404`, `405 Method Not Allowed`), missing or zero `Content-Length`, `204 No Content`, or `206 Partial Content`. These cases do not use the formula above.
 

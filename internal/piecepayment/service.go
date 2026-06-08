@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/fidlabs/paid-retrievals/internal/dealstore"
 	"github.com/fidlabs/paid-retrievals/internal/mpp"
 	"github.com/fidlabs/paid-retrievals/internal/paymentheader"
 	"github.com/google/uuid"
@@ -23,29 +24,28 @@ const (
 	paidAccessTTL = 12 * time.Hour
 )
 
-var ErrDealNotFound = errors.New("deal not found")
-var ErrReplayNonce = errors.New("nonce already used")
 var ErrPieceSizeUnknown = errors.New("piece size unknown for pricing")
 
-type Deal struct {
-	DealUUID       string
-	Client         string
-	CID            string
-	PriceUSDFC     string
-	Payee0x        string
-	LastPaidTxHash string
-}
+type (
+	Deal                   = dealstore.Deal
+	DealStore              = dealstore.DealStore
+	DealAllocation         = dealstore.DealAllocation
+	AllocateDealRequest    = dealstore.AllocateDealRequest
+	SettlementCredit       = dealstore.SettlementCredit
+	SettlementPoolSnapshot = dealstore.SettlementPoolSnapshot
+)
 
-type DealStore interface {
-	InsertQuote(ctx context.Context, dealUUID, client, cid, priceUSDFC, payee0x string) error
-	GetDeal(ctx context.Context, dealUUID string) (*Deal, error)
-	IsDealPaidSince(ctx context.Context, dealUUID, client, cid string, sinceUnix int64) (bool, error)
-	ConsumeNonce(ctx context.Context, dealUUID, nonce string, expiresUnix int64) error
-	MarkPaid(ctx context.Context, dealUUID, client, txHash string) error
-}
+var (
+	ErrDealNotFound     = dealstore.ErrDealNotFound
+	ErrReplayNonce      = dealstore.ErrReplayNonce
+	ErrInsufficientPool = dealstore.ErrInsufficientPool
+	ErrZeroSettlement   = dealstore.ErrZeroSettlement
+)
 
 type FilecoinPaySettler interface {
-	SettleIfFunded(ctx context.Context, payer, payee common.Address, priceBaseUnits *big.Int) (txHash string, err error)
+	// CreditRailPayment returns the gross rail charge (quoted price); the SP absorbs
+	// operator commission and network fees while crediting the payer pool at gross.
+	CreditRailPayment(ctx context.Context, payer, payee common.Address, paymentTxHash string) (creditRef string, creditedBaseUnits *big.Int, err error)
 }
 
 type QuoteOutcome struct {
@@ -267,15 +267,27 @@ func (s *RetrievalService) AuthorizeAndSettle(r *http.Request, cid, rawHdr strin
 		)
 		return nil, &PaymentRequiredError{Deal: deal, Code: "verification-failed", Detail: "Credential signature verification failed"}
 	}
-	// If this deal was already settled recently, skip nonce consumption and on-chain
+	// If this deal already has active paid access, skip nonce consumption and on-chain
 	// settlement and serve the piece immediately — supports resumable downloads and
 	// parallel/range retries without charging the client again.
-	since := now.Add(-paidAccessTTL).Unix()
-	if paid, err := s.cfg.Store.IsDealPaidSince(r.Context(), deal.DealUUID, payerClient, deal.CID, since); err == nil && paid {
-		s.logger.Info("paid retrieval reused", "deal_uuid", deal.DealUUID, "client", payerClient, "cid", cid)
-		return &PaidOutcome{Deal: deal, CID: cid, TxHash: deal.LastPaidTxHash}, nil
-	} else if err != nil {
-		return nil, fmt.Errorf("check paid window: %w", err)
+	if alloc, err := s.cfg.Store.GetActiveAllocation(r.Context(), deal.DealUUID, payerClient, deal.CID, now.Unix()); err != nil {
+		return nil, fmt.Errorf("check paid access: %w", err)
+	} else if alloc != nil {
+		s.logLedger(r.Context(), "access_reuse",
+			"deal_uuid", deal.DealUUID,
+			"client", payerClient,
+			"payer", payerClient,
+			"payee", strings.TrimSpace(deal.Payee0x),
+			"cid", cid,
+			"pool_id", alloc.PoolID,
+			"price_base_units", alloc.PriceBaseUnits,
+		)
+		s.logger.Info("paid retrieval reused", "deal_uuid", deal.DealUUID, "client", payerClient, "cid", cid, "pool_id", alloc.PoolID)
+		txHash := alloc.SettleTxHash
+		if txHash == "" {
+			txHash = deal.LastPaidTxHash
+		}
+		return &PaidOutcome{Deal: deal, CID: cid, TxHash: txHash}, nil
 	}
 	// Past-expiry is checked only on the first-settlement path. After a successful payment,
 	// clients may retry large downloads with the same (possibly expired) credential while
@@ -310,18 +322,102 @@ func (s *RetrievalService) AuthorizeAndSettle(r *http.Request, cid, rawHdr strin
 	payeeAddr := common.HexToAddress(strings.TrimSpace(deal.Payee0x))
 	unlock := s.lockSettlementPair(payer, payeeAddr)
 	defer unlock()
-	txHash, err := s.cfg.FilecoinPay.SettleIfFunded(r.Context(), payer, payeeAddr, priceBaseUnits)
-	if err != nil {
-		return nil, settlementPaymentRequiredError(deal, err)
-	}
-	s.logger.Info("filecoin pay rail settled", "deal_uuid", deal.DealUUID, "settle_tx", txHash, "payer", payer.Hex(), "payee", payeeAddr.Hex())
 
-	if err := s.cfg.Store.MarkPaid(r.Context(), deal.DealUUID, payerClient, txHash); err != nil {
-		// We don't return an error here because we want to continue serving the piece even if marking paid fails as payment has been settled.
-		s.logger.Error("failed to mark deal paid", "error", err, "deal_uuid", deal.DealUUID)
+	allocReq := AllocateDealRequest{
+		DealUUID:       deal.DealUUID,
+		Payer:          payer.Hex(),
+		Payee:          payeeAddr.Hex(),
+		Client:         payerClient,
+		CID:            deal.CID,
+		PriceBaseUnits: priceBaseUnits,
+		AccessTTL:      paidAccessTTL,
 	}
-	s.logger.Info("paid retrieval authorized", "deal_uuid", deal.DealUUID, "client", payerClient, "cid", cid)
-	return &PaidOutcome{Deal: deal, CID: cid, TxHash: txHash}, nil
+	paymentTxHash := strings.TrimSpace(cred.Payload.PaymentTxHash)
+	if paymentTxHash == "" {
+		s.logCredentialValidationFailure("missing_payment_tx_hash",
+			"deal_uuid", deal.DealUUID,
+			"cid", cid,
+			"client", payerClient,
+		)
+		return nil, &PaymentRequiredError{Deal: deal, Code: "malformed-credential", Detail: "Credential missing payment_tx_hash for rail charge"}
+	}
+
+	payerHex, payeeHex := payer.Hex(), payeeAddr.Hex()
+	s.logLedger(r.Context(), "allocate_attempt", append([]any{
+		"payment_tx_hash", paymentTxHash,
+		"deal_uuid", deal.DealUUID,
+		"payer", payerHex,
+		"payee", payeeHex,
+	}, s.ledgerAmountAttrs("price", priceBaseUnits)...)...)
+	alloc, err := s.cfg.Store.TryAllocateDeal(r.Context(), allocReq)
+	if err == ErrInsufficientPool {
+		s.logLedger(r.Context(), "pool_insufficient", append([]any{
+			"deal_uuid", deal.DealUUID,
+			"payer", payerHex,
+			"payee", payeeHex,
+		}, s.ledgerAmountAttrs("price", priceBaseUnits)...)...)
+		// Credit the payer pool at the gross modifyRailPayment amount so ledger drawdown
+		// matches the quoted price; sp-proxy withdraws net payee proceeds on a background cadence.
+		creditRef, credited, creditErr := s.cfg.FilecoinPay.CreditRailPayment(r.Context(), payer, payeeAddr, paymentTxHash)
+		if creditErr != nil {
+			return nil, settlementPaymentRequiredError(deal, creditErr)
+		}
+		s.logLedger(r.Context(), "rail_payment_verified", append([]any{
+			"deal_uuid", deal.DealUUID,
+			"payer", payerHex,
+			"payee", payeeHex,
+			"payment_tx_hash", paymentTxHash,
+			"credit_ref", creditRef,
+		}, s.ledgerAmountAttrs("credited", credited)...)...)
+		if credited.Cmp(priceBaseUnits) < 0 {
+			return nil, &PaymentRequiredError{
+				Deal:   deal,
+				Code:   "payment-insufficient",
+				Detail: "Verified rail payment is insufficient for this piece price",
+			}
+		}
+		s.logger.Info("filecoin pay rail payment credited to pool", "deal_uuid", deal.DealUUID, "credit_ref", creditRef,
+			"payer", payerHex, "payee", payeeHex, "payment_tx_hash", paymentTxHash,
+			"credited_base_units", credited.String())
+		if creditErr := s.cfg.Store.CreditSettlement(r.Context(), SettlementCredit{
+			Payer:             payerHex,
+			Payee:             payeeHex,
+			SettleTxHash:      creditRef,
+			CreditedBaseUnits: credited,
+		}); creditErr != nil {
+			return nil, fmt.Errorf("credit settlement: %w", creditErr)
+		}
+		s.logLedger(r.Context(), "pool_funded", append([]any{
+			"deal_uuid", deal.DealUUID,
+			"payer", payerHex,
+			"payee", payeeHex,
+			"credit_ref", creditRef,
+			"payment_tx_hash", paymentTxHash,
+		}, s.ledgerAmountAttrs("credited", credited)...)...)
+		allocReq.SettleTxHash = creditRef
+		alloc, err = s.cfg.Store.TryAllocateDeal(r.Context(), allocReq)
+		if err == ErrInsufficientPool {
+			return nil, &PaymentRequiredError{
+				Deal:   deal,
+				Code:   "payment-insufficient",
+				Detail: "Credited amount is insufficient for this piece price",
+			}
+		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("allocate deal: %w", err)
+	}
+	s.logLedger(r.Context(), "pool_drawdown", append([]any{
+		"deal_uuid", deal.DealUUID,
+		"payer", payerHex,
+		"payee", payeeHex,
+		"pool_id", alloc.PoolID,
+		"credit_ref", alloc.SettleTxHash,
+	}, append(s.ledgerAmountAttrs("drawdown", priceBaseUnits), s.ledgerAmountAttrs("allocated", priceBaseUnits)...)...)...)
+	deal.LastPaidTxHash = alloc.SettleTxHash
+	deal.Client = payerClient
+	s.logger.Info("paid retrieval authorized", "deal_uuid", deal.DealUUID, "client", payerClient, "cid", cid, "pool_id", alloc.PoolID)
+	return &PaidOutcome{Deal: deal, CID: cid, TxHash: alloc.SettleTxHash}, nil
 }
 
 func issueChallengeForDeal(w http.ResponseWriter, r *http.Request, deal *Deal, logger *slog.Logger) {
@@ -419,6 +515,74 @@ func sanitizeClient(v string) string {
 	}, v)
 }
 
+func (s *RetrievalService) logLedger(ctx context.Context, event string, attrs ...any) {
+	if s == nil || !s.cfg.PayDebug || s.logger == nil {
+		return
+	}
+	args := make([]any, 0, len(attrs)+2)
+	args = append(args, "event", event)
+	args = append(args, attrs...)
+	args = append(args, s.ledgerPoolAttrs(ctx, attrs)...)
+	s.logger.Info("settlement ledger", args...)
+}
+
+func payerPayeeFromLedgerAttrs(attrs []any) (payer, payee string) {
+	for i := 0; i+1 < len(attrs); i += 2 {
+		key, ok := attrs[i].(string)
+		if !ok {
+			continue
+		}
+		val, ok := attrs[i+1].(string)
+		if !ok {
+			continue
+		}
+		switch key {
+		case "payer":
+			payer = val
+		case "payee":
+			payee = val
+		}
+	}
+	return payer, payee
+}
+
+func (s *RetrievalService) ledgerPoolAttrs(ctx context.Context, prior []any) []any {
+	if s == nil || s.cfg.Store == nil {
+		return nil
+	}
+	payer, payee := payerPayeeFromLedgerAttrs(prior)
+	if payer == "" || payee == "" {
+		return nil
+	}
+	pool, err := s.cfg.Store.OpenSettlementPool(ctx, payer, payee)
+	if err != nil {
+		return []any{"pool_snapshot_err", err.Error()}
+	}
+	if pool == nil {
+		return []any{"pool_open", false}
+	}
+	attrs := []any{
+		"pool_open", true,
+		"pool_id", pool.PoolID,
+		"pool_remaining_base_units", pool.RemainingBaseUnits,
+		"pool_settled_base_units", pool.SettledBaseUnits,
+	}
+	if remaining, ok := new(big.Int).SetString(pool.RemainingBaseUnits, 10); ok {
+		attrs = append(attrs, "pool_remaining_usdfc", paymentheader.FormatTokenValue(remaining))
+	}
+	if settled, ok := new(big.Int).SetString(pool.SettledBaseUnits, 10); ok {
+		attrs = append(attrs, "pool_settled_usdfc", paymentheader.FormatTokenValue(settled))
+	}
+	return attrs
+}
+
+func (s *RetrievalService) ledgerAmountAttrs(name string, units *big.Int) []any {
+	if units == nil {
+		return []any{name + "_base_units", "0", name + "_usdfc", "0"}
+	}
+	return []any{name + "_base_units", units.String(), name + "_usdfc", paymentheader.FormatTokenValue(units)}
+}
+
 func (s *RetrievalService) logCredentialValidationFailure(reason string, attrs ...any) {
 	if s == nil || s.logger == nil {
 		return
@@ -467,7 +631,8 @@ func (s *RetrievalService) lockSettlementPair(payer, payee common.Address) func(
 
 func settlementPaymentRequiredError(deal *Deal, err error) *PaymentRequiredError {
 	msg := strings.ToLower(err.Error())
-	if strings.Contains(msg, "insufficient") || strings.Contains(msg, "no active token rail") || strings.Contains(msg, "no funds") {
+	if strings.Contains(msg, "insufficient") || strings.Contains(msg, "no active token rail") || strings.Contains(msg, "no funds") ||
+		strings.Contains(msg, "payment tx") || strings.Contains(msg, "railoneTimepaymentprocessed") {
 		return &PaymentRequiredError{
 			Deal:   deal,
 			Code:   "payment-insufficient",

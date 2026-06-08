@@ -42,14 +42,15 @@ type problemDetails struct {
 }
 
 type challengeItem struct {
-	CID        string
-	Base       *url.URL
-	Free       bool
-	TotalBytes int64 // from probe HEAD; -1 when unknown
-	DealUUID   string
-	PriceUSDFC string
-	Payee0x    string
-	Challenge  mpp.Challenge
+	CID           string
+	Base          *url.URL
+	Free          bool
+	TotalBytes    int64 // from probe HEAD; -1 when unknown
+	DealUUID      string
+	PriceUSDFC    string
+	Payee0x       string
+	PaymentTxHash string
+	Challenge     mpp.Challenge
 }
 
 // filpayOperations is the Filecoin Pay surface used by fetch/rail-check (mockable in tests).
@@ -339,8 +340,16 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 				fmt.Println("Charging rails…")
 			}
 			chargeStart := time.Now()
-			if err := chargeRailsForChallenges(context.Background(), fc, client, items, payDebug); err != nil {
+			chargeTxByPayee, err := chargeRailsForChallenges(context.Background(), fc, client, items, payDebug)
+			if err != nil {
 				return err
+			}
+			for i := range items {
+				if items[i].Free {
+					continue
+				}
+				payeeHex := common.HexToAddress(items[i].Payee0x).Hex()
+				items[i].PaymentTxHash = chargeTxByPayee[payeeHex]
 			}
 			if payDebug || verbose {
 				payClientLog("charge phase complete in %s", time.Since(chargeStart).Round(time.Millisecond))
@@ -383,6 +392,10 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 					Host:          it.Base.Host,
 					Nonce:         uuid.NewString(),
 					ExpiresUnix:   time.Now().Add(time.Duration(expiresIn) * time.Second).Unix(),
+					PaymentTxHash: strings.TrimSpace(it.PaymentTxHash),
+				}
+				if h.PaymentTxHash == "" {
+					return fmt.Errorf("internal: missing payment tx hash for paid CID %s", it.CID)
 				}
 				st, sig, err := mpp.SignEVM(evmPK, h.CanonicalMessage())
 				if err != nil {
@@ -810,46 +823,48 @@ func prepareRailsForChallenges(ctx context.Context, fc filpayOperations, client 
 	return nil
 }
 
-func chargeRailsForChallenges(ctx context.Context, fc filpayOperations, client string, items []challengeItem, payDebug bool) error {
+func chargeRailsForChallenges(ctx context.Context, fc filpayOperations, client string, items []challengeItem, payDebug bool) (map[string]string, error) {
 	payer := common.HexToAddress(client)
-	byPayee := map[string]*big.Int{}
+	amountByPayee := map[string]*big.Int{}
 	for _, it := range items {
 		if it.Free {
 			continue
 		}
 		if strings.TrimSpace(it.Payee0x) == "" || !common.IsHexAddress(it.Payee0x) {
-			return fmt.Errorf("challenge %s for cid=%s missing valid payee_0x", it.DealUUID, it.CID)
+			return nil, fmt.Errorf("challenge %s for cid=%s missing valid payee_0x", it.DealUUID, it.CID)
 		}
 		priceBaseUnits, err := paymentheader.ParseTokenToBaseUnits(it.PriceUSDFC)
 		if err != nil {
-			return fmt.Errorf("challenge %s has invalid price_usdfc=%q: %w", it.DealUUID, it.PriceUSDFC, err)
+			return nil, fmt.Errorf("challenge %s has invalid price_usdfc=%q: %w", it.DealUUID, it.PriceUSDFC, err)
 		}
 		key := common.HexToAddress(it.Payee0x).Hex()
-		if byPayee[key] == nil {
-			byPayee[key] = big.NewInt(0)
+		if amountByPayee[key] == nil {
+			amountByPayee[key] = big.NewInt(0)
 		}
-		byPayee[key].Add(byPayee[key], priceBaseUnits)
+		amountByPayee[key].Add(amountByPayee[key], priceBaseUnits)
 	}
-	payees := make([]string, 0, len(byPayee))
-	for payee := range byPayee {
+	payees := make([]string, 0, len(amountByPayee))
+	for payee := range amountByPayee {
 		payees = append(payees, payee)
 	}
 	sort.Strings(payees)
+	chargeTxByPayee := make(map[string]string, len(payees))
 	for _, payeeHex := range payees {
-		amountBaseUnits := byPayee[payeeHex]
+		amountBaseUnits := amountByPayee[payeeHex]
 		if payDebug {
 			payClientLog("charging rail one-time payment payee=%s amount_base_units=%s", payeeHex, amountBaseUnits.String())
 		}
 		start := time.Now()
 		txHash, err := fc.ChargeRailOneTime(ctx, payer, common.HexToAddress(payeeHex), amountBaseUnits)
 		if err != nil {
-			return fmt.Errorf("charge rail for payee %s failed: %w", payeeHex, err)
+			return nil, fmt.Errorf("charge rail for payee %s failed: %w", payeeHex, err)
 		}
+		chargeTxByPayee[payeeHex] = txHash
 		if payDebug {
 			payClientLog("modifyRailPayment submitted payee=%s tx=%s duration=%s", payeeHex, txHash, time.Since(start).Round(time.Millisecond))
 		}
 	}
-	return nil
+	return chargeTxByPayee, nil
 }
 
 func collectCIDs(flagCIDs []string, cidFile string, args []string) ([]string, error) {

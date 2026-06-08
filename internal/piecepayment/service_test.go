@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"errors"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -19,106 +20,8 @@ import (
 const (
 	testPieceCID      = "bafkreidde4sfyosf2pm6u4vxb65wogjg464a6y6tcg75opo6q5wv34bley"
 	testQuotePieceGiB = int64(1 << 30)
+	testPaymentTxHash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 )
-
-type mockDealStore struct {
-	deals          map[string]*Deal
-	lastPaidAt     map[string]int64
-	lastPaidTxHash map[string]string
-	insertErr      error
-	getErr         error
-	consumeErr     error
-	markPaidErr    error
-}
-
-func (m *mockDealStore) InsertQuote(_ context.Context, dealUUID, client, cid, priceUSDFC, payee0x string) error {
-	if m.insertErr != nil {
-		return m.insertErr
-	}
-	if m.deals == nil {
-		m.deals = make(map[string]*Deal)
-	}
-	m.deals[dealUUID] = &Deal{
-		DealUUID: dealUUID, Client: client, CID: cid, PriceUSDFC: priceUSDFC, Payee0x: payee0x,
-	}
-	return nil
-}
-
-func (m *mockDealStore) GetDeal(_ context.Context, dealUUID string) (*Deal, error) {
-	if m.getErr != nil {
-		return nil, m.getErr
-	}
-	d, ok := m.deals[dealUUID]
-	if !ok {
-		return nil, ErrDealNotFound
-	}
-	return d, nil
-}
-
-func (m *mockDealStore) ConsumeNonce(_ context.Context, dealUUID, nonce string, _ int64) error {
-	if m.consumeErr != nil {
-		return m.consumeErr
-	}
-	key := dealUUID + ":" + nonce
-	if m.deals == nil {
-		m.deals = make(map[string]*Deal)
-	}
-	if _, used := m.deals[key]; used {
-		return ErrReplayNonce
-	}
-	m.deals[key] = &Deal{}
-	return nil
-}
-
-func (m *mockDealStore) MarkPaid(_ context.Context, dealUUID, client, txHash string) error {
-	if m.markPaidErr == nil {
-		if m.lastPaidAt == nil {
-			m.lastPaidAt = map[string]int64{}
-		}
-		if m.lastPaidTxHash == nil {
-			m.lastPaidTxHash = map[string]string{}
-		}
-		m.lastPaidAt[dealUUID] = time.Now().Unix()
-		m.lastPaidTxHash[dealUUID] = txHash
-		if d, ok := m.deals[dealUUID]; ok {
-			d.LastPaidTxHash = txHash
-			d.Client = client
-		}
-	}
-	return m.markPaidErr
-}
-
-func (m *mockDealStore) IsDealPaidSince(_ context.Context, dealUUID, client, cid string, sinceUnix int64) (bool, error) {
-	if m.lastPaidAt == nil {
-		return false, nil
-	}
-	d, ok := m.deals[dealUUID]
-	if !ok {
-		return false, nil
-	}
-	if d.Client != client || d.CID != cid {
-		return false, nil
-	}
-	if strings.TrimSpace(d.LastPaidTxHash) == "" {
-		return false, nil
-	}
-	return m.lastPaidAt[dealUUID] >= sinceUnix, nil
-}
-
-type stubSettler struct {
-	txHash string
-	err    error
-}
-
-func (s stubSettler) SettleIfFunded(context.Context, common.Address, common.Address, *big.Int) (string, error) {
-	if s.err != nil {
-		return "", s.err
-	}
-	if s.txHash == "" {
-		return "0xabc", nil
-	}
-	return s.txHash, nil
-}
 
 func testService(t *testing.T, store DealStore, settler FilecoinPaySettler) (*RetrievalService, *ecdsa.PrivateKey, string) {
 	t.Helper()
@@ -167,6 +70,7 @@ func buildProof(t *testing.T, pk *ecdsa.PrivateKey, ch mpp.Challenge, client, ci
 		Host:          host,
 		Nonce:         nonce,
 		ExpiresUnix:   expiresUnix,
+		PaymentTxHash: testPaymentTxHash,
 	}
 	st, sig, err := mpp.SignEVM(pk, hdr.CanonicalMessage())
 	if err != nil {
@@ -435,10 +339,11 @@ func TestAuthorizeAndSettleErrors(t *testing.T) {
 		chPaid := qPaid.Challenge
 		const paidTx = "0xpaidreuse"
 		now := time.Now().Unix()
-		paidStore.lastPaidAt = map[string]int64{chPaid.ID: now}
-		paidStore.lastPaidTxHash = map[string]string{chPaid.ID: paidTx}
-		if d, ok := paidStore.deals[chPaid.ID]; ok {
-			d.LastPaidTxHash = paidTx
+		paidStore.allocations = map[string]*DealAllocation{
+			chPaid.ID: {
+				DealUUID: chPaid.ID, Client: clientPaid, CID: testPieceCID,
+				SettleTxHash: paidTx, AllocatedAt: now, AccessExpiresAt: now + int64(paidAccessTTL.Seconds()),
+			},
 		}
 		raw := buildProof(t, pkPaid, chPaid, clientPaid, testPieceCID, host, "n-exp-paid", time.Now().Add(-time.Hour).Unix())
 		out, err := svcPaid.AuthorizeAndSettle(paidRequest(t, host, testPieceCID, raw), testPieceCID, raw)
@@ -552,13 +457,13 @@ func TestAuthorizeAndSettleErrors(t *testing.T) {
 		}
 	})
 
-	t.Run("mark paid failure still succeeds", func(t *testing.T) {
-		svc4, pk4, client4 := testService(t, &mockDealStore{markPaidErr: errors.New("db down")}, stubSettler{})
+	t.Run("allocate failure surfaces error", func(t *testing.T) {
+		svc4, pk4, client4 := testService(t, &mockDealStore{allocateErr: errors.New("db down")}, stubSettler{})
 		q4, _ := svc4.IssueQuote(issueQuoteRequest(t, host, testPieceCID, client4), testPieceCID, testQuotePieceGiB)
-		raw := buildProof(t, pk4, q4.Challenge, client4, testPieceCID, host, "n-mark", time.Now().Add(time.Minute).Unix())
-		out, err := svc4.AuthorizeAndSettle(paidRequest(t, host, testPieceCID, raw), testPieceCID, raw)
-		if err != nil || out.TxHash == "" {
-			t.Fatalf("out=%+v err=%v", out, err)
+		raw := buildProof(t, pk4, q4.Challenge, client4, testPieceCID, host, "n-alloc", time.Now().Add(time.Minute).Unix())
+		_, err := svc4.AuthorizeAndSettle(paidRequest(t, host, testPieceCID, raw), testPieceCID, raw)
+		if err == nil {
+			t.Fatal("expected allocate error")
 		}
 	})
 }
@@ -573,6 +478,72 @@ func TestFailPaymentRequiredWithoutDeal(t *testing.T) {
 	}
 	if !strings.Contains(rec.Header().Get("WWW-Authenticate"), mpp.AuthScheme) {
 		t.Fatal("expected authenticate header")
+	}
+}
+
+func TestIssueChallengeForDeal(t *testing.T) {
+	deal := &Deal{
+		DealUUID:   "deal-challenge",
+		Client:     "0x1111111111111111111111111111111111111111",
+		CID:        testPieceCID,
+		PriceUSDFC: "0.1",
+		Payee0x:    "0x2222222222222222222222222222222222222222",
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/piece/"+testPieceCID, nil)
+	req.Host = "example.com"
+	issueChallengeForDeal(rec, req, deal, slog.Default())
+	if rec.Header().Get("WWW-Authenticate") == "" {
+		t.Fatal("expected WWW-Authenticate challenge")
+	}
+	issueChallengeForDeal(rec, req, nil, slog.Default())
+}
+
+func TestLedgerHelpersWithPayDebug(t *testing.T) {
+	var buf strings.Builder
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	payer := "0x1111111111111111111111111111111111111111"
+	payee := "0x2222222222222222222222222222222222222222"
+	store := &mockDealStore{
+		poolRemaining: map[string]*big.Int{
+			storePoolKey(payer, payee): big.NewInt(1_000_000),
+		},
+	}
+	svc := NewRetrievalService(Config{
+		PriceUSDFCPerGB: "0.1",
+		PayDebug:        true,
+		Logger:          logger,
+		Store:           store,
+	})
+	svc.logLedger(context.Background(), "test_event",
+		"payer", payer,
+		"payee", payee,
+	)
+	if !strings.Contains(buf.String(), "settlement ledger") || !strings.Contains(buf.String(), "pool_open") {
+		t.Fatalf("log output: %s", buf.String())
+	}
+	attrs := svc.ledgerAmountAttrs("price", nil)
+	if len(attrs) != 4 {
+		t.Fatalf("nil amount attrs: %v", attrs)
+	}
+	if got, _ := payerPayeeFromLedgerAttrs([]any{"payer", payer, "payee", payee}); got != payer {
+		t.Fatalf("payer=%q", got)
+	}
+}
+
+func storePoolKey(payer, payee string) string { return payer + "|" + payee }
+
+func TestReceiptResponseWriterWrite(t *testing.T) {
+	rec := httptest.NewRecorder()
+	w := newReceiptResponseWriter(rec, slog.Default(), "deal-1", "0xtxhash")
+	if n, err := w.Write([]byte("payload")); err != nil || n != 7 {
+		t.Fatalf("write n=%d err=%v", n, err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d", rec.Code)
+	}
+	if rec.Header().Get("Payment-Receipt") == "" {
+		t.Fatal("expected payment receipt header")
 	}
 }
 

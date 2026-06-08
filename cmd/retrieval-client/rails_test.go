@@ -184,11 +184,15 @@ func TestChargeRailsForChallenges(t *testing.T) {
 		CID: "bafy1", DealUUID: "11111111-2222-3333-4444-555555555555",
 		PriceUSDFC: "0.05", Payee0x: payee,
 	}}
-	if err := chargeRailsForChallenges(context.Background(), mock, client, items, false); err != nil {
+	txByPayee, err := chargeRailsForChallenges(context.Background(), mock, client, items, false)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if mock.chargeCalls != 1 {
 		t.Fatalf("charge calls=%d", mock.chargeCalls)
+	}
+	if txByPayee[common.HexToAddress(payee).Hex()] != "0xabc" {
+		t.Fatalf("tx map=%v", txByPayee)
 	}
 }
 
@@ -200,7 +204,7 @@ func TestChargeRailsAggregatesByPayee(t *testing.T) {
 		{CID: "bafy1", DealUUID: "d1", PriceUSDFC: "0.01", Payee0x: payee},
 		{CID: "bafy2", DealUUID: "d2", PriceUSDFC: "0.02", Payee0x: payee},
 	}
-	if err := chargeRailsForChallenges(context.Background(), mock, client, items, false); err != nil {
+	if _, err := chargeRailsForChallenges(context.Background(), mock, client, items, false); err != nil {
 		t.Fatal(err)
 	}
 	if mock.chargeCalls != 1 {
@@ -217,7 +221,7 @@ func TestChargeRailsError(t *testing.T) {
 		CID: "bafy1", DealUUID: "d", PriceUSDFC: "0.01",
 		Payee0x: "0x2222222222222222222222222222222222222222",
 	}}
-	err := chargeRailsForChallenges(context.Background(), mock, mock.signer.Hex(), items, false)
+	_, err := chargeRailsForChallenges(context.Background(), mock, mock.signer.Hex(), items, false)
 	if err == nil || !strings.Contains(err.Error(), "charge failed") {
 		t.Fatalf("got %v", err)
 	}

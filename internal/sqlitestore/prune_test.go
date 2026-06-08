@@ -1,0 +1,172 @@
+package sqlitestore
+
+import (
+	"context"
+	"math/big"
+	"path/filepath"
+	"testing"
+	"time"
+
+	pp "github.com/fidlabs/paid-retrievals/internal/piecepayment"
+)
+
+func TestPruneRemovesOldRows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sp.db")
+	s, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+
+	const (
+		oldDeal    = "11111111-2222-3333-4444-555555555555"
+		recentDeal = "22222222-3333-4444-5555-666666666666"
+		payer      = "0x1111111111111111111111111111111111111111"
+		payee      = "0x2222222222222222222222222222222222222222"
+		cid        = "bafkreic3gqso3booyry4fwc5wfnhaio574lami3am6nv4k6q6u2legzzdm"
+	)
+	if err := s.InsertQuote(ctx, oldDeal, payer, cid, "0.01", payee); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.InsertQuote(ctx, recentDeal, payer, cid, "0.01", payee); err != nil {
+		t.Fatal(err)
+	}
+	oldCutoff := time.Now().Add(-8 * 24 * time.Hour).Unix()
+	if err := setDealQuotedAt(ctx, s, oldDeal, oldCutoff); err != nil {
+		t.Fatal(err)
+	}
+
+	price := big.NewInt(50_000)
+	if err := s.CreditSettlement(ctx, pp.SettlementCredit{
+		Payer: payer, Payee: payee, SettleTxHash: "0xsettle-old", CreditedBaseUnits: price,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.TryAllocateDeal(ctx, pp.AllocateDealRequest{
+		DealUUID: oldDeal, Payer: payer, Payee: payee, Client: payer, CID: cid,
+		PriceBaseUnits: price, SettleTxHash: "0xsettle-old", AccessTTL: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	expiredAllocAt := time.Now().Add(-8 * 24 * time.Hour).Unix()
+	if err := setAllocationAccessExpires(ctx, s, oldDeal, expiredAllocAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ConsumeNonce(ctx, oldDeal, "old-nonce", expiredAllocAt); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := s.Prune(ctx, 7*24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Deals == 0 || stats.DealAllocations == 0 {
+		t.Fatalf("expected old deal/allocation pruned, stats=%+v", stats)
+	}
+
+	if _, err := s.GetDeal(ctx, oldDeal); err != pp.ErrDealNotFound {
+		t.Fatalf("old deal still present: %v", err)
+	}
+	if got, err := s.GetDeal(ctx, recentDeal); err != nil || got.DealUUID != recentDeal {
+		t.Fatalf("recent deal missing: %v %+v", err, got)
+	}
+}
+
+func TestPruneClosedPools(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sp.db")
+	s, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+
+	const (
+		dealUUID = "11111111-2222-3333-4444-555555555555"
+		payer    = "0x1111111111111111111111111111111111111111"
+		payee    = "0x2222222222222222222222222222222222222222"
+		cid      = "bafkreic3gqso3booyry4fwc5wfnhaio574lami3am6nv4k6q6u2legzzdm"
+	)
+	if err := s.InsertQuote(ctx, dealUUID, payer, cid, "0.01", payee); err != nil {
+		t.Fatal(err)
+	}
+	price := big.NewInt(100_000)
+	if err := s.CreditSettlement(ctx, pp.SettlementCredit{
+		Payer: payer, Payee: payee, SettleTxHash: "0xsettle-closed", CreditedBaseUnits: price,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.TryAllocateDeal(ctx, pp.AllocateDealRequest{
+		DealUUID: dealUUID, Payer: payer, Payee: payee, Client: payer, CID: cid,
+		PriceBaseUnits: price, SettleTxHash: "0xsettle-closed", AccessTTL: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	oldClosed := time.Now().Add(-8 * 24 * time.Hour).Unix()
+	if err := setPoolClosedAt(ctx, s, payer, payee, oldClosed); err != nil {
+		t.Fatal(err)
+	}
+	if err := setDealQuotedAt(ctx, s, dealUUID, oldClosed); err != nil {
+		t.Fatal(err)
+	}
+	if err := setAllocationAccessExpires(ctx, s, dealUUID, oldClosed); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := s.Prune(ctx, 7*24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.SettlementPools == 0 || stats.SettlementCredits == 0 {
+		t.Fatalf("expected closed pool pruned, stats=%+v", stats)
+	}
+}
+
+func setPoolClosedAt(ctx context.Context, s *Store, payer, payee string, closedAt int64) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE settlement_pools SET closed_at = ?, created_at = ? WHERE payer = ? AND payee = ?
+	`, closedAt, closedAt, payer, payee)
+	return err
+}
+
+func TestPruneDisabledWhenRetentionZero(t *testing.T) {
+	s, err := OpenStore(filepath.Join(t.TempDir(), "sp.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	dealUUID := "11111111-2222-3333-4444-555555555555"
+	if err := s.InsertQuote(ctx, dealUUID, "0x1", "bafy", "0.01", "0x2"); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-30 * 24 * time.Hour).Unix()
+	if err := setDealQuotedAt(ctx, s, dealUUID, old); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := s.Prune(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats != (PruneStats{}) {
+		t.Fatalf("expected empty stats, got %+v", stats)
+	}
+	if _, err := s.GetDeal(ctx, dealUUID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func setDealQuotedAt(ctx context.Context, s *Store, dealUUID string, quotedAt int64) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE deals SET last_quoted_at = ?, created_at = ? WHERE deal_uuid = ?
+	`, quotedAt, quotedAt, dealUUID)
+	return err
+}
+
+func setAllocationAccessExpires(ctx context.Context, s *Store, dealUUID string, accessExpiresAt int64) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE deal_allocations SET access_expires_at = ?, allocated_at = ? WHERE deal_uuid = ?
+	`, accessExpiresAt, accessExpiresAt, dealUUID)
+	return err
+}

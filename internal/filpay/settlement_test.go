@@ -1,5 +1,5 @@
 // Unit tests for filpay settlement logic using injectable mocks (paymentsAPI, erc20API,
-// waitMined, blockNumber) via testClient. Production code paths are unchanged when hooks are nil.
+// waitMined) via testClient. Production code paths are unchanged when hooks are nil.
 //
 // Trade-offs:
 //   - Speed and determinism: no live RPC or simulated chain; tests run entirely in-process.
@@ -53,7 +53,7 @@ func testHexKey(t *testing.T, pk *ecdsa.PrivateKey) string {
 }
 
 // testClient builds a calibration-chain Client with no eth field; use opts to set waitMined,
-// usdfc, blockNumber, or replace payments for a scenario.
+// usdfc, or replace payments for a scenario.
 func testClient(t *testing.T, pay paymentsAPI, opts ...func(*Client)) *Client {
 	t.Helper()
 	pk := testPrivateKey(t)
@@ -98,7 +98,6 @@ type mockPayments struct {
 	rail             func(ctx context.Context, railID *big.Int) (*contracts.RailViewResult, error)
 	setOperator      func(opts *bind.TransactOpts, token, operator common.Address, approved bool, rateAllowance, lockupAllowance, maxLockupPeriod *big.Int) (*types.Transaction, error)
 	deposit          func(opts *bind.TransactOpts, token, to common.Address, amount *big.Int) (*types.Transaction, error)
-	settleRail       func(opts *bind.TransactOpts, railID, untilEpoch *big.Int) (*types.Transaction, error)
 }
 
 func (m *mockPayments) GetOperatorApproval(ctx context.Context, token, client, operator common.Address) (bool, *big.Int, *big.Int, *big.Int, *big.Int, *big.Int, error) {
@@ -141,13 +140,6 @@ func (m *mockPayments) Deposit(opts *bind.TransactOpts, token, to common.Address
 		return m.deposit(opts, token, to, amount)
 	}
 	return nil, errors.New("deposit not configured")
-}
-
-func (m *mockPayments) SettleRail(opts *bind.TransactOpts, railID, untilEpoch *big.Int) (*types.Transaction, error) {
-	if m.settleRail != nil {
-		return m.settleRail(opts, railID, untilEpoch)
-	}
-	return nil, errors.New("settleRail not configured")
 }
 
 // mockERC20 implements erc20API so EnsurePayerTokenBalance / ensureUSDFCApproval avoid
@@ -665,44 +657,6 @@ func TestWaitTxMined(t *testing.T) {
 	}
 }
 
-func TestSettleIfFunded(t *testing.T) {
-	ctx := context.Background()
-	payer := common.HexToAddress("0x1000000000000000000000000000000000000001")
-	payee := common.HexToAddress("0x2000000000000000000000000000000000000002")
-	token := constants.USDFCAddressesByChainID[constants.ChainIDCalibration]
-	railID := big.NewInt(9)
-	tx := testTx(t)
-
-	c := testClient(t, &mockPayments{})
-	if _, err := c.SettleIfFunded(ctx, payer, payee, nil); err == nil {
-		t.Fatal("expected invalid price")
-	}
-
-	settle := testClient(t, &mockPayments{
-		accountInfo: func(ctx context.Context, token, owner common.Address) (*big.Int, *big.Int, *big.Int, *big.Int, error) {
-			return big.NewInt(0), big.NewInt(0), big.NewInt(1000), big.NewInt(0), nil
-		},
-		railsForPayer: func(ctx context.Context, p, tok common.Address, offset, limit *big.Int) ([]contracts.RailInfoResult, *big.Int, *big.Int, error) {
-			return []contracts.RailInfoResult{{RailId: railID, IsTerminated: false, EndEpoch: big.NewInt(0)}}, big.NewInt(0), big.NewInt(1), nil
-		},
-		rail: func(ctx context.Context, id *big.Int) (*contracts.RailViewResult, error) {
-			return &contracts.RailViewResult{Token: token, From: payer, To: payee, EndEpoch: big.NewInt(0)}, nil
-		},
-		settleRail: func(opts *bind.TransactOpts, rid, until *big.Int) (*types.Transaction, error) {
-			return tx, nil
-		},
-	}, func(cl *Client) {
-		cl.waitMined = func(ctx context.Context, tx *types.Transaction) (*types.Receipt, error) {
-			return successReceipt(), nil
-		}
-		cl.blockNumber = func(ctx context.Context) (uint64, error) { return 12345, nil }
-	})
-	hash, err := settle.SettleIfFunded(ctx, payer, payee, big.NewInt(10))
-	if err != nil || hash != tx.Hash().Hex() {
-		t.Fatalf("hash=%q err=%v", hash, err)
-	}
-}
-
 func TestPreparePayerForPayeeExistingRail(t *testing.T) {
 	ctx := context.Background()
 	payer := common.HexToAddress("0x1000000000000000000000000000000000000001")
@@ -782,33 +736,6 @@ func TestAccountInfoIfSettledError(t *testing.T) {
 	})
 	_, _, _, _, err := c.AccountInfoIfSettled(context.Background(), c.signerAddr)
 	if err == nil || !strings.Contains(err.Error(), "getAccountInfoIfSettled") {
-		t.Fatalf("got %v", err)
-	}
-}
-
-func TestSettleIfFundedBlockNumberError(t *testing.T) {
-	ctx := context.Background()
-	payer := common.HexToAddress("0x1000000000000000000000000000000000000001")
-	payee := common.HexToAddress("0x2000000000000000000000000000000000000002")
-	token := constants.USDFCAddressesByChainID[constants.ChainIDCalibration]
-	railID := big.NewInt(1)
-	c := testClient(t, &mockPayments{
-		accountInfo: func(ctx context.Context, token, owner common.Address) (*big.Int, *big.Int, *big.Int, *big.Int, error) {
-			return big.NewInt(0), big.NewInt(0), big.NewInt(100), big.NewInt(0), nil
-		},
-		railsForPayer: func(ctx context.Context, p, tok common.Address, offset, limit *big.Int) ([]contracts.RailInfoResult, *big.Int, *big.Int, error) {
-			return []contracts.RailInfoResult{{RailId: railID, IsTerminated: false, EndEpoch: big.NewInt(0)}}, big.NewInt(0), big.NewInt(1), nil
-		},
-		rail: func(ctx context.Context, id *big.Int) (*contracts.RailViewResult, error) {
-			return &contracts.RailViewResult{Token: token, From: payer, To: payee, EndEpoch: big.NewInt(0)}, nil
-		},
-	}, func(cl *Client) {
-		cl.blockNumber = func(ctx context.Context) (uint64, error) {
-			return 0, errors.New("no block")
-		}
-	})
-	_, err := c.SettleIfFunded(ctx, payer, payee, big.NewInt(1))
-	if err == nil || !strings.Contains(err.Error(), "latest block number") {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -997,14 +924,6 @@ func TestEnsureOperatorApprovalRPCError(t *testing.T) {
 	}
 }
 
-func TestSettleIfFundedNoRail(t *testing.T) {
-	c := testClient(t, &mockPayments{})
-	_, err := c.SettleIfFunded(context.Background(), c.signerAddr, common.HexToAddress("0x2"), big.NewInt(1))
-	if err == nil || !strings.Contains(err.Error(), "no active token rail") {
-		t.Fatalf("got %v", err)
-	}
-}
-
 func TestOperatorApprovalError(t *testing.T) {
 	c := testClient(t, &mockPayments{
 		operatorApproval: func(ctx context.Context, token, client, operator common.Address) (bool, *big.Int, *big.Int, *big.Int, *big.Int, *big.Int, error) {
@@ -1023,4 +942,20 @@ func TestPayLoggingNoLogger(t *testing.T) {
 	c.payDebug("y")
 	c.log = slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	c.payDebug("z") // debug disabled at info level
+}
+
+func TestReceiptForTxNoEth(t *testing.T) {
+	c := testClient(t, &mockPayments{})
+	_, err := c.receiptForTx(context.Background(), testTx(t))
+	if err == nil || !strings.Contains(err.Error(), "no eth client") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestErc20NoClient(t *testing.T) {
+	c := testClient(t, &mockPayments{})
+	_, err := c.erc20()
+	if err == nil || !strings.Contains(err.Error(), "no eth client") {
+		t.Fatalf("got %v", err)
+	}
 }

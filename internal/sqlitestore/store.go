@@ -7,10 +7,12 @@ import (
 	"strings"
 	"time"
 
-	piecepayment "github.com/fidlabs/paid-retrievals/internal/piecepayment"
+	"github.com/fidlabs/paid-retrievals/internal/dealstore"
 
 	_ "modernc.org/sqlite"
 )
+
+var _ dealstore.DealStore = (*Store)(nil)
 
 type Store struct {
 	db *sql.DB
@@ -57,6 +59,36 @@ func (s *Store) migrate() error {
 			PRIMARY KEY(deal_uuid, nonce)
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_used_nonces_exp ON used_nonces(expires_unix);`,
+		`CREATE TABLE IF NOT EXISTS settlement_pools (
+			pool_id TEXT PRIMARY KEY,
+			payer TEXT NOT NULL,
+			payee TEXT NOT NULL,
+			settled_base_units TEXT NOT NULL DEFAULT '0',
+			remaining_base_units TEXT NOT NULL DEFAULT '0',
+			created_at INTEGER NOT NULL,
+			closed_at INTEGER
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_settlement_pools_pair ON settlement_pools(payer, payee, closed_at);`,
+		`CREATE TABLE IF NOT EXISTS settlement_credits (
+			credit_id TEXT PRIMARY KEY,
+			pool_id TEXT NOT NULL,
+			settle_tx_hash TEXT NOT NULL UNIQUE,
+			credited_base_units TEXT NOT NULL,
+			credited_at INTEGER NOT NULL,
+			FOREIGN KEY(pool_id) REFERENCES settlement_pools(pool_id)
+		);`,
+		`CREATE TABLE IF NOT EXISTS deal_allocations (
+			deal_uuid TEXT PRIMARY KEY,
+			pool_id TEXT NOT NULL,
+			client TEXT NOT NULL,
+			cid TEXT NOT NULL,
+			price_base_units TEXT NOT NULL,
+			settle_tx_hash TEXT NOT NULL DEFAULT '',
+			allocated_at INTEGER NOT NULL,
+			access_expires_at INTEGER NOT NULL,
+			FOREIGN KEY(pool_id) REFERENCES settlement_pools(pool_id)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_deal_allocations_access ON deal_allocations(client, cid, access_expires_at);`,
 	}
 	for _, q := range queries {
 		if _, err := s.db.Exec(q); err != nil {
@@ -89,8 +121,8 @@ func (s *Store) InsertQuote(ctx context.Context, dealUUID, client, cid, priceUSD
 	return err
 }
 
-func (s *Store) GetDeal(ctx context.Context, dealUUID string) (*piecepayment.Deal, error) {
-	var d piecepayment.Deal
+func (s *Store) GetDeal(ctx context.Context, dealUUID string) (*dealstore.Deal, error) {
+	var d dealstore.Deal
 	err := s.db.QueryRowContext(ctx, `
 		SELECT deal_uuid, client, cid, price_usdfc, COALESCE(payee_0x, ''), COALESCE(last_paid_tx_hash, '')
 		FROM deals WHERE deal_uuid = ?
@@ -98,44 +130,12 @@ func (s *Store) GetDeal(ctx context.Context, dealUUID string) (*piecepayment.Dea
 		&d.DealUUID, &d.Client, &d.CID, &d.PriceUSDFC, &d.Payee0x, &d.LastPaidTxHash,
 	)
 	if err == sql.ErrNoRows {
-		return nil, piecepayment.ErrDealNotFound
+		return nil, dealstore.ErrDealNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
 	return &d, nil
-}
-
-func (s *Store) IsDealPaidSince(ctx context.Context, dealUUID, client, cid string, sinceUnix int64) (bool, error) {
-	var n int
-	err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(1)
-		FROM deals
-		WHERE deal_uuid = ? AND client = ? AND cid = ?
-			AND last_paid_at IS NOT NULL AND last_paid_at >= ?
-			AND last_paid_tx_hash != ''
-	`, dealUUID, client, cid, sinceUnix).Scan(&n)
-	if err != nil {
-		return false, err
-	}
-	return n > 0, nil
-}
-
-func (s *Store) MarkPaid(ctx context.Context, dealUUID, client, txHash string) error {
-	now := time.Now().Unix()
-	res, err := s.db.ExecContext(ctx, `
-		UPDATE deals
-		SET last_paid_at = ?, last_paid_tx_hash = ?, paid_seen = paid_seen + 1, client = ?
-		WHERE deal_uuid = ?
-	`, now, txHash, client, dealUUID)
-	if err != nil {
-		return err
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return piecepayment.ErrDealNotFound
-	}
-	return nil
 }
 
 func (s *Store) ConsumeNonce(ctx context.Context, dealUUID, nonce string, expiresUnix int64) error {
@@ -154,7 +154,7 @@ func (s *Store) ConsumeNonce(ctx context.Context, dealUUID, nonce string, expire
 		VALUES(?,?,?,?)
 	`, dealUUID, nonce, expiresUnix, now); err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
-			return piecepayment.ErrReplayNonce
+			return dealstore.ErrReplayNonce
 		}
 		return err
 	}

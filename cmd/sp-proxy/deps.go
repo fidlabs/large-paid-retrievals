@@ -13,7 +13,7 @@ import (
 // proxyFilpay is the Filecoin Pay surface sp-proxy needs at startup and in piecepayment.Config.
 type proxyFilpay interface {
 	piecepayment.FilecoinPaySettler
-	SignerAddress() common.Address
+	payeeWithdrawer
 	PaymentsAddress() common.Address
 	Close()
 }
