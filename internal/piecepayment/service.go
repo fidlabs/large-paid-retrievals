@@ -632,7 +632,7 @@ func (s *RetrievalService) lockSettlementPair(payer, payee common.Address) func(
 func settlementPaymentRequiredError(deal *Deal, err error) *PaymentRequiredError {
 	msg := strings.ToLower(err.Error())
 	if strings.Contains(msg, "insufficient") || strings.Contains(msg, "no active token rail") || strings.Contains(msg, "no funds") ||
-		strings.Contains(msg, "payment tx") || strings.Contains(msg, "railoneTimepaymentprocessed") {
+		strings.Contains(msg, "payment tx") || strings.Contains(msg, "railonetimepaymentprocessed") {
 		return &PaymentRequiredError{
 			Deal:   deal,
 			Code:   "payment-insufficient",

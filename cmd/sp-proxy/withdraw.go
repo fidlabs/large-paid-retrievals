@@ -9,6 +9,8 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
+const payWithdrawTimeout = 10 * time.Minute
+
 // payeeWithdrawer moves available USDFC from a Filecoin Pay account to wallet.
 type payeeWithdrawer interface {
 	WithdrawPayeeProceeds(ctx context.Context, payee common.Address) (txHash string, amountBaseUnits *big.Int, err error)
@@ -29,7 +31,8 @@ func startPayeeWithdrawWorker(fc payeeWithdrawer, interval time.Duration, logger
 	)
 	go func() {
 		withdraw := func() {
-			ctx := context.Background()
+			ctx, cancel := context.WithTimeout(context.Background(), payWithdrawTimeout)
+			defer cancel()
 			txHash, amount, err := fc.WithdrawPayeeProceeds(ctx, payee)
 			if err != nil {
 				logger.Error("payee withdraw failed", "error", err, "payee", payee.Hex())

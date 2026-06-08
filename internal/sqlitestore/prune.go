@@ -68,6 +68,10 @@ func (s *Store) Prune(ctx context.Context, retention time.Duration) (PruneStats,
 	if err := tx.Commit(); err != nil {
 		return stats, err
 	}
+	if stats.UsedNonces == 0 && stats.DealAllocations == 0 && stats.Deals == 0 &&
+		stats.SettlementCredits == 0 && stats.SettlementPools == 0 {
+		return stats, nil
+	}
 	if _, err := s.db.ExecContext(ctx, `VACUUM`); err != nil {
 		return stats, fmt.Errorf("prune vacuum: %w", err)
 	}

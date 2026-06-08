@@ -39,7 +39,7 @@ func root() *cobra.Command {
 	c.Flags().BoolVar(&settings.Verbose, "verbose", false, "Enable debug-level structured logs")
 
 	c.Flags().StringVar(&settings.PayRPCURL, "pay-rpc-url", getenv("SP_PROXY_PAY_RPC_URL", "https://api.node.glif.io/rpc/v1"), "Filecoin RPC (FVM) for payments contract")
-	c.Flags().StringVar(&settings.PayPrivateKey, "pay-private-key", "", "Hex private key for Filecoin Pay RPC reads (prefer env or file)")
+	c.Flags().StringVar(&settings.PayPrivateKey, "pay-private-key", "", "Hex private key for Filecoin Pay settler wallet (RPC reads and on-chain withdraw); prefer env or file")
 	c.Flags().StringVar(&settings.PayPrivateKeyFile, "pay-private-key-file", "", "File containing hex private key for Filecoin Pay")
 	c.Flags().StringVar(&settings.PayPrivateKeyEnv, "pay-private-key-env", getenv("SP_PROXY_PAY_PRIVATE_KEY_ENV", "SP_PROXY_PAY_PRIVATE_KEY"), "Env var for Filecoin Pay private key")
 	c.Flags().StringVar(&settings.PayPaymentsAddress, "pay-payments-address", getenv("SP_PROXY_PAY_PAYMENTS_ADDRESS", ""), "Filecoin Pay payments contract (0x); empty = built-in address for chain")
