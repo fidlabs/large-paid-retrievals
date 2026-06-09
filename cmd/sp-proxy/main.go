@@ -44,7 +44,7 @@ func root() *cobra.Command {
 	c.Flags().StringVar(&settings.PayPrivateKeyEnv, "pay-private-key-env", getenv("SP_PROXY_PAY_PRIVATE_KEY_ENV", "SP_PROXY_PAY_PRIVATE_KEY"), "Env var for Filecoin Pay private key")
 	c.Flags().StringVar(&settings.PayPaymentsAddress, "pay-payments-address", getenv("SP_PROXY_PAY_PAYMENTS_ADDRESS", ""), "Filecoin Pay payments contract (0x); empty = built-in address for chain")
 	c.Flags().StringVar(&settings.PayPayeeAddress, "pay-payee-address", getenv("SP_PROXY_PAY_PAYEE_ADDRESS", ""), "FVM address clients should open/fund rails to; empty = settlement wallet address")
-	c.Flags().BoolVar(&settings.PayDebug, "pay-debug", false, "Log Filecoin Pay and settlement ledger steps (funding, drawdown, balances); Info level. Implied filpay trace; use with --verbose for more RPC detail")
+	c.Flags().BoolVar(&settings.PayDebug, "pay-debug", false, "Log Filecoin Pay and settlement pool steps (funding, drawdown, balances); Info level. Implied filpay trace; use with --verbose for more RPC detail")
 	c.Flags().StringVar(&settings.UpstreamHost, "upstream-host", getenv("SP_PROXY_UPSTREAM_HOST", "127.0.0.1"), "Upstream HTTP server host for proxied /piece requests")
 	c.Flags().IntVar(&settings.UpstreamPort, "upstream-port", mustParsePort(getenv("SP_PROXY_UPSTREAM_PORT", "8788")), "Upstream HTTP server port for proxied /piece requests")
 	initCLIUsage(c)

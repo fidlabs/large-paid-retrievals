@@ -34,7 +34,7 @@ func init() {
 // RailOneTimePaymentProcessed logs: netPayeeAmount + operatorCommission + networkFee.
 // That gross is what the payer's modifyRailPayment oneTimePayment debited from lockup.
 // Only netPayeeAmount lands in the payee's Filecoin Pay account; commission and network
-// fees are absorbed by the SP when the settlement ledger credits the payer pool at gross.
+// fees are absorbed by the SP when the settlement pool is credited at gross.
 func sumRailOneTimePaymentGross(receipt *types.Receipt, paymentsAddr common.Address) (map[string]*big.Int, error) {
 	if receipt == nil {
 		return nil, fmt.Errorf("filpay: nil receipt")

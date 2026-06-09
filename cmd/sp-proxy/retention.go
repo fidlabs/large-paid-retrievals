@@ -27,17 +27,17 @@ func startDBRetentionPruner(store *sqlitestore.Store, retention time.Duration, l
 				logger.Error("db retention prune failed", "error", err)
 				return
 			}
-			if stats.UsedNonces == 0 && stats.DealAllocations == 0 && stats.Deals == 0 &&
-				stats.SettlementCredits == 0 && stats.SettlementPools == 0 {
+			if stats.UsedNonces == 0 && stats.PoolAllocations == 0 && stats.Deals == 0 &&
+				stats.PoolCredits == 0 && stats.Pools == 0 {
 				logger.Debug("db retention prune complete", "removed", stats)
 				return
 			}
 			logger.Info("db retention prune complete",
 				"used_nonces", stats.UsedNonces,
-				"deal_allocations", stats.DealAllocations,
+				"pool_allocations", stats.PoolAllocations,
 				"deals", stats.Deals,
-				"settlement_credits", stats.SettlementCredits,
-				"settlement_pools", stats.SettlementPools,
+				"pool_credits", stats.PoolCredits,
+				"pools", stats.Pools,
 			)
 		}
 		prune()

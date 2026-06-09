@@ -11,7 +11,7 @@ import (
 	pp "github.com/fidlabs/paid-retrievals/internal/piecepayment"
 )
 
-func TestCreditSettlementInvalidSettled(t *testing.T) {
+func TestCreditPoolInvalidSettled(t *testing.T) {
 	s, err := OpenStore(filepath.Join(t.TempDir(), "sp.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -22,15 +22,15 @@ func TestCreditSettlementInvalidSettled(t *testing.T) {
 		payer = "0x1111111111111111111111111111111111111111"
 		payee = "0x2222222222222222222222222222222222222222"
 	)
-	if err := s.CreditSettlement(ctx, pp.SettlementCredit{
+	if err := s.CreditPool(ctx, pp.PoolCredit{
 		Payer: payer, Payee: payee, SettleTxHash: "0xcr-1", CreditedBaseUnits: big.NewInt(1),
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.ExecContext(ctx, `UPDATE settlement_pools SET settled_base_units = 'bad' WHERE payer = ? AND payee = ?`, payer, payee); err != nil {
+	if _, err := s.db.ExecContext(ctx, `UPDATE pools SET settled_base_units = 'bad' WHERE payer = ? AND payee = ?`, payer, payee); err != nil {
 		t.Fatal(err)
 	}
-	err = s.CreditSettlement(ctx, pp.SettlementCredit{
+	err = s.CreditPool(ctx, pp.PoolCredit{
 		Payer: payer, Payee: payee, SettleTxHash: "0xcr-2", CreditedBaseUnits: big.NewInt(1),
 	})
 	if err == nil || !strings.Contains(err.Error(), "invalid settled_base_units") {
@@ -54,12 +54,12 @@ func TestTryAllocateDealInvalidRemaining(t *testing.T) {
 	if err := s.InsertQuote(ctx, dealUUID, payer, cid, "0.01", payee); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CreditSettlement(ctx, pp.SettlementCredit{
+	if err := s.CreditPool(ctx, pp.PoolCredit{
 		Payer: payer, Payee: payee, SettleTxHash: "0xcr-bad-rem", CreditedBaseUnits: big.NewInt(100_000),
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.ExecContext(ctx, `UPDATE settlement_pools SET remaining_base_units = 'bad' WHERE payer = ? AND payee = ?`, payer, payee); err != nil {
+	if _, err := s.db.ExecContext(ctx, `UPDATE pools SET remaining_base_units = 'bad' WHERE payer = ? AND payee = ?`, payer, payee); err != nil {
 		t.Fatal(err)
 	}
 	_, err = s.TryAllocateDeal(ctx, pp.AllocateDealRequest{

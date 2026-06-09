@@ -4,8 +4,8 @@
 // Flow (implemented by sqlitestore.Store, orchestrated by piecepayment):
 //
 //  1. InsertQuote — client receives 402; a Deal row is created (one deal_uuid per quote).
-//  2. On first paid GET, CreditSettlement adds verified rail proceeds to the payer→payee pool
-//     (keyed by SettlementCredit.SettleTxHash for idempotency).
+//  2. On first paid GET, CreditPool adds verified rail proceeds to the payer→payee pool
+//     (keyed by PoolCredit.SettleTxHash for idempotency).
 //  3. TryAllocateDeal debits the pool (AllocateDealRequest) and creates a DealAllocation
 //     granting the client a time-limited paid-access window for that deal/cid.
 //  4. GetActiveAllocation — while AccessExpiresAt is in the future, retries reuse the same
@@ -27,7 +27,7 @@ var (
 	ErrDealNotFound     = errors.New("deal not found")
 	ErrReplayNonce      = errors.New("nonce already used")
 	ErrInsufficientPool = errors.New("settlement pool balance insufficient")
-	ErrZeroSettlement   = errors.New("settlement credit amount must be positive")
+	ErrZeroPoolCredit   = errors.New("pool credit amount must be positive")
 )
 
 // Deal is the quoted retrieval offer embedded in the MPP 402 challenge.
@@ -42,15 +42,15 @@ type Deal struct {
 	LastPaidTxHash string // rail payment or settlement tx that funded this deal's allocation
 }
 
-// DealStore persists quotes, settlement ledger state, and paid-access grants.
+// DealStore persists quotes, settlement pool state, and paid-access grants.
 // piecepayment aliases these types; sqlitestore is the production implementation.
 type DealStore interface {
 	InsertQuote(ctx context.Context, dealUUID, client, cid, priceUSDFC, payee0x string) error
 	GetDeal(ctx context.Context, dealUUID string) (*Deal, error)
 	GetActiveAllocation(ctx context.Context, dealUUID, client, cid string, nowUnix int64) (*DealAllocation, error)
 	TryAllocateDeal(ctx context.Context, req AllocateDealRequest) (*DealAllocation, error)
-	CreditSettlement(ctx context.Context, credit SettlementCredit) error
-	OpenSettlementPool(ctx context.Context, payer, payee string) (*SettlementPoolSnapshot, error)
+	CreditPool(ctx context.Context, credit PoolCredit) error
+	OpenPool(ctx context.Context, payer, payee string) (*PoolSnapshot, error)
 	ConsumeNonce(ctx context.Context, dealUUID, nonce string, expiresUnix int64) error
 	// DumpState writes quotes, pools, credits, and allocations to w (e.g. SIGUSR1 diagnostics).
 	DumpState(ctx context.Context, w io.Writer) error
@@ -85,21 +85,21 @@ type AllocateDealRequest struct {
 	AccessTTL      time.Duration
 }
 
-// SettlementCredit records verified on-chain rail proceeds added to a payer's pool
+// PoolCredit records verified on-chain rail proceeds added to a payer's pool
 // for a given payee. CreditedBaseUnits is the gross charge (quoted price); the SP
 // absorbs operator commission and network fees on-chain. SettleTxHash is typically
 // the client's modifyRailPayment tx hash and must be unique per credit.
-type SettlementCredit struct {
+type PoolCredit struct {
 	Payer             string
 	Payee             string
 	SettleTxHash      string
 	CreditedBaseUnits *big.Int
 }
 
-// SettlementPoolSnapshot is the current open ledger pool for one (payer, payee) pair.
+// PoolSnapshot is the current open settlement pool for one (payer, payee) pair.
 // RemainingBaseUnits is what TryAllocateDeal can still draw; SettledBaseUnits is
 // the cumulative gross credited from rail payments.
-type SettlementPoolSnapshot struct {
+type PoolSnapshot struct {
 	PoolID             string
 	RemainingBaseUnits string
 	SettledBaseUnits   string

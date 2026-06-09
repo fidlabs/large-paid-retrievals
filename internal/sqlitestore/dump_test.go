@@ -22,7 +22,7 @@ func TestDumpState(t *testing.T) {
 	)
 	seedDeal(t, s, dealUUID, payer, cid, "0.01", payee)
 
-	if err := s.CreditSettlement(ctx, pp.SettlementCredit{
+	if err := s.CreditPool(ctx, pp.PoolCredit{
 		Payer: payer, Payee: payee, SettleTxHash: "0xsettle-1", CreditedBaseUnits: big.NewInt(100_000),
 	}); err != nil {
 		t.Fatal(err)
@@ -44,13 +44,13 @@ func TestDumpState(t *testing.T) {
 		"--- deals ---",
 		"deal_uuid=" + dealUUID,
 		"price_usdfc=0.01",
-		"--- settlement_pools ---",
+		"--- pools ---",
 		"payer=" + payer,
 		"status=open",
 		"remaining_base_units=50000",
-		"--- settlement_credits ---",
+		"--- pool_credits ---",
 		"settle_tx_hash=0xsettle-1",
-		"--- deal_allocations ---",
+		"--- pool_allocations ---",
 		"price_base_units=50000",
 	} {
 		if !strings.Contains(out, want) {
@@ -69,7 +69,7 @@ func TestDumpStateEmpty(t *testing.T) {
 	for _, want := range []string{
 		"--- deals ---",
 		"(0 deal(s))",
-		"--- settlement_pools ---",
+		"--- pools ---",
 		"(0 pool(s))",
 	} {
 		if !strings.Contains(out, want) {
@@ -89,7 +89,7 @@ func TestDumpStateClosedPool(t *testing.T) {
 	)
 	seedDeal(t, s, dealUUID, payer, cid, "0.01", payee)
 	price := big.NewInt(100_000)
-	if err := s.CreditSettlement(ctx, pp.SettlementCredit{
+	if err := s.CreditPool(ctx, pp.PoolCredit{
 		Payer: payer, Payee: payee, SettleTxHash: "0xsettle-drain", CreditedBaseUnits: price,
 	}); err != nil {
 		t.Fatal(err)

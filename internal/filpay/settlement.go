@@ -700,7 +700,7 @@ func (c *Client) FindActiveTokenRail(ctx context.Context, payer, payee common.Ad
 
 // CreditRailPayment verifies a client modifyRailPayment tx and returns the gross charge
 // parsed from RailOneTimePaymentProcessed for the payer→payee rail (net payee amount plus
-// operator commission and network fee). The settlement ledger credits the payer pool at this
+// operator commission and network fee). The settlement pool is credited at this
 // gross so it matches the quoted price; only the net payee amount is withdrawable on-chain
 // and the SP absorbs commission and network fees as transaction costs.
 func (c *Client) CreditRailPayment(ctx context.Context, payer, payee common.Address, paymentTxHash string) (creditRef string, creditedBaseUnits *big.Int, err error) {

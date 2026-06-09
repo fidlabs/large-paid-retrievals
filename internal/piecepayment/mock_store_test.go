@@ -58,7 +58,7 @@ func (m *mockDealStore) GetActiveAllocation(_ context.Context, dealUUID, client,
 	return a, nil
 }
 
-func (m *mockDealStore) OpenSettlementPool(_ context.Context, payer, payee string) (*SettlementPoolSnapshot, error) {
+func (m *mockDealStore) OpenPool(_ context.Context, payer, payee string) (*PoolSnapshot, error) {
 	if m.poolRemaining == nil {
 		return nil, nil
 	}
@@ -67,14 +67,14 @@ func (m *mockDealStore) OpenSettlementPool(_ context.Context, payer, payee strin
 	if cur == nil || cur.Sign() <= 0 {
 		return nil, nil
 	}
-	return &SettlementPoolSnapshot{
+	return &PoolSnapshot{
 		PoolID:             "mock:" + key,
 		RemainingBaseUnits: cur.String(),
 		SettledBaseUnits:   cur.String(),
 	}, nil
 }
 
-func (m *mockDealStore) CreditSettlement(_ context.Context, credit SettlementCredit) error {
+func (m *mockDealStore) CreditPool(_ context.Context, credit PoolCredit) error {
 	if m.credits == nil {
 		m.credits = map[string]struct{}{}
 	}

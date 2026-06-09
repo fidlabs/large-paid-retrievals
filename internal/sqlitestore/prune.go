@@ -9,11 +9,11 @@ import (
 
 // PruneStats counts rows removed by Prune.
 type PruneStats struct {
-	UsedNonces        int64
-	DealAllocations   int64
-	Deals             int64
-	SettlementCredits int64
-	SettlementPools   int64
+	UsedNonces      int64
+	PoolAllocations int64
+	Deals           int64
+	PoolCredits     int64
+	Pools           int64
 }
 
 // Prune deletes SQLite rows older than retention and runs VACUUM to reclaim disk.
@@ -36,40 +36,40 @@ func (s *Store) Prune(ctx context.Context, retention time.Duration) (PruneStats,
 	if err != nil {
 		return stats, fmt.Errorf("prune used_nonces: %w", err)
 	}
-	stats.DealAllocations, err = execDelete(ctx, tx, `DELETE FROM deal_allocations WHERE access_expires_at < ?`, cutoff)
+	stats.PoolAllocations, err = execDelete(ctx, tx, `DELETE FROM pool_allocations WHERE access_expires_at < ?`, cutoff)
 	if err != nil {
-		return stats, fmt.Errorf("prune deal_allocations: %w", err)
+		return stats, fmt.Errorf("prune pool_allocations: %w", err)
 	}
 	stats.Deals, err = execDelete(ctx, tx, `
 		DELETE FROM deals
 		WHERE last_quoted_at < ?
-		  AND deal_uuid NOT IN (SELECT deal_uuid FROM deal_allocations)
+		  AND deal_uuid NOT IN (SELECT deal_uuid FROM pool_allocations)
 	`, cutoff)
 	if err != nil {
 		return stats, fmt.Errorf("prune deals: %w", err)
 	}
-	stats.SettlementCredits, err = execDelete(ctx, tx, `
-		DELETE FROM settlement_credits
+	stats.PoolCredits, err = execDelete(ctx, tx, `
+		DELETE FROM pool_credits
 		WHERE pool_id IN (
-			SELECT pool_id FROM settlement_pools
+			SELECT pool_id FROM pools
 			WHERE closed_at IS NOT NULL AND closed_at < ?
 		)
 	`, cutoff)
 	if err != nil {
-		return stats, fmt.Errorf("prune settlement_credits: %w", err)
+		return stats, fmt.Errorf("prune pool_credits: %w", err)
 	}
-	stats.SettlementPools, err = execDelete(ctx, tx, `
-		DELETE FROM settlement_pools
+	stats.Pools, err = execDelete(ctx, tx, `
+		DELETE FROM pools
 		WHERE closed_at IS NOT NULL AND closed_at < ?
 	`, cutoff)
 	if err != nil {
-		return stats, fmt.Errorf("prune settlement_pools: %w", err)
+		return stats, fmt.Errorf("prune pools: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return stats, err
 	}
-	if stats.UsedNonces == 0 && stats.DealAllocations == 0 && stats.Deals == 0 &&
-		stats.SettlementCredits == 0 && stats.SettlementPools == 0 {
+	if stats.UsedNonces == 0 && stats.PoolAllocations == 0 && stats.Deals == 0 &&
+		stats.PoolCredits == 0 && stats.Pools == 0 {
 		return stats, nil
 	}
 	if _, err := s.db.ExecContext(ctx, `VACUUM`); err != nil {

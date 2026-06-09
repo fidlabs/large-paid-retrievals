@@ -10,7 +10,7 @@ import (
 	pp "github.com/fidlabs/paid-retrievals/internal/piecepayment"
 )
 
-func TestSettlementLedgerCreditAndAllocate(t *testing.T) {
+func TestPoolCreditAndAllocate(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 	const (
@@ -23,12 +23,12 @@ func TestSettlementLedgerCreditAndAllocate(t *testing.T) {
 
 	price := big.NewInt(100_000)
 	credit := big.NewInt(300_000)
-	if err := s.CreditSettlement(ctx, pp.SettlementCredit{
+	if err := s.CreditPool(ctx, pp.PoolCredit{
 		Payer: payer, Payee: payee, SettleTxHash: "0xsettle-1", CreditedBaseUnits: credit,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CreditSettlement(ctx, pp.SettlementCredit{
+	if err := s.CreditPool(ctx, pp.PoolCredit{
 		Payer: payer, Payee: payee, SettleTxHash: "0xsettle-1", CreditedBaseUnits: credit,
 	}); err != nil {
 		t.Fatal("duplicate credit should be idempotent")
@@ -83,34 +83,34 @@ func TestTryAllocateDealInsufficientPool(t *testing.T) {
 	}
 }
 
-func TestOpenSettlementPool(t *testing.T) {
+func TestOpenPool(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 	const (
 		payer = "0x1111111111111111111111111111111111111111"
 		payee = "0x2222222222222222222222222222222222222222"
 	)
-	pool, err := s.OpenSettlementPool(ctx, payer, payee)
+	pool, err := s.OpenPool(ctx, payer, payee)
 	if err != nil || pool != nil {
 		t.Fatalf("empty store: pool=%+v err=%v", pool, err)
 	}
-	if err := s.CreditSettlement(ctx, pp.SettlementCredit{
+	if err := s.CreditPool(ctx, pp.PoolCredit{
 		Payer: payer, Payee: payee, SettleTxHash: "0xcr-1", CreditedBaseUnits: big.NewInt(42),
 	}); err != nil {
 		t.Fatal(err)
 	}
-	pool, err = s.OpenSettlementPool(ctx, payer, payee)
+	pool, err = s.OpenPool(ctx, payer, payee)
 	if err != nil || pool == nil || pool.RemainingBaseUnits != "42" {
 		t.Fatalf("open pool=%+v err=%v", pool, err)
 	}
 }
 
-func TestCreditSettlementRejectsZero(t *testing.T) {
+func TestCreditPoolRejectsZero(t *testing.T) {
 	s := openTestStore(t)
-	err := s.CreditSettlement(context.Background(), pp.SettlementCredit{
+	err := s.CreditPool(context.Background(), pp.PoolCredit{
 		Payer: "0x1", Payee: "0x2", SettleTxHash: "0x0", CreditedBaseUnits: big.NewInt(0),
 	})
-	if !errors.Is(err, pp.ErrZeroSettlement) {
+	if !errors.Is(err, pp.ErrZeroPoolCredit) {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -137,7 +137,7 @@ func TestTryAllocateDealAlreadyAllocatedConflict(t *testing.T) {
 		cid      = "bafkreic3gqso3booyry4fwc5wfnhaio574lami3am6nv4k6q6u2legzzdm"
 	)
 	seedDeal(t, s, dealUUID, payer, cid, "0.01", payee)
-	if err := s.CreditSettlement(ctx, pp.SettlementCredit{
+	if err := s.CreditPool(ctx, pp.PoolCredit{
 		Payer: payer, Payee: payee, SettleTxHash: "0xsettle-1", CreditedBaseUnits: big.NewInt(200_000),
 	}); err != nil {
 		t.Fatal(err)
@@ -168,7 +168,7 @@ func TestTryAllocateDealResolvesSettleTxFromCredit(t *testing.T) {
 		cid      = "bafkreic3gqso3booyry4fwc5wfnhaio574lami3am6nv4k6q6u2legzzdm"
 	)
 	seedDeal(t, s, dealUUID, payer, cid, "0.01", payee)
-	if err := s.CreditSettlement(ctx, pp.SettlementCredit{
+	if err := s.CreditPool(ctx, pp.PoolCredit{
 		Payer: payer, Payee: payee, SettleTxHash: "0xauto-tx", CreditedBaseUnits: big.NewInt(200_000),
 	}); err != nil {
 		t.Fatal(err)
@@ -192,7 +192,7 @@ func TestGetActiveAllocationExpired(t *testing.T) {
 		cid      = "bafkreic3gqso3booyry4fwc5wfnhaio574lami3am6nv4k6q6u2legzzdm"
 	)
 	seedDeal(t, s, dealUUID, payer, cid, "0.01", payee)
-	if err := s.CreditSettlement(ctx, pp.SettlementCredit{
+	if err := s.CreditPool(ctx, pp.PoolCredit{
 		Payer: payer, Payee: payee, SettleTxHash: "0xsettle-1", CreditedBaseUnits: big.NewInt(200_000),
 	}); err != nil {
 		t.Fatal(err)
@@ -216,7 +216,7 @@ func TestTryAllocateDealNotFound(t *testing.T) {
 		payer = "0x1111111111111111111111111111111111111111"
 		payee = "0x2222222222222222222222222222222222222222"
 	)
-	if err := s.CreditSettlement(ctx, pp.SettlementCredit{
+	if err := s.CreditPool(ctx, pp.PoolCredit{
 		Payer: payer, Payee: payee, SettleTxHash: "0xsettle-orphan", CreditedBaseUnits: big.NewInt(200_000),
 	}); err != nil {
 		t.Fatal(err)

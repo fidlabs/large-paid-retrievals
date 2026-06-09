@@ -12,11 +12,11 @@ import (
 	"github.com/google/uuid"
 )
 
-func (s *Store) OpenSettlementPool(ctx context.Context, payer, payee string) (*dealstore.SettlementPoolSnapshot, error) {
+func (s *Store) OpenPool(ctx context.Context, payer, payee string) (*dealstore.PoolSnapshot, error) {
 	var poolID, remainingStr, settledStr string
 	err := s.db.QueryRowContext(ctx, `
 		SELECT pool_id, remaining_base_units, settled_base_units
-		FROM settlement_pools
+		FROM pools
 		WHERE payer = ? AND payee = ? AND closed_at IS NULL
 		ORDER BY created_at DESC
 		LIMIT 1
@@ -27,7 +27,7 @@ func (s *Store) OpenSettlementPool(ctx context.Context, payer, payee string) (*d
 	if err != nil {
 		return nil, err
 	}
-	return &dealstore.SettlementPoolSnapshot{
+	return &dealstore.PoolSnapshot{
 		PoolID:             poolID,
 		RemainingBaseUnits: strings.TrimSpace(remainingStr),
 		SettledBaseUnits:   strings.TrimSpace(settledStr),
@@ -38,7 +38,7 @@ func (s *Store) GetActiveAllocation(ctx context.Context, dealUUID, client, cid s
 	var a dealstore.DealAllocation
 	err := s.db.QueryRowContext(ctx, `
 		SELECT deal_uuid, pool_id, client, cid, price_base_units, settle_tx_hash, allocated_at, access_expires_at
-		FROM deal_allocations
+		FROM pool_allocations
 		WHERE deal_uuid = ? AND client = ? AND cid = ? AND access_expires_at > ?
 	`, dealUUID, client, cid, nowUnix).Scan(
 		&a.DealUUID, &a.PoolID, &a.Client, &a.CID, &a.PriceBaseUnits, &a.SettleTxHash, &a.AllocatedAt, &a.AccessExpiresAt,
@@ -52,9 +52,9 @@ func (s *Store) GetActiveAllocation(ctx context.Context, dealUUID, client, cid s
 	return &a, nil
 }
 
-func (s *Store) CreditSettlement(ctx context.Context, credit dealstore.SettlementCredit) error {
+func (s *Store) CreditPool(ctx context.Context, credit dealstore.PoolCredit) error {
 	if credit.CreditedBaseUnits == nil || credit.CreditedBaseUnits.Sign() <= 0 {
-		return dealstore.ErrZeroSettlement
+		return dealstore.ErrZeroPoolCredit
 	}
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
@@ -64,7 +64,7 @@ func (s *Store) CreditSettlement(ctx context.Context, credit dealstore.Settlemen
 
 	var existingPoolID string
 	err = tx.QueryRowContext(ctx, `
-		SELECT pool_id FROM settlement_credits WHERE settle_tx_hash = ?
+		SELECT pool_id FROM pool_credits WHERE settle_tx_hash = ?
 	`, credit.SettleTxHash).Scan(&existingPoolID)
 	if err == nil {
 		return tx.Commit()
@@ -81,7 +81,7 @@ func (s *Store) CreditSettlement(ctx context.Context, credit dealstore.Settlemen
 		poolID = uuid.NewString()
 		now := time.Now().Unix()
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO settlement_pools(pool_id, payer, payee, settled_base_units, remaining_base_units, created_at)
+			INSERT INTO pools(pool_id, payer, payee, settled_base_units, remaining_base_units, created_at)
 			VALUES(?,?,?,?,?,?)
 		`, poolID, credit.Payer, credit.Payee, "0", "0", now); err != nil {
 			return err
@@ -92,14 +92,14 @@ func (s *Store) CreditSettlement(ctx context.Context, credit dealstore.Settlemen
 	newRemaining := new(big.Int).Add(remaining, credit.CreditedBaseUnits)
 	now := time.Now().Unix()
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO settlement_credits(credit_id, pool_id, settle_tx_hash, credited_base_units, credited_at)
+		INSERT INTO pool_credits(credit_id, pool_id, settle_tx_hash, credited_base_units, credited_at)
 		VALUES(?,?,?,?,?)
 	`, uuid.NewString(), poolID, credit.SettleTxHash, credit.CreditedBaseUnits.String(), now); err != nil {
 		return err
 	}
 	var settledSoFar string
 	if err := tx.QueryRowContext(ctx, `
-		SELECT settled_base_units FROM settlement_pools WHERE pool_id = ?
+		SELECT settled_base_units FROM pools WHERE pool_id = ?
 	`, poolID).Scan(&settledSoFar); err != nil {
 		return err
 	}
@@ -108,7 +108,7 @@ func (s *Store) CreditSettlement(ctx context.Context, credit dealstore.Settlemen
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
-		UPDATE settlement_pools
+		UPDATE pools
 		SET settled_base_units = ?, remaining_base_units = ?, closed_at = NULL
 		WHERE pool_id = ?
 	`, totalSettled.String(), newRemaining.String(), poolID); err != nil {
@@ -131,7 +131,7 @@ func (s *Store) TryAllocateDeal(ctx context.Context, req dealstore.AllocateDealR
 	var existing dealstore.DealAllocation
 	err = tx.QueryRowContext(ctx, `
 		SELECT deal_uuid, pool_id, client, cid, price_base_units, settle_tx_hash, allocated_at, access_expires_at
-		FROM deal_allocations WHERE deal_uuid = ?
+		FROM pool_allocations WHERE deal_uuid = ?
 	`, req.DealUUID).Scan(
 		&existing.DealUUID, &existing.PoolID, &existing.Client, &existing.CID,
 		&existing.PriceBaseUnits, &existing.SettleTxHash, &existing.AllocatedAt, &existing.AccessExpiresAt,
@@ -160,7 +160,7 @@ func (s *Store) TryAllocateDeal(ctx context.Context, req dealstore.AllocateDealR
 		closedAt = now
 	}
 	if _, err := tx.ExecContext(ctx, `
-		UPDATE settlement_pools SET remaining_base_units = ?, closed_at = ? WHERE pool_id = ?
+		UPDATE pools SET remaining_base_units = ?, closed_at = ? WHERE pool_id = ?
 	`, newRemaining.String(), closedAt, poolID); err != nil {
 		return nil, err
 	}
@@ -168,7 +168,7 @@ func (s *Store) TryAllocateDeal(ctx context.Context, req dealstore.AllocateDealR
 	settleTx := strings.TrimSpace(req.SettleTxHash)
 	if settleTx == "" {
 		if err := tx.QueryRowContext(ctx, `
-			SELECT settle_tx_hash FROM settlement_credits
+			SELECT settle_tx_hash FROM pool_credits
 			WHERE pool_id = ? ORDER BY credited_at DESC LIMIT 1
 		`, poolID).Scan(&settleTx); err != nil && err != sql.ErrNoRows {
 			return nil, err
@@ -177,7 +177,7 @@ func (s *Store) TryAllocateDeal(ctx context.Context, req dealstore.AllocateDealR
 
 	accessExpires := now + int64(req.AccessTTL.Seconds())
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO deal_allocations(deal_uuid, pool_id, client, cid, price_base_units, settle_tx_hash, allocated_at, access_expires_at)
+		INSERT INTO pool_allocations(deal_uuid, pool_id, client, cid, price_base_units, settle_tx_hash, allocated_at, access_expires_at)
 		VALUES(?,?,?,?,?,?,?,?)
 	`, req.DealUUID, poolID, req.Client, req.CID, req.PriceBaseUnits.String(), settleTx, now, accessExpires); err != nil {
 		return nil, err
@@ -213,7 +213,7 @@ func openPoolForPair(ctx context.Context, tx *sql.Tx, payer, payee string) (pool
 	var remainingStr string
 	err = tx.QueryRowContext(ctx, `
 		SELECT pool_id, remaining_base_units
-		FROM settlement_pools
+		FROM pools
 		WHERE payer = ? AND payee = ? AND closed_at IS NULL
 		ORDER BY created_at DESC
 		LIMIT 1

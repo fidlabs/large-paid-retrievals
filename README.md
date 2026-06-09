@@ -259,9 +259,9 @@ Optional: expose **`HEAD`** on the public proxy path for client size probes (the
 
 After a successful retrieval, logs include the Filecoin Pay **rail ID** and settle tx. View rail status on [pay.filecoin.cloud](https://pay.filecoin.cloud/) (mainnet: `/rails/<id>`; Calibration: `/calibration/rails/<id>`).
 
-### Inspecting quotes and ledger state (`SIGUSR1`)
+### Inspecting quotes and pool state (`SIGUSR1`)
 
-`sp-proxy` handles **`SIGUSR1`** by printing all deals (quotes), settlement pools, credits, and allocations from the SQLite database to **stderr** — useful for debugging payment or ledger issues without stopping the process.
+`sp-proxy` handles **`SIGUSR1`** by printing all deals (quotes), settlement pools, credits, and allocations from the SQLite database to **stderr** — useful for debugging payment or pool balance issues without stopping the process.
 
 ```bash
 kill -USR1 $(pidof sp-proxy)
@@ -296,7 +296,7 @@ internal/
   filpay/             Filecoin Pay client (rails, deposit, rail charge verification)
   mpp/                MPP challenge / credential wire types
   paymentheader/      Token amounts + per-GiB price helpers
-  sqlitestore/        sp-proxy deal persistence + settlement ledger
+  sqlitestore/        sp-proxy deal persistence + settlement pools
 docs/
   mpp-filecoinpay.md  HTTP + payment protocol contract
 ```
@@ -319,18 +319,18 @@ Keeping quote, authorize, and settle in a composable middleware layer means:
 
 Today the standalone proxy is the supported deployment path; middleware extraction is a deliberate design choice to keep that option open.
 
-### SP settlement ledger
+### SP settlement pool
 
-`sp-proxy` tracks paid access in a **local SQLite settlement ledger** (`internal/sqlitestore`, orchestrated by `internal/piecepayment`).
+`sp-proxy` tracks paid access in a **local SQLite settlement pool** (`internal/sqlitestore`, orchestrated by `internal/piecepayment`).
 
-For each `(payer, payee)` pair the ledger maintains an open **settlement pool** with a `remaining_base_units` balance. On authorize:
+For each `(payer, payee)` pair the store maintains an open **pool** with a `remaining_base_units` balance. On authorize:
 
 1. **`TryAllocateDeal`** debits the quoted piece price from the pool (or returns insufficient balance).
 2. If the pool is short, **`CreditRailPayment`** (`internal/filpay`) fetches the client’s `modifyRailPayment` receipt, parses `RailOneTimePaymentProcessed`, and verifies the gross charge for the payer→payee rail.
-3. **`CreditSettlement`** credits the pool at that gross amount (idempotent on `payment_tx_hash`), then allocation retries.
+3. **`CreditPool`** credits the pool at that gross amount (idempotent on `payment_tx_hash`), then allocation retries.
 4. After a successful allocation, the client gets a **paid-access window** (default 12h) so large downloads can retry without re-charging; nonce consumption still prevents credential replay on first settlement.
 
-This ledger is an **interim SP-side bookkeeping layer**: it ties MPP credentials to verified on-chain rail charges and enforces settle-before-serve without trusting client-reported balances. It will be **replaced** by full **Filecoin Pay Operators and Validator** in a future update.
+This pool bookkeeping is an **interim SP-side layer**: it ties MPP credentials to verified on-chain rail charges and enforces settle-before-serve without trusting client-reported balances. It will be **replaced** by full **Filecoin Pay Operators and Validator** in a future update.
 
 ### Build and test
 
@@ -422,7 +422,7 @@ gross (quoted price_usdfc) = net_payee_amount + network_fee
 
 - **Client** debits **gross** from rail lockup (the quoted `price_usdfc`).
 - **SP payee account** receives **net** USDFC (gross minus network fee).
-- **SP settlement ledger** credits the payer pool at **gross** so retrieval authorization matches the quoted price; the SP absorbs the network fee as a cost of using Filecoin Pay.
+- **SP settlement pool** is credited at **gross** so retrieval authorization matches the quoted price; the SP absorbs the network fee as a cost of using Filecoin Pay.
 
 There is no per-byte metering during download: one quote, one charge, one served `GET`.
 

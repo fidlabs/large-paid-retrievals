@@ -188,7 +188,7 @@ func (s *expiredPaidDealStore) GetActiveAllocation(_ context.Context, dealUUID, 
 	return a, nil
 }
 
-func (s *expiredPaidDealStore) OpenSettlementPool(_ context.Context, payer, payee string) (*pp.SettlementPoolSnapshot, error) {
+func (s *expiredPaidDealStore) OpenPool(_ context.Context, payer, payee string) (*pp.PoolSnapshot, error) {
 	if s.poolRemaining == nil {
 		return nil, nil
 	}
@@ -197,14 +197,14 @@ func (s *expiredPaidDealStore) OpenSettlementPool(_ context.Context, payer, paye
 	if cur == nil || cur.Sign() <= 0 {
 		return nil, nil
 	}
-	return &pp.SettlementPoolSnapshot{
+	return &pp.PoolSnapshot{
 		PoolID:             "mock:" + key,
 		RemainingBaseUnits: cur.String(),
 		SettledBaseUnits:   cur.String(),
 	}, nil
 }
 
-func (s *expiredPaidDealStore) CreditSettlement(_ context.Context, credit pp.SettlementCredit) error {
+func (s *expiredPaidDealStore) CreditPool(_ context.Context, credit pp.PoolCredit) error {
 	if s.credits == nil {
 		s.credits = map[string]struct{}{}
 	}

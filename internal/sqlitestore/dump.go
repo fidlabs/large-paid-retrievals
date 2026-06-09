@@ -9,7 +9,7 @@ import (
 )
 
 // DumpState implements dealstore.DealStore. It writes all deals (quotes) and settlement
-// ledger rows to w for operator diagnostics.
+// pool rows to w for operator diagnostics.
 func (s *Store) DumpState(ctx context.Context, w io.Writer) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	if _, err := fmt.Fprintf(w, "=== sp-proxy state dump (%s) ===\n", now); err != nil {
@@ -18,13 +18,13 @@ func (s *Store) DumpState(ctx context.Context, w io.Writer) error {
 	if err := s.dumpDeals(ctx, w); err != nil {
 		return err
 	}
-	if err := s.dumpSettlementPools(ctx, w); err != nil {
+	if err := s.dumpPools(ctx, w); err != nil {
 		return err
 	}
-	if err := s.dumpSettlementCredits(ctx, w); err != nil {
+	if err := s.dumpPoolCredits(ctx, w); err != nil {
 		return err
 	}
-	if err := s.dumpDealAllocations(ctx, w); err != nil {
+	if err := s.dumpPoolAllocations(ctx, w); err != nil {
 		return err
 	}
 	_, err := fmt.Fprintln(w)
@@ -75,18 +75,18 @@ func (s *Store) dumpDeals(ctx context.Context, w io.Writer) error {
 	return err
 }
 
-func (s *Store) dumpSettlementPools(ctx context.Context, w io.Writer) error {
+func (s *Store) dumpPools(ctx context.Context, w io.Writer) error {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT pool_id, payer, payee, settled_base_units, remaining_base_units, created_at, closed_at
-		FROM settlement_pools
+		FROM pools
 		ORDER BY created_at DESC, pool_id
 	`)
 	if err != nil {
-		return fmt.Errorf("dump settlement_pools: %w", err)
+		return fmt.Errorf("dump pools: %w", err)
 	}
 	defer rows.Close()
 
-	if _, err := fmt.Fprintln(w, "--- settlement_pools ---"); err != nil {
+	if _, err := fmt.Fprintln(w, "--- pools ---"); err != nil {
 		return err
 	}
 	n := 0
@@ -95,7 +95,7 @@ func (s *Store) dumpSettlementPools(ctx context.Context, w io.Writer) error {
 		var createdAt int64
 		var closedAt sql.NullInt64
 		if err := rows.Scan(&poolID, &payer, &payee, &settled, &remaining, &createdAt, &closedAt); err != nil {
-			return fmt.Errorf("dump settlement_pools scan: %w", err)
+			return fmt.Errorf("dump pools scan: %w", err)
 		}
 		status := "open"
 		if closedAt.Valid {
@@ -112,24 +112,24 @@ func (s *Store) dumpSettlementPools(ctx context.Context, w io.Writer) error {
 		n++
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("dump settlement_pools: %w", err)
+		return fmt.Errorf("dump pools: %w", err)
 	}
 	_, err = fmt.Fprintf(w, "(%d pool(s))\n", n)
 	return err
 }
 
-func (s *Store) dumpSettlementCredits(ctx context.Context, w io.Writer) error {
+func (s *Store) dumpPoolCredits(ctx context.Context, w io.Writer) error {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT credit_id, pool_id, settle_tx_hash, credited_base_units, credited_at
-		FROM settlement_credits
+		FROM pool_credits
 		ORDER BY credited_at DESC, credit_id
 	`)
 	if err != nil {
-		return fmt.Errorf("dump settlement_credits: %w", err)
+		return fmt.Errorf("dump pool_credits: %w", err)
 	}
 	defer rows.Close()
 
-	if _, err := fmt.Fprintln(w, "--- settlement_credits ---"); err != nil {
+	if _, err := fmt.Fprintln(w, "--- pool_credits ---"); err != nil {
 		return err
 	}
 	n := 0
@@ -137,7 +137,7 @@ func (s *Store) dumpSettlementCredits(ctx context.Context, w io.Writer) error {
 		var creditID, poolID, settleTx, credited string
 		var creditedAt int64
 		if err := rows.Scan(&creditID, &poolID, &settleTx, &credited, &creditedAt); err != nil {
-			return fmt.Errorf("dump settlement_credits scan: %w", err)
+			return fmt.Errorf("dump pool_credits scan: %w", err)
 		}
 		_, err := fmt.Fprintf(w,
 			"credit_id=%s pool_id=%s settle_tx_hash=%s credited_base_units=%s credited_at=%s\n",
@@ -149,24 +149,24 @@ func (s *Store) dumpSettlementCredits(ctx context.Context, w io.Writer) error {
 		n++
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("dump settlement_credits: %w", err)
+		return fmt.Errorf("dump pool_credits: %w", err)
 	}
 	_, err = fmt.Fprintf(w, "(%d credit(s))\n", n)
 	return err
 }
 
-func (s *Store) dumpDealAllocations(ctx context.Context, w io.Writer) error {
+func (s *Store) dumpPoolAllocations(ctx context.Context, w io.Writer) error {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT deal_uuid, pool_id, client, cid, price_base_units, settle_tx_hash, allocated_at, access_expires_at
-		FROM deal_allocations
+		FROM pool_allocations
 		ORDER BY allocated_at DESC, deal_uuid
 	`)
 	if err != nil {
-		return fmt.Errorf("dump deal_allocations: %w", err)
+		return fmt.Errorf("dump pool_allocations: %w", err)
 	}
 	defer rows.Close()
 
-	if _, err := fmt.Fprintln(w, "--- deal_allocations ---"); err != nil {
+	if _, err := fmt.Fprintln(w, "--- pool_allocations ---"); err != nil {
 		return err
 	}
 	n := 0
@@ -174,7 +174,7 @@ func (s *Store) dumpDealAllocations(ctx context.Context, w io.Writer) error {
 		var dealUUID, poolID, client, cid, price, settleTx string
 		var allocatedAt, accessExpiresAt int64
 		if err := rows.Scan(&dealUUID, &poolID, &client, &cid, &price, &settleTx, &allocatedAt, &accessExpiresAt); err != nil {
-			return fmt.Errorf("dump deal_allocations scan: %w", err)
+			return fmt.Errorf("dump pool_allocations scan: %w", err)
 		}
 		_, err := fmt.Fprintf(w,
 			"deal_uuid=%s pool_id=%s client=%s cid=%s price_base_units=%s settle_tx_hash=%s allocated_at=%s access_expires_at=%s\n",
@@ -187,7 +187,7 @@ func (s *Store) dumpDealAllocations(ctx context.Context, w io.Writer) error {
 		n++
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("dump deal_allocations: %w", err)
+		return fmt.Errorf("dump pool_allocations: %w", err)
 	}
 	_, err = fmt.Fprintf(w, "(%d allocation(s))\n", n)
 	return err

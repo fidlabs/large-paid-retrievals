@@ -499,7 +499,7 @@ func TestIssueChallengeForDeal(t *testing.T) {
 	issueChallengeForDeal(rec, req, nil, slog.Default())
 }
 
-func TestLedgerHelpersWithPayDebug(t *testing.T) {
+func TestPoolLogHelpersWithPayDebug(t *testing.T) {
 	var buf strings.Builder
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	payer := "0x1111111111111111111111111111111111111111"
@@ -515,18 +515,18 @@ func TestLedgerHelpersWithPayDebug(t *testing.T) {
 		Logger:          logger,
 		Store:           store,
 	})
-	svc.logLedger(context.Background(), "test_event",
+	svc.logPool(context.Background(), "test_event",
 		"payer", payer,
 		"payee", payee,
 	)
-	if !strings.Contains(buf.String(), "settlement ledger") || !strings.Contains(buf.String(), "pool_open") {
+	if !strings.Contains(buf.String(), "settlement pool") || !strings.Contains(buf.String(), "pool_open") {
 		t.Fatalf("log output: %s", buf.String())
 	}
-	attrs := svc.ledgerAmountAttrs("price", nil)
+	attrs := svc.poolAmountAttrs("price", nil)
 	if len(attrs) != 4 {
 		t.Fatalf("nil amount attrs: %v", attrs)
 	}
-	if got, _ := payerPayeeFromLedgerAttrs([]any{"payer", payer, "payee", payee}); got != payer {
+	if got, _ := payerPayeeFromLogAttrs([]any{"payer", payer, "payee", payee}); got != payer {
 		t.Fatalf("payer=%q", got)
 	}
 }

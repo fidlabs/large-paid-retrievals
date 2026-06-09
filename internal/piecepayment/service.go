@@ -27,19 +27,19 @@ const (
 var ErrPieceSizeUnknown = errors.New("piece size unknown for pricing")
 
 type (
-	Deal                   = dealstore.Deal
-	DealStore              = dealstore.DealStore
-	DealAllocation         = dealstore.DealAllocation
-	AllocateDealRequest    = dealstore.AllocateDealRequest
-	SettlementCredit       = dealstore.SettlementCredit
-	SettlementPoolSnapshot = dealstore.SettlementPoolSnapshot
+	Deal                = dealstore.Deal
+	DealStore           = dealstore.DealStore
+	DealAllocation      = dealstore.DealAllocation
+	AllocateDealRequest = dealstore.AllocateDealRequest
+	PoolCredit          = dealstore.PoolCredit
+	PoolSnapshot        = dealstore.PoolSnapshot
 )
 
 var (
 	ErrDealNotFound     = dealstore.ErrDealNotFound
 	ErrReplayNonce      = dealstore.ErrReplayNonce
 	ErrInsufficientPool = dealstore.ErrInsufficientPool
-	ErrZeroSettlement   = dealstore.ErrZeroSettlement
+	ErrZeroPoolCredit   = dealstore.ErrZeroPoolCredit
 )
 
 type FilecoinPaySettler interface {
@@ -275,7 +275,7 @@ func (s *RetrievalService) AuthorizeAndSettle(r *http.Request, cid, rawHdr strin
 	} else if alloc != nil {
 		payerHex := common.HexToAddress(payerClient).Hex()
 		payeeHex := common.HexToAddress(strings.TrimSpace(deal.Payee0x)).Hex()
-		s.logLedger(r.Context(), "access_reuse",
+		s.logPool(r.Context(), "access_reuse",
 			"deal_uuid", deal.DealUUID,
 			"client", payerClient,
 			"payer", payerHex,
@@ -345,32 +345,32 @@ func (s *RetrievalService) AuthorizeAndSettle(r *http.Request, cid, rawHdr strin
 	}
 
 	payerHex, payeeHex := payer.Hex(), payeeAddr.Hex()
-	s.logLedger(r.Context(), "allocate_attempt", append([]any{
+	s.logPool(r.Context(), "allocate_attempt", append([]any{
 		"payment_tx_hash", paymentTxHash,
 		"deal_uuid", deal.DealUUID,
 		"payer", payerHex,
 		"payee", payeeHex,
-	}, s.ledgerAmountAttrs("price", priceBaseUnits)...)...)
+	}, s.poolAmountAttrs("price", priceBaseUnits)...)...)
 	alloc, err := s.cfg.Store.TryAllocateDeal(r.Context(), allocReq)
 	if err == ErrInsufficientPool {
-		s.logLedger(r.Context(), "pool_insufficient", append([]any{
+		s.logPool(r.Context(), "pool_insufficient", append([]any{
 			"deal_uuid", deal.DealUUID,
 			"payer", payerHex,
 			"payee", payeeHex,
-		}, s.ledgerAmountAttrs("price", priceBaseUnits)...)...)
-		// Credit the payer pool at the gross modifyRailPayment amount so ledger drawdown
+		}, s.poolAmountAttrs("price", priceBaseUnits)...)...)
+		// Credit the payer pool at the gross modifyRailPayment amount so pool drawdown
 		// matches the quoted price; sp-proxy withdraws net payee proceeds on a background cadence.
 		creditRef, credited, creditErr := s.cfg.FilecoinPay.CreditRailPayment(r.Context(), payer, payeeAddr, paymentTxHash)
 		if creditErr != nil {
 			return nil, settlementPaymentRequiredError(deal, creditErr)
 		}
-		s.logLedger(r.Context(), "rail_payment_verified", append([]any{
+		s.logPool(r.Context(), "rail_payment_verified", append([]any{
 			"deal_uuid", deal.DealUUID,
 			"payer", payerHex,
 			"payee", payeeHex,
 			"payment_tx_hash", paymentTxHash,
 			"credit_ref", creditRef,
-		}, s.ledgerAmountAttrs("credited", credited)...)...)
+		}, s.poolAmountAttrs("credited", credited)...)...)
 		if credited.Cmp(priceBaseUnits) < 0 {
 			return nil, &PaymentRequiredError{
 				Deal:   deal,
@@ -381,21 +381,21 @@ func (s *RetrievalService) AuthorizeAndSettle(r *http.Request, cid, rawHdr strin
 		s.logger.Info("filecoin pay rail payment credited to pool", "deal_uuid", deal.DealUUID, "credit_ref", creditRef,
 			"payer", payerHex, "payee", payeeHex, "payment_tx_hash", paymentTxHash,
 			"credited_base_units", credited.String())
-		if creditErr := s.cfg.Store.CreditSettlement(r.Context(), SettlementCredit{
+		if creditErr := s.cfg.Store.CreditPool(r.Context(), PoolCredit{
 			Payer:             payerHex,
 			Payee:             payeeHex,
 			SettleTxHash:      creditRef,
 			CreditedBaseUnits: credited,
 		}); creditErr != nil {
-			return nil, fmt.Errorf("credit settlement: %w", creditErr)
+			return nil, fmt.Errorf("credit pool: %w", creditErr)
 		}
-		s.logLedger(r.Context(), "pool_funded", append([]any{
+		s.logPool(r.Context(), "pool_funded", append([]any{
 			"deal_uuid", deal.DealUUID,
 			"payer", payerHex,
 			"payee", payeeHex,
 			"credit_ref", creditRef,
 			"payment_tx_hash", paymentTxHash,
-		}, s.ledgerAmountAttrs("credited", credited)...)...)
+		}, s.poolAmountAttrs("credited", credited)...)...)
 		allocReq.SettleTxHash = creditRef
 		alloc, err = s.cfg.Store.TryAllocateDeal(r.Context(), allocReq)
 		if err == ErrInsufficientPool {
@@ -409,13 +409,13 @@ func (s *RetrievalService) AuthorizeAndSettle(r *http.Request, cid, rawHdr strin
 	if err != nil {
 		return nil, fmt.Errorf("allocate deal: %w", err)
 	}
-	s.logLedger(r.Context(), "pool_drawdown", append([]any{
+	s.logPool(r.Context(), "pool_drawdown", append([]any{
 		"deal_uuid", deal.DealUUID,
 		"payer", payerHex,
 		"payee", payeeHex,
 		"pool_id", alloc.PoolID,
 		"credit_ref", alloc.SettleTxHash,
-	}, append(s.ledgerAmountAttrs("drawdown", priceBaseUnits), s.ledgerAmountAttrs("allocated", priceBaseUnits)...)...)...)
+	}, append(s.poolAmountAttrs("drawdown", priceBaseUnits), s.poolAmountAttrs("allocated", priceBaseUnits)...)...)...)
 	deal.LastPaidTxHash = alloc.SettleTxHash
 	deal.Client = payerClient
 	s.logger.Info("paid retrieval authorized", "deal_uuid", deal.DealUUID, "client", payerClient, "cid", cid, "pool_id", alloc.PoolID)
@@ -517,18 +517,18 @@ func sanitizeClient(v string) string {
 	}, v)
 }
 
-func (s *RetrievalService) logLedger(ctx context.Context, event string, attrs ...any) {
+func (s *RetrievalService) logPool(ctx context.Context, event string, attrs ...any) {
 	if s == nil || !s.cfg.PayDebug || s.logger == nil {
 		return
 	}
 	args := make([]any, 0, len(attrs)+2)
 	args = append(args, "event", event)
 	args = append(args, attrs...)
-	args = append(args, s.ledgerPoolAttrs(ctx, attrs)...)
-	s.logger.Info("settlement ledger", args...)
+	args = append(args, s.poolSnapshotAttrs(ctx, attrs)...)
+	s.logger.Info("settlement pool", args...)
 }
 
-func payerPayeeFromLedgerAttrs(attrs []any) (payer, payee string) {
+func payerPayeeFromLogAttrs(attrs []any) (payer, payee string) {
 	for i := 0; i+1 < len(attrs); i += 2 {
 		key, ok := attrs[i].(string)
 		if !ok {
@@ -548,15 +548,15 @@ func payerPayeeFromLedgerAttrs(attrs []any) (payer, payee string) {
 	return payer, payee
 }
 
-func (s *RetrievalService) ledgerPoolAttrs(ctx context.Context, prior []any) []any {
+func (s *RetrievalService) poolSnapshotAttrs(ctx context.Context, prior []any) []any {
 	if s == nil || s.cfg.Store == nil {
 		return nil
 	}
-	payer, payee := payerPayeeFromLedgerAttrs(prior)
+	payer, payee := payerPayeeFromLogAttrs(prior)
 	if payer == "" || payee == "" {
 		return nil
 	}
-	pool, err := s.cfg.Store.OpenSettlementPool(ctx, payer, payee)
+	pool, err := s.cfg.Store.OpenPool(ctx, payer, payee)
 	if err != nil {
 		return []any{"pool_snapshot_err", err.Error()}
 	}
@@ -578,7 +578,7 @@ func (s *RetrievalService) ledgerPoolAttrs(ctx context.Context, prior []any) []a
 	return attrs
 }
 
-func (s *RetrievalService) ledgerAmountAttrs(name string, units *big.Int) []any {
+func (s *RetrievalService) poolAmountAttrs(name string, units *big.Int) []any {
 	if units == nil {
 		return []any{name + "_base_units", "0", name + "_usdfc", "0"}
 	}

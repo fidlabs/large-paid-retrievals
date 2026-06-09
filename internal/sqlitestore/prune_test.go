@@ -38,7 +38,7 @@ func TestPruneRemovesOldRows(t *testing.T) {
 	}
 
 	price := big.NewInt(50_000)
-	if err := s.CreditSettlement(ctx, pp.SettlementCredit{
+	if err := s.CreditPool(ctx, pp.PoolCredit{
 		Payer: payer, Payee: payee, SettleTxHash: "0xsettle-old", CreditedBaseUnits: price,
 	}); err != nil {
 		t.Fatal(err)
@@ -61,7 +61,7 @@ func TestPruneRemovesOldRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stats.Deals == 0 || stats.DealAllocations == 0 {
+	if stats.Deals == 0 || stats.PoolAllocations == 0 {
 		t.Fatalf("expected old deal/allocation pruned, stats=%+v", stats)
 	}
 
@@ -92,7 +92,7 @@ func TestPruneClosedPools(t *testing.T) {
 		t.Fatal(err)
 	}
 	price := big.NewInt(100_000)
-	if err := s.CreditSettlement(ctx, pp.SettlementCredit{
+	if err := s.CreditPool(ctx, pp.PoolCredit{
 		Payer: payer, Payee: payee, SettleTxHash: "0xsettle-closed", CreditedBaseUnits: price,
 	}); err != nil {
 		t.Fatal(err)
@@ -118,14 +118,14 @@ func TestPruneClosedPools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stats.SettlementPools == 0 || stats.SettlementCredits == 0 {
+	if stats.Pools == 0 || stats.PoolCredits == 0 {
 		t.Fatalf("expected closed pool pruned, stats=%+v", stats)
 	}
 }
 
 func setPoolClosedAt(ctx context.Context, s *Store, payer, payee string, closedAt int64) error {
 	_, err := s.db.ExecContext(ctx, `
-		UPDATE settlement_pools SET closed_at = ?, created_at = ? WHERE payer = ? AND payee = ?
+		UPDATE pools SET closed_at = ?, created_at = ? WHERE payer = ? AND payee = ?
 	`, closedAt, closedAt, payer, payee)
 	return err
 }

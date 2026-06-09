@@ -17,7 +17,7 @@ This document defines the wire contract used by this project when gating piece r
 3. Client prepares proof and retries `GET /piece/<cid>` with `Authorization: Payment <credential>`.
 4. Proxy verifies proof and request binding.
 5. Client includes `payment_tx_hash` (the mined `modifyRailPayment` tx) in the signed credential.
-6. Proxy verifies that tx on-chain, parses `RailOneTimePaymentProcessed` for the payer→payee rail, credits the ledger, allocates paid access, and serves the piece.
+6. Proxy verifies that tx on-chain, parses `RailOneTimePaymentProcessed` for the payer→payee rail, credits the settlement pool, allocates paid access, and serves the piece.
 
 ## Challenge Schema (`402` response)
 
@@ -51,7 +51,7 @@ Optional auth-params handled:
 Notes:
 - `challenge_id` is unique per quote and currently equals `deal_uuid`.
 - `expires` is RFC3339 and is a short challenge TTL.
-- `price_usdfc` is the total decimal USDFC charge for the piece (SP computes it as `price_usdfc_per_gib * ceil(piece_bytes / 2^30)` from upstream HEAD `Content-Length` when the challenge is issued—each GiB or part thereof is one billed GiB). It is converted to base units server-side before ledger allocation.
+- `price_usdfc` is the total decimal USDFC charge for the piece (SP computes it as `price_usdfc_per_gib * ceil(piece_bytes / 2^30)` from upstream HEAD `Content-Length` when the challenge is issued—each GiB or part thereof is one billed GiB). It is converted to base units server-side before pool allocation.
 
 ## Paid Proof Schema (`Authorization: Payment ...`)
 
@@ -128,7 +128,7 @@ If any check fails:
 
 - On-chain rail charge receipts are authoritative; the SP does not trust client-reported balances.
 - Nonce replay is blocked server-side.
-- Piece bytes are served only after ledger allocation + nonce consume to avoid concurrent drain or similar.
+- Piece bytes are served only after pool allocation + nonce consume to avoid concurrent drain or similar.
 - Successful paid responses return a `Payment-Receipt` (base64url-no-pad JSON).
 
 ## Conformance Gaps / Awkward Bits

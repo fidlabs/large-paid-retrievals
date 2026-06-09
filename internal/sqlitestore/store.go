@@ -57,7 +57,7 @@ func (s *Store) migrate() error {
 			PRIMARY KEY(deal_uuid, nonce)
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_used_nonces_exp ON used_nonces(expires_unix);`,
-		`CREATE TABLE IF NOT EXISTS settlement_pools (
+		`CREATE TABLE IF NOT EXISTS pools (
 			pool_id TEXT PRIMARY KEY,
 			payer TEXT NOT NULL,
 			payee TEXT NOT NULL,
@@ -66,16 +66,16 @@ func (s *Store) migrate() error {
 			created_at INTEGER NOT NULL,
 			closed_at INTEGER
 		);`,
-		`CREATE INDEX IF NOT EXISTS idx_settlement_pools_pair ON settlement_pools(payer, payee, closed_at);`,
-		`CREATE TABLE IF NOT EXISTS settlement_credits (
+		`CREATE INDEX IF NOT EXISTS idx_pools_pair ON pools(payer, payee, closed_at);`,
+		`CREATE TABLE IF NOT EXISTS pool_credits (
 			credit_id TEXT PRIMARY KEY,
 			pool_id TEXT NOT NULL,
 			settle_tx_hash TEXT NOT NULL UNIQUE,
 			credited_base_units TEXT NOT NULL,
 			credited_at INTEGER NOT NULL,
-			FOREIGN KEY(pool_id) REFERENCES settlement_pools(pool_id)
+			FOREIGN KEY(pool_id) REFERENCES pools(pool_id)
 		);`,
-		`CREATE TABLE IF NOT EXISTS deal_allocations (
+		`CREATE TABLE IF NOT EXISTS pool_allocations (
 			deal_uuid TEXT PRIMARY KEY,
 			pool_id TEXT NOT NULL,
 			client TEXT NOT NULL,
@@ -84,9 +84,9 @@ func (s *Store) migrate() error {
 			settle_tx_hash TEXT NOT NULL DEFAULT '',
 			allocated_at INTEGER NOT NULL,
 			access_expires_at INTEGER NOT NULL,
-			FOREIGN KEY(pool_id) REFERENCES settlement_pools(pool_id)
+			FOREIGN KEY(pool_id) REFERENCES pools(pool_id)
 		);`,
-		`CREATE INDEX IF NOT EXISTS idx_deal_allocations_access ON deal_allocations(client, cid, access_expires_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_pool_allocations_access ON pool_allocations(client, cid, access_expires_at);`,
 	}
 	for _, q := range queries {
 		if _, err := s.db.Exec(q); err != nil {
@@ -162,7 +162,7 @@ func (s *Store) ConsumeNonce(ctx context.Context, dealUUID, nonce string, expire
 // SetAllocationAccessExpiresForTest updates access_expires_at on a deal allocation (integration tests only).
 func (s *Store) SetAllocationAccessExpiresForTest(ctx context.Context, dealUUID string, accessExpiresAt int64) error {
 	_, err := s.db.ExecContext(ctx, `
-		UPDATE deal_allocations SET access_expires_at = ?, allocated_at = ? WHERE deal_uuid = ?
+		UPDATE pool_allocations SET access_expires_at = ?, allocated_at = ? WHERE deal_uuid = ?
 	`, accessExpiresAt, accessExpiresAt, dealUUID)
 	return err
 }
