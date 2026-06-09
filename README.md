@@ -257,7 +257,7 @@ Optional: expose **`HEAD`** on the public proxy path for client size probes (the
 
 ### Monitoring payments
 
-At default log level, a successful retrieval logs `paid retrieval authorized` with `deal_uuid`, `client`, `cid`, and `pool_id`. With **`--pay-debug`** or **`--verbose`**, Filecoin Pay tracing also emits **`rail_id`** and **`payment_tx_hash`** (the mined `modifyRailPayment` tx bound in the credential). View rail status on [pay.filecoin.cloud](https://pay.filecoin.cloud/) (mainnet: `/rails/<id>`; Calibration: `/calibration/rails/<id>`).
+At default log level, a successful retrieval logs `paid retrieval authorized` with `deal_uuid`, `client`, `cid`, and `pool_id` (or `paid retrieval reused` on paid-access retries). With **`--pay-debug`** or **`--verbose`**, Filecoin Pay tracing may also emit **`rail_id`** and **`payment_tx_hash`** when the proxy runs on-chain payment steps (e.g. `CreditRailPayment` when the pool balance is insufficient); drawdowns from a pre-funded pool or paid-access retries may not produce those fields. View rail status on [pay.filecoin.cloud](https://pay.filecoin.cloud/) (mainnet: `/rails/<id>`; Calibration: `/calibration/rails/<id>`).
 
 ### Inspecting quotes and pool state (`SIGUSR1`, Unix only)
 

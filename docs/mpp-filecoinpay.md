@@ -113,7 +113,7 @@ Signature rules:
 ## Validation Rules
 
 For a paid request, proxy must verify:
-- proof is syntactically valid and not expired
+- proof is syntactically valid; `expires_unix` must be in the future on the **first-settlement** path — paid-access retries may reuse the same credential (even if `expires_unix` has passed) while an active allocation exists
 - `method/path/host/cid/client` bind to this HTTP request and stored deal
 - `challenge_id/deal_uuid` match an existing quoted deal
 - nonce is unused for that deal (`used_nonces` table) on the **first-settlement** path; retries within an active paid-access allocation may reuse the same credential (including nonce) without consuming the nonce again
