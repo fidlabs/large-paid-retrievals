@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -23,7 +24,10 @@ import (
 	"github.com/fidlabs/paid-retrievals/internal/sqlitestore"
 )
 
-const testQuotePayee0x = "0x2222222222222222222222222222222222222222"
+const (
+	testQuotePayee0x  = "0x2222222222222222222222222222222222222222"
+	testPaymentTxHash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+)
 
 func newTestStore(t *testing.T) *sqlitestore.Store {
 	t.Helper()
@@ -118,25 +122,28 @@ type mockPaySettler struct {
 	fail   error
 }
 
-func (m *mockPaySettler) SettleIfFunded(ctx context.Context, payer, payee common.Address, priceBaseUnits *big.Int) (string, error) {
+func (m *mockPaySettler) CreditRailPayment(ctx context.Context, payer, payee common.Address, paymentTxHash string) (string, *big.Int, error) {
 	m.called++
 	if m.fail != nil {
-		return "", m.fail
+		return "", nil, m.fail
 	}
 	if payer == (common.Address{}) || payee == (common.Address{}) {
-		return "", os.ErrInvalid
+		return "", nil, os.ErrInvalid
 	}
-	if priceBaseUnits.Sign() <= 0 {
-		return "", os.ErrInvalid
+	if strings.TrimSpace(paymentTxHash) == "" {
+		paymentTxHash = testPaymentTxHash
 	}
-	return "0xsettle", nil
+	return paymentTxHash, new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil), nil
 }
 
 type expiredPaidDealStore struct {
-	deals    map[string]*pp.Deal
-	nonces   map[string]struct{}
-	paidAt   map[string]int64
-	paidTime func() time.Time
+	deals         map[string]*pp.Deal
+	nonces        map[string]struct{}
+	paidAt        map[string]int64
+	paidTime      func() time.Time
+	poolRemaining map[string]*big.Int
+	allocations   map[string]*pp.DealAllocation
+	credits       map[string]struct{}
 }
 
 func newExpiredPaidDealStore() *expiredPaidDealStore {
@@ -170,15 +177,83 @@ func (s *expiredPaidDealStore) GetDeal(_ context.Context, dealUUID string) (*pp.
 	return d, nil
 }
 
-func (s *expiredPaidDealStore) IsDealPaidSince(_ context.Context, dealUUID, client, cid string, sinceUnix int64) (bool, error) {
-	d, ok := s.deals[dealUUID]
-	if !ok {
-		return false, nil
+func (s *expiredPaidDealStore) GetActiveAllocation(_ context.Context, dealUUID, client, cid string, nowUnix int64) (*pp.DealAllocation, error) {
+	if s.allocations == nil {
+		return nil, nil
 	}
-	if d.Client != client || d.CID != cid {
-		return false, nil
+	a, ok := s.allocations[dealUUID]
+	if !ok || a.Client != client || a.CID != cid || a.AccessExpiresAt <= nowUnix {
+		return nil, nil
 	}
-	return s.paidAt[dealUUID] >= sinceUnix && strings.TrimSpace(d.LastPaidTxHash) != "", nil
+	return a, nil
+}
+
+func (s *expiredPaidDealStore) OpenPool(_ context.Context, payer, payee string) (*pp.PoolSnapshot, error) {
+	if s.poolRemaining == nil {
+		return nil, nil
+	}
+	key := payer + "|" + payee
+	cur := s.poolRemaining[key]
+	if cur == nil || cur.Sign() <= 0 {
+		return nil, nil
+	}
+	return &pp.PoolSnapshot{
+		PoolID:             "mock:" + key,
+		RemainingBaseUnits: cur.String(),
+		SettledBaseUnits:   cur.String(),
+	}, nil
+}
+
+func (s *expiredPaidDealStore) CreditPool(_ context.Context, credit pp.PoolCredit) error {
+	if s.credits == nil {
+		s.credits = map[string]struct{}{}
+	}
+	if _, ok := s.credits[credit.SettleTxHash]; ok {
+		return nil
+	}
+	s.credits[credit.SettleTxHash] = struct{}{}
+	if s.poolRemaining == nil {
+		s.poolRemaining = map[string]*big.Int{}
+	}
+	key := credit.Payer + "|" + credit.Payee
+	cur := s.poolRemaining[key]
+	if cur == nil {
+		cur = big.NewInt(0)
+	}
+	s.poolRemaining[key] = new(big.Int).Add(cur, credit.CreditedBaseUnits)
+	return nil
+}
+
+func (s *expiredPaidDealStore) TryAllocateDeal(_ context.Context, req pp.AllocateDealRequest) (*pp.DealAllocation, error) {
+	if s.poolRemaining == nil {
+		s.poolRemaining = map[string]*big.Int{}
+	}
+	key := req.Payer + "|" + req.Payee
+	cur := s.poolRemaining[key]
+	if cur == nil || cur.Cmp(req.PriceBaseUnits) < 0 {
+		return nil, pp.ErrInsufficientPool
+	}
+	s.poolRemaining[key] = new(big.Int).Sub(cur, req.PriceBaseUnits)
+	expires := s.paidTime().Unix()
+	a := &pp.DealAllocation{
+		DealUUID:        req.DealUUID,
+		Client:          req.Client,
+		CID:             req.CID,
+		PriceBaseUnits:  req.PriceBaseUnits.String(),
+		SettleTxHash:    req.SettleTxHash,
+		AllocatedAt:     expires,
+		AccessExpiresAt: expires,
+	}
+	if s.allocations == nil {
+		s.allocations = map[string]*pp.DealAllocation{}
+	}
+	s.allocations[req.DealUUID] = a
+	s.paidAt[req.DealUUID] = expires
+	if d, ok := s.deals[req.DealUUID]; ok {
+		d.Client = req.Client
+		d.LastPaidTxHash = req.SettleTxHash
+	}
+	return a, nil
 }
 
 func (s *expiredPaidDealStore) ConsumeNonce(_ context.Context, dealUUID, nonce string, _ int64) error {
@@ -190,14 +265,7 @@ func (s *expiredPaidDealStore) ConsumeNonce(_ context.Context, dealUUID, nonce s
 	return nil
 }
 
-func (s *expiredPaidDealStore) MarkPaid(_ context.Context, dealUUID, client, txHash string) error {
-	s.paidAt[dealUUID] = s.paidTime().Unix()
-	if d, ok := s.deals[dealUUID]; ok {
-		d.LastPaidTxHash = txHash
-		d.Client = client
-	}
-	return nil
-}
+func (*expiredPaidDealStore) DumpState(context.Context, io.Writer) error { return nil }
 
 func mustProblemType(t *testing.T, res *http.Response) string {
 	t.Helper()
@@ -254,6 +322,7 @@ func TestQuoteThenPaidSuccess(t *testing.T) {
 		Host:          mustHostFromURL(t, ts.URL),
 		Nonce:         "n-1",
 		ExpiresUnix:   time.Now().Add(time.Minute).Unix(),
+		PaymentTxHash: testPaymentTxHash,
 	}
 	st, sig, err := mpp.SignEVM(pk, hdr.CanonicalMessage())
 	if err != nil {
@@ -314,6 +383,7 @@ func TestReplayNonceAllowedWithinPaidWindow(t *testing.T) {
 		Host:          mustHostFromURL(t, ts.URL),
 		Nonce:         "same-nonce",
 		ExpiresUnix:   time.Now().Add(time.Minute).Unix(),
+		PaymentTxHash: testPaymentTxHash,
 	}
 	st, sig, err := mpp.SignEVM(pk, hdr.CanonicalMessage())
 	if err != nil {
@@ -343,6 +413,147 @@ func TestReplayNonceAllowedWithinPaidWindow(t *testing.T) {
 	defer res2.Body.Close()
 	if res2.StatusCode != http.StatusOK {
 		t.Fatalf("expected replay 200 got %d", res2.StatusCode)
+	}
+}
+
+func TestDownloadRetryStopsAfterPaidAccessTTL(t *testing.T) {
+	s := newTestStore(t)
+	defer s.Close()
+
+	pk, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := crypto.PubkeyToAddress(pk.PublicKey).Hex()
+	mock := &mockPaySettler{}
+	h := newTestHandler(pp.Config{
+		PriceUSDFCPerGB: "0.1",
+		FilecoinPay:     mock,
+		QuotePayee0x:    testQuotePayee0x,
+		Store:           s,
+	})
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	const cid = "bafkreif6in2d6leqaxf45b4x6s2x5qncg2puu6n2v4f7rfz4gbx2yldl3e"
+	qres, err := http.Get(ts.URL + "/piece/" + cid + "?client=" + client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer qres.Body.Close()
+	challenge := mustChallengeFromResponse(t, qres)
+	host := mustHostFromURL(t, ts.URL)
+	expires := time.Now().Add(time.Minute).Unix()
+
+	buildAuth := func(nonce string) string {
+		hdr := &mpp.ProofPayload{
+			Version:       mpp.VersionV1,
+			ChallengeID:   challenge.ID,
+			DealUUID:      challenge.Request.DealUUID,
+			ClientAddress: client,
+			CID:           cid,
+			Method:        http.MethodGet,
+			Path:          "/piece/" + cid,
+			Host:          host,
+			Nonce:         nonce,
+			ExpiresUnix:   expires,
+			PaymentTxHash: testPaymentTxHash,
+		}
+		st, sig, err := mpp.SignEVM(pk, hdr.CanonicalMessage())
+		if err != nil {
+			t.Fatal(err)
+		}
+		hdr.SigType = st
+		hdr.Signature = sig
+		return mustAuthorization(t, *challenge, hdr)
+	}
+
+	paidGET := func(auth string) *http.Response {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/piece/"+cid, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", auth)
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+
+	raw := buildAuth("ttl-nonce-1")
+	res1 := paidGET(raw)
+	defer res1.Body.Close()
+	if res1.StatusCode != http.StatusOK {
+		t.Fatalf("expected first 200 got %d", res1.StatusCode)
+	}
+	if mock.called != 1 {
+		t.Fatalf("expected one settlement, got %d", mock.called)
+	}
+
+	res2 := paidGET(raw)
+	defer res2.Body.Close()
+	if res2.StatusCode != http.StatusOK {
+		t.Fatalf("expected in-window replay 200 got %d", res2.StatusCode)
+	}
+	if mock.called != 1 {
+		t.Fatalf("expected no second settlement during paid window, got %d", mock.called)
+	}
+
+	if err := s.SetAllocationAccessExpiresForTest(context.Background(), challenge.ID, time.Now().Add(-time.Hour).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	alloc, err := s.GetActiveAllocation(context.Background(), challenge.ID, client, cid, time.Now().Unix())
+	if err != nil || alloc != nil {
+		t.Fatalf("expected expired allocation: %+v err=%v", alloc, err)
+	}
+
+	res3 := paidGET(raw)
+	defer res3.Body.Close()
+	if res3.StatusCode != http.StatusPaymentRequired {
+		t.Fatalf("expected post-ttl replay 402 got %d", res3.StatusCode)
+	}
+	if mock.called != 1 {
+		t.Fatalf("expected no settlement on expired replay with reused nonce, got %d", mock.called)
+	}
+
+	// Same deal cannot be re-allocated once its window expired; client must obtain a new quote.
+	qres2, err := http.Get(ts.URL + "/piece/" + cid + "?client=" + client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer qres2.Body.Close()
+	challenge2 := mustChallengeFromResponse(t, qres2)
+	hdr2 := &mpp.ProofPayload{
+		Version:       mpp.VersionV1,
+		ChallengeID:   challenge2.ID,
+		DealUUID:      challenge2.Request.DealUUID,
+		ClientAddress: client,
+		CID:           cid,
+		Method:        http.MethodGet,
+		Path:          "/piece/" + cid,
+		Host:          host,
+		Nonce:         "ttl-nonce-2",
+		ExpiresUnix:   time.Now().Add(time.Minute).Unix(),
+		PaymentTxHash: testPaymentTxHash,
+	}
+	st2, sig2, err := mpp.SignEVM(pk, hdr2.CanonicalMessage())
+	if err != nil {
+		t.Fatal(err)
+	}
+	hdr2.SigType = st2
+	hdr2.Signature = sig2
+	raw2 := mustAuthorization(t, *challenge2, hdr2)
+
+	res4 := paidGET(raw2)
+	defer res4.Body.Close()
+	if res4.StatusCode != http.StatusOK {
+		t.Fatalf("expected new quote after ttl 200 got %d", res4.StatusCode)
+	}
+	alloc2, err := s.GetActiveAllocation(context.Background(), challenge2.ID, client, cid, time.Now().Unix())
+	if err != nil || alloc2 == nil {
+		t.Fatalf("expected active allocation on new deal: %+v err=%v", alloc2, err)
 	}
 }
 
@@ -386,6 +597,7 @@ func TestAnonymousQuoteReplayWithinPaidWindow(t *testing.T) {
 		Host:          mustHostFromURL(t, ts.URL),
 		Nonce:         "anon-same-nonce",
 		ExpiresUnix:   time.Now().Add(time.Minute).Unix(),
+		PaymentTxHash: testPaymentTxHash,
 	}
 	st, sig, err := mpp.SignEVM(pk, hdr.CanonicalMessage())
 	if err != nil {
@@ -456,6 +668,7 @@ func TestReplayGETAfterPaidAccessTTLReturnsChallenge(t *testing.T) {
 		Host:          mustHostFromURL(t, ts.URL),
 		Nonce:         "expired-window-replay",
 		ExpiresUnix:   time.Now().Add(time.Minute).Unix(),
+		PaymentTxHash: testPaymentTxHash,
 	}
 	st, sig, err := mpp.SignEVM(pk, hdr.CanonicalMessage())
 	if err != nil {
@@ -536,6 +749,7 @@ func TestRepeatGETWithoutAuthorizationReturnsChallenge(t *testing.T) {
 		Host:          mustHostFromURL(t, ts.URL),
 		Nonce:         "n-repeat",
 		ExpiresUnix:   time.Now().Add(time.Minute).Unix(),
+		PaymentTxHash: testPaymentTxHash,
 	}
 	st, sig, err := mpp.SignEVM(pk, hdr.CanonicalMessage())
 	if err != nil {
@@ -971,7 +1185,7 @@ func TestSettlementFailureProblem(t *testing.T) {
 	hdr := &mpp.ProofPayload{
 		Version: mpp.VersionV1, ChallengeID: challenge.ID, DealUUID: challenge.ID,
 		ClientAddress: client, CID: cid, Method: http.MethodGet, Path: "/piece/" + cid,
-		Host: mustHostFromURL(t, ts.URL), Nonce: "pay-fail", ExpiresUnix: time.Now().Add(time.Minute).Unix(),
+		Host: mustHostFromURL(t, ts.URL), Nonce: "pay-fail", ExpiresUnix: time.Now().Add(time.Minute).Unix(), PaymentTxHash: testPaymentTxHash,
 	}
 	st, sig, err := mpp.SignEVM(pk, hdr.CanonicalMessage())
 	if err != nil {
@@ -1032,7 +1246,7 @@ func TestPieceAuthContextAndReceipt(t *testing.T) {
 	hdr := &mpp.ProofPayload{
 		Version: mpp.VersionV1, ChallengeID: challenge.ID, DealUUID: challenge.ID,
 		ClientAddress: client, CID: cid, Method: http.MethodGet, Path: "/piece/" + cid,
-		Host: mustHostFromURL(t, ts.URL), Nonce: "ctx-n", ExpiresUnix: time.Now().Add(time.Minute).Unix(),
+		Host: mustHostFromURL(t, ts.URL), Nonce: "ctx-n", ExpiresUnix: time.Now().Add(time.Minute).Unix(), PaymentTxHash: testPaymentTxHash,
 	}
 	st, sig, err := mpp.SignEVM(pk, hdr.CanonicalMessage())
 	if err != nil {

@@ -139,6 +139,30 @@ func TestChargeRailOneTimeSuccess(t *testing.T) {
 	}
 }
 
+func TestWithdrawPayeeProceeds(t *testing.T) {
+	ctx := context.Background()
+	other := common.HexToAddress("0x2000000000000000000000000000000000000002")
+	tx := testTx(t)
+	c := testClient(t, &mockPayments{
+		accountInfo: func(ctx context.Context, token, owner common.Address) (*big.Int, *big.Int, *big.Int, *big.Int, error) {
+			return big.NewInt(0), big.NewInt(0), big.NewInt(42), big.NewInt(0), nil
+		},
+	}, withMockRails(&mockRailsTransactor{
+		withdrawToken: func(ctx context.Context, opts *bind.TransactOpts, amount *big.Int) (*types.Transaction, error) {
+			return tx, nil
+		},
+	}))
+
+	hash, amt, err := c.WithdrawPayeeProceeds(ctx, other)
+	if err != nil || hash != "" || amt.Sign() != 0 {
+		t.Fatalf("other payee: hash=%q amt=%s err=%v", hash, amt, err)
+	}
+	hash, amt, err = c.WithdrawPayeeProceeds(ctx, c.signerAddr)
+	if err != nil || hash != tx.Hash().Hex() || amt.Cmp(big.NewInt(42)) != 0 {
+		t.Fatalf("signer payee: hash=%q amt=%s err=%v", hash, amt, err)
+	}
+}
+
 func TestWithdrawTokenAvailableSuccess(t *testing.T) {
 	ctx := context.Background()
 	tx := testTx(t)
@@ -199,37 +223,6 @@ func TestPreparePayerForPayeeCreatesRail(t *testing.T) {
 	}
 	if listCalls < 2 {
 		t.Fatalf("expected rail list after create, got %d calls", listCalls)
-	}
-}
-
-func TestSettleIfFundedWithdrawAfterSettle(t *testing.T) {
-	ctx := context.Background()
-	payer := common.HexToAddress("0x1000000000000000000000000000000000000001")
-	payee := common.HexToAddress("0x2000000000000000000000000000000000000002")
-	railID := big.NewInt(9)
-	settleTx := testTx(t)
-	withdrawTx := testTx(t)
-
-	mp := activeRailPayments(payer, payee, payee, railID)
-	mp.accountInfo = func(ctx context.Context, token, owner common.Address) (*big.Int, *big.Int, *big.Int, *big.Int, error) {
-		return big.NewInt(0), big.NewInt(0), big.NewInt(100), big.NewInt(0), nil
-	}
-	mp.settleRail = func(opts *bind.TransactOpts, rid, until *big.Int) (*types.Transaction, error) {
-		return settleTx, nil
-	}
-
-	c := testClient(t, mp)
-	c.signerAddr = payee
-	withMockRails(&mockRailsTransactor{
-		withdrawToken: func(ctx context.Context, opts *bind.TransactOpts, amount *big.Int) (*types.Transaction, error) {
-			return withdrawTx, nil
-		},
-	})(c)
-	c.blockNumber = func(ctx context.Context) (uint64, error) { return 99, nil }
-
-	hash, err := c.SettleIfFunded(ctx, payer, payee, big.NewInt(10))
-	if err != nil || hash != settleTx.Hash().Hex() {
-		t.Fatalf("settle hash=%q err=%v", hash, err)
 	}
 }
 

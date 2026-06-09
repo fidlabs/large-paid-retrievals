@@ -19,13 +19,15 @@ import (
 )
 
 type proxyAppSettings struct {
-	Listen          string
-	DBPath          string
-	PriceUSDFCPerGB string
-	ClientQuery     string
-	ClientHeader    string
-	MaxSkewSec      int
-	Verbose         bool
+	Listen              string
+	DBPath              string
+	DBRetention         time.Duration
+	PayWithdrawInterval time.Duration
+	PriceUSDFCPerGB     string
+	ClientQuery         string
+	ClientHeader        string
+	MaxSkewSec          int
+	Verbose             bool
 
 	PayRPCURL          string
 	PayPrivateKey      string
@@ -160,8 +162,13 @@ func runProxyApp(settings proxyAppSettings) error {
 	handler := buildProxyHandler(upstreamURL, settings.UpstreamHost, settings.UpstreamPort, store, fc, payee, settings, logger)
 
 	logger.Info("filecoin pay", "payments", fc.PaymentsAddress().Hex(), "payee_0x", payee, "settler", fc.SignerAddress().Hex(),
-		"pay_debug_flag", settings.PayDebug, "filpay_trace", filTrace, "pay_http_trace", filTrace)
-	logger.Info("sp-proxy listening", "listen", settings.Listen, "db", settings.DBPath, "price_usdfc_per_gb", settings.PriceUSDFCPerGB, "verbose", settings.Verbose)
+		"pay_debug_flag", settings.PayDebug, "filpay_trace", filTrace, "pool_trace", filTrace, "pay_http_trace", filTrace)
+	logger.Info("sp-proxy listening", "listen", settings.Listen, "db", settings.DBPath, "price_usdfc_per_gb", settings.PriceUSDFCPerGB, "verbose", settings.Verbose,
+		"sigusr1_dump", "kill -USR1 <pid> dumps deals and settlement pools to stderr")
+
+	startSIGUSR1StateDump(store, logger)
+	startDBRetentionPruner(store, settings.DBRetention, logger)
+	startPayeeWithdrawWorker(fc, settings.PayWithdrawInterval, logger)
 
 	return proxyListenAndServe(settings.Listen, handler)
 }

@@ -57,6 +57,7 @@ type ProofPayload struct {
 	Host          string `json:"host"`
 	Nonce         string `json:"nonce"`
 	ExpiresUnix   int64  `json:"expires_unix"`
+	PaymentTxHash string `json:"payment_tx_hash"`
 	SigType       string `json:"sig_type"`
 	Signature     string `json:"sig"`
 }
@@ -136,6 +137,7 @@ func (h *ProofPayload) CanonicalMessage() []byte {
 	b.WriteString("host=" + strings.ToLower(h.Host) + "\n")
 	b.WriteString("nonce=" + h.Nonce + "\n")
 	b.WriteString(fmt.Sprintf("expires_unix=%d\n", h.ExpiresUnix))
+	b.WriteString("payment_tx_hash=" + strings.ToLower(strings.TrimSpace(h.PaymentTxHash)) + "\n")
 	return b.Bytes()
 }
 

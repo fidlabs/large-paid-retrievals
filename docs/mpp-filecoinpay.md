@@ -8,7 +8,7 @@ This document defines the wire contract used by this project when gating piece r
 
 - Use MPP challenge/proof style HTTP flow (`402` -> retried paid `GET`)
 - Use Filecoin Pay as the source of payment truth
-- Preserve strict safety for SPs: **do not serve piece bytes before settle succeeds**
+- Preserve strict safety for SPs: **do not serve piece bytes before payment is confirmed on-chain**
 
 ## HTTP Flow
 
@@ -16,8 +16,8 @@ This document defines the wire contract used by this project when gating piece r
 2. Proxy returns `402 Payment Required` with `WWW-Authenticate: Payment ...` challenge params.
 3. Client prepares proof and retries `GET /piece/<cid>` with `Authorization: Payment <credential>`.
 4. Proxy verifies proof and request binding.
-5. Proxy executes Filecoin Pay `SettleIfFunded(...)`.
-6. If settle succeeds, proxy consumes nonce, marks deal paid, serves piece.
+5. Client includes `payment_tx_hash` (the mined `modifyRailPayment` tx) in the signed credential.
+6. Proxy verifies that tx on-chain, parses `RailOneTimePaymentProcessed` for the payer→payee rail, credits the settlement pool, allocates paid access, and serves the piece.
 
 ## Challenge Schema (`402` response)
 
@@ -51,7 +51,7 @@ Optional auth-params handled:
 Notes:
 - `challenge_id` is unique per quote and currently equals `deal_uuid`.
 - `expires` is RFC3339 and is a short challenge TTL.
-- `price_usdfc` is the total decimal USDFC charge for the piece (SP computes it as `price_usdfc_per_gib * ceil(piece_bytes / 2^30)` from upstream HEAD `Content-Length` when the challenge is issued—each GiB or part thereof is one billed GiB). It is converted to base units server-side before a single settle.
+- `price_usdfc` is the total decimal USDFC charge for the piece (SP computes it as `price_usdfc_per_gib * ceil(piece_bytes / 2^30)` from upstream HEAD `Content-Length` when the challenge is issued—each GiB or part thereof is one billed GiB). It is converted to base units server-side before pool allocation.
 
 ## Paid Proof Schema (`Authorization: Payment ...`)
 
@@ -80,6 +80,7 @@ Header value is `base64url-no-pad(json(Credential))`.
     "host": "example.com:8787",
     "nonce": "uuid",
     "expires_unix": 1735689600,
+    "payment_tx_hash": "0x...",
     "sig_type": "evm",
     "sig": "hex-65-byte-secp256k1-signature"
   }
@@ -101,6 +102,7 @@ path=<path>
 host=<host lowercased>
 nonce=<nonce>
 expires_unix=<expires_unix>
+payment_tx_hash=<payment_tx_hash lowercased>
 ```
 
 Signature rules:
@@ -115,7 +117,8 @@ For a paid request, proxy must verify:
 - `method/path/host/cid/client` bind to this HTTP request and stored deal
 - `challenge_id/deal_uuid` match an existing quoted deal
 - nonce is unused for that deal (`used_nonces` table)
-- Filecoin Pay settle succeeds for quoted `price_usdfc`
+- Credential includes `payment_tx_hash` bound in the signed canonical message
+- Verified `RailOneTimePaymentProcessed` gross charge (net payee + network fee; operator commission is zero in this design) covers quoted `price_usdfc`; the SP absorbs the network fee while crediting the payer pool at gross
 
 If any check fails:
 - reject with `402` and a fresh `WWW-Authenticate: Payment ...` challenge
@@ -123,9 +126,9 @@ If any check fails:
 
 ## Security Notes
 
-- Settlement is authoritative, not proof-of-funds checks.
+- On-chain rail charge receipts are authoritative; the SP does not trust client-reported balances.
 - Nonce replay is blocked server-side.
-- Piece bytes are served only after settle + nonce consume + mark paid to avoid concurrent drain or similar.
+- Piece bytes are served only after pool allocation + nonce consume to avoid concurrent drain or similar.
 - Successful paid responses return a `Payment-Receipt` (base64url-no-pad JSON).
 
 ## Conformance Gaps / Awkward Bits

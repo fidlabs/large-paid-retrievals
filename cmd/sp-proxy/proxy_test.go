@@ -27,15 +27,22 @@ const testQuotePayee0x = "0x2222222222222222222222222222222222222222"
 type stubFilpay struct {
 	signer   common.Address
 	payments common.Address
-	settle   func(ctx context.Context, payer, payee common.Address, price *big.Int) (string, error)
+	credit   func(ctx context.Context, payer, payee common.Address) (string, *big.Int, error)
 	closed   bool
 }
 
-func (s *stubFilpay) SettleIfFunded(ctx context.Context, payer, payee common.Address, price *big.Int) (string, error) {
-	if s.settle != nil {
-		return s.settle(ctx, payer, payee, price)
+func (s *stubFilpay) CreditRailPayment(ctx context.Context, payer, payee common.Address, paymentTxHash string) (string, *big.Int, error) {
+	if s.credit != nil {
+		return s.credit(ctx, payer, payee)
 	}
-	return "0xstub", nil
+	if strings.TrimSpace(paymentTxHash) == "" {
+		paymentTxHash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	}
+	return paymentTxHash, new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil), nil
+}
+
+func (s *stubFilpay) WithdrawPayeeProceeds(context.Context, common.Address) (string, *big.Int, error) {
+	return "", big.NewInt(0), nil
 }
 
 func (s *stubFilpay) SignerAddress() common.Address   { return s.signer }
