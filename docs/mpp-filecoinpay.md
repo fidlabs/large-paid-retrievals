@@ -128,7 +128,7 @@ If any check fails:
 
 - On-chain rail charge receipts are authoritative; the SP does not trust client-reported balances.
 - Nonce replay is blocked on first settlement; paid-access retries within the allocation window skip nonce consumption.
-- On first settlement, piece bytes are served only after nonce consume, verified rail receipt (when the pool is short), and pool allocation — in that order — to avoid concurrent drain or similar. Paid-access retries require an active allocation and skip nonce consumption and pool drawdown.
+- On first settlement, piece bytes are served only after nonce consume, then a pool allocation attempt; if the pool balance is insufficient, verified rail receipt and pool credit, then a second allocation attempt — to avoid concurrent drain or similar. Paid-access retries require an active allocation and skip nonce consumption and pool drawdown.
 - Successful paid responses return a `Payment-Receipt` (base64url-no-pad JSON).
 
 ## Conformance Gaps / Awkward Bits
