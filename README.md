@@ -247,6 +247,7 @@ Optional: expose **`HEAD`** on the public proxy path for client size probes (the
 | `--db` | SQLite deal state |
 | `--db-retention` | Max age of SQLite rows before automatic pruning (default `168h` / 1 week); `0` disables |
 | `--pay-withdraw-interval` | Background batch withdraw of Filecoin Pay proceeds to the settler wallet (default `1h`); `0` disables |
+| `--quote-rate-limit-rps`, `--quote-rate-limit-burst` | Per-client-IP rate limit + burst for the unauthenticated quote path (upstream HEAD + quote insert); defaults `20`/`40`; set either to `0` to disable. Paid retries (with `Authorization`) are never throttled here, so resumable/parallel paid downloads are unaffected. |
 | `--price-usdfc-per-gb` | USDFC per billed GiB |
 | `--upstream-host`, `--upstream-port` | Loopback Curio/Boost (`127.0.0.1` + port) |
 | `--pay-rpc-url` | FVM RPC |
@@ -380,7 +381,7 @@ openssl rand -hex 32 > client.key
 cast wallet new --json   # copy private_key to sp.key / client.key
 ```
 
-**Lotus** — create `secp256k1` wallets, `lotus wallet export`, then extract the 32-byte hex `PrivateKey` field into `sp.key` / `client.key`. Keep `*.key` out of git.
+**Lotus** — create `secp256k1` wallets, `lotus wallet export`, then extract the 32-byte hex `PrivateKey` field into `sp.key` / `client.key`. **Keep private keys out of git** — `.gitignore` covers `*.key`, `*.priv`, and `*.priv.*`, but double-check before committing, and never reuse a key that has touched a repo on mainnet.
 
 ---
 

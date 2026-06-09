@@ -86,6 +86,11 @@ type Config struct {
 	FilecoinPay     FilecoinPaySettler
 	Logger          *slog.Logger
 	Store           DealStore
+
+	// QuoteRateLimitRPS / QuoteRateLimitBurst bound the unauthenticated quote path
+	// per client IP. Non-positive values disable rate limiting.
+	QuoteRateLimitRPS   float64
+	QuoteRateLimitBurst int
 }
 
 type settlementLockEntry struct {
@@ -99,6 +104,8 @@ type RetrievalService struct {
 
 	settleMu    sync.Mutex
 	settleLocks map[string]*settlementLockEntry
+
+	quoteLimiter *ipRateLimiter
 }
 
 func NewRetrievalService(cfg Config) *RetrievalService {
@@ -110,9 +117,10 @@ func NewRetrievalService(cfg Config) *RetrievalService {
 		panic("middleware: ServiceConfig.Store is required")
 	}
 	return &RetrievalService{
-		cfg:         cfg,
-		logger:      logger,
-		settleLocks: make(map[string]*settlementLockEntry),
+		cfg:          cfg,
+		logger:       logger,
+		settleLocks:  make(map[string]*settlementLockEntry),
+		quoteLimiter: newIPRateLimiter(cfg.QuoteRateLimitRPS, cfg.QuoteRateLimitBurst),
 	}
 }
 

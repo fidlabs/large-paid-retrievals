@@ -36,6 +36,8 @@ func root() *cobra.Command {
 	c.Flags().StringVar(&settings.ClientQuery, "client-query", "client", "Query key used to identify client on challenge requests")
 	c.Flags().StringVar(&settings.ClientHeader, "client-header", "X-Client-Address", "Header key used to identify client on challenge requests")
 	c.Flags().IntVar(&settings.MaxSkewSec, "max-clock-skew-sec", 30, "Allowed clock skew in seconds for header expiry")
+	c.Flags().Float64Var(&settings.QuoteRateLimitRPS, "quote-rate-limit-rps", 20, "Per-client-IP rate limit (req/sec) for the unauthenticated quote path (upstream HEAD + quote); 0 disables")
+	c.Flags().IntVar(&settings.QuoteRateLimitBurst, "quote-rate-limit-burst", 40, "Per-client-IP burst for the quote path; allows bulk up-front quoting of a manifest; 0 disables")
 	c.Flags().BoolVar(&settings.Verbose, "verbose", false, "Enable debug-level structured logs")
 
 	c.Flags().StringVar(&settings.PayRPCURL, "pay-rpc-url", getenv("SP_PROXY_PAY_RPC_URL", "https://api.node.glif.io/rpc/v1"), "Filecoin RPC (FVM) for payments contract")
