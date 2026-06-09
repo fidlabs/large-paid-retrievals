@@ -25,6 +25,7 @@ vendor/
 .idea/
 .vscode/
 .cursor/
+.claude/
 *.swp
 
 # Proxy / local state
