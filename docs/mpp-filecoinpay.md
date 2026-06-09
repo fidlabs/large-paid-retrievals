@@ -116,7 +116,7 @@ For a paid request, proxy must verify:
 - proof is syntactically valid and not expired
 - `method/path/host/cid/client` bind to this HTTP request and stored deal
 - `challenge_id/deal_uuid` match an existing quoted deal
-- nonce is unused for that deal (`used_nonces` table)
+- nonce is unused for that deal (`used_nonces` table) on the **first-settlement** path; retries within an active paid-access allocation may reuse the same credential (including nonce) without consuming the nonce again
 - Credential includes `payment_tx_hash` bound in the signed canonical message
 - Verified `RailOneTimePaymentProcessed` gross charge (net payee + network fee; operator commission is zero in this design) covers quoted `price_usdfc`; the SP absorbs the network fee while crediting the payer pool at gross
 
@@ -127,8 +127,8 @@ If any check fails:
 ## Security Notes
 
 - On-chain rail charge receipts are authoritative; the SP does not trust client-reported balances.
-- Nonce replay is blocked server-side.
-- Piece bytes are served only after pool allocation + nonce consume to avoid concurrent drain or similar.
+- Nonce replay is blocked on first settlement; paid-access retries within the allocation window skip nonce consumption.
+- On first settlement, piece bytes are served only after nonce consume, verified rail receipt (when the pool is short), and pool allocation — in that order — to avoid concurrent drain or similar. Paid-access retries require an active allocation and skip nonce consumption and pool drawdown.
 - Successful paid responses return a `Payment-Receipt` (base64url-no-pad JSON).
 
 ## Conformance Gaps / Awkward Bits
