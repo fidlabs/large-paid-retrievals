@@ -123,6 +123,87 @@ func TestPruneClosedPools(t *testing.T) {
 	}
 }
 
+// TestReplayBlockedAfterPrune verifies that an on-chain payment tx cannot be re-credited
+// after its pool/credit rows are pruned. The permanent spent_payment_tx ledger must keep
+// the spend recorded forever, even though pool_credits and pools are removed.
+func TestReplayBlockedAfterPrune(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sp.db")
+	s, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+
+	const (
+		dealUUID = "11111111-2222-3333-4444-555555555555"
+		newDeal  = "99999999-8888-7777-6666-555555555555"
+		payer    = "0x1111111111111111111111111111111111111111"
+		payee    = "0x2222222222222222222222222222222222222222"
+		cid      = "bafkreic3gqso3booyry4fwc5wfnhaio574lami3am6nv4k6q6u2legzzdm"
+		replayTx = "0xreplay-me"
+	)
+	if err := s.InsertQuote(ctx, dealUUID, payer, cid, "0.01", payee); err != nil {
+		t.Fatal(err)
+	}
+	price := big.NewInt(100_000)
+	if err := s.CreditPool(ctx, pp.PoolCredit{
+		Payer: payer, Payee: payee, SettleTxHash: replayTx, CreditedBaseUnits: price,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Drain the pool to exactly zero so it closes.
+	if _, err := s.TryAllocateDeal(ctx, pp.AllocateDealRequest{
+		DealUUID: dealUUID, Payer: payer, Payee: payee, Client: payer, CID: cid,
+		PriceBaseUnits: price, SettleTxHash: replayTx, AccessTTL: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Age everything past retention and prune away the closed pool and its credit rows.
+	old := time.Now().Add(-8 * 24 * time.Hour).Unix()
+	if err := setPoolClosedAt(ctx, s, payer, payee, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := setDealQuotedAt(ctx, s, dealUUID, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := setAllocationAccessExpires(ctx, s, dealUUID, old); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := s.Prune(ctx, 7*24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Pools == 0 || stats.PoolCredits == 0 {
+		t.Fatalf("expected closed pool and credits pruned, stats=%+v", stats)
+	}
+
+	// Replay the same on-chain tx hash: it must NOT re-credit the pool.
+	if err := s.CreditPool(ctx, pp.PoolCredit{
+		Payer: payer, Payee: payee, SettleTxHash: replayTx, CreditedBaseUnits: price,
+	}); err != nil {
+		t.Fatalf("replay credit should be a no-op, not an error: %v", err)
+	}
+	pool, err := s.OpenPool(ctx, payer, payee)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pool != nil {
+		t.Fatalf("replayed payment re-funded a pool after prune: %+v", pool)
+	}
+	// And a fresh allocation must fail for lack of funds.
+	if err := s.InsertQuote(ctx, newDeal, payer, cid, "0.01", payee); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.TryAllocateDeal(ctx, pp.AllocateDealRequest{
+		DealUUID: newDeal, Payer: payer, Payee: payee, Client: payer, CID: cid,
+		PriceBaseUnits: price, AccessTTL: time.Hour,
+	}); err != pp.ErrInsufficientPool {
+		t.Fatalf("expected ErrInsufficientPool after replay, got %v", err)
+	}
+}
+
 func setPoolClosedAt(ctx context.Context, s *Store, payer, payee string, closedAt int64) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE pools SET closed_at = ?, created_at = ? WHERE payer = ? AND payee = ?

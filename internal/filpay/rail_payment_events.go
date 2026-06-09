@@ -30,12 +30,18 @@ func init() {
 	railOneTimePaymentProcessedEvent = ev
 }
 
-// sumRailOneTimePaymentGross sums the gross one-time charge per rail from
-// RailOneTimePaymentProcessed logs: netPayeeAmount + operatorCommission + networkFee.
-// That gross is what the payer's modifyRailPayment oneTimePayment debited from lockup.
-// Only netPayeeAmount lands in the payee's Filecoin Pay account; commission and network
-// fees are absorbed by the SP when the settlement pool is credited at gross.
-func sumRailOneTimePaymentGross(receipt *types.Receipt, paymentsAddr common.Address) (map[string]*big.Int, error) {
+// sumRailOneTimePaymentCredit sums the creditable one-time charge per rail from
+// RailOneTimePaymentProcessed logs: netPayeeAmount + networkFee.
+//
+// operatorCommission is deliberately EXCLUDED. In this design the client is the rail
+// operator (createRail is sent by the payer), so a malicious client can set an arbitrary
+// operator commission routed back to itself as serviceFeeRecipient. Crediting the pool at
+// the full gross (net + commission + networkFee) would let such a client fund the pool at
+// gross while the SP only ever receives netPayeeAmount — paying the SP a fraction of the
+// retrieved value. We therefore credit only what the SP can actually receive (net) plus the
+// protocol-set, non-redirectable networkFee, which the SP continues to absorb (matching the
+// honest commission==0 flow exactly, where credit == net + networkFee == oneTimePayment).
+func sumRailOneTimePaymentCredit(receipt *types.Receipt, paymentsAddr common.Address) (map[string]*big.Int, error) {
 	if receipt == nil {
 		return nil, fmt.Errorf("filpay: nil receipt")
 	}
@@ -64,22 +70,19 @@ func sumRailOneTimePaymentGross(receipt *types.Receipt, paymentsAddr common.Addr
 		if !ok {
 			return nil, fmt.Errorf("filpay: RailOneTimePaymentProcessed netPayeeAmount type %T", vals[0])
 		}
-		commission, ok := vals[1].(*big.Int)
-		if !ok {
-			return nil, fmt.Errorf("filpay: RailOneTimePaymentProcessed operatorCommission type %T", vals[1])
-		}
+		// operatorCommission (vals[1]) is intentionally not used: it is attacker-controllable
+		// and would otherwise inflate the pool credit without the SP receiving those funds.
 		networkFee, ok := vals[2].(*big.Int)
 		if !ok {
 			return nil, fmt.Errorf("filpay: RailOneTimePaymentProcessed networkFee type %T", vals[2])
 		}
-		gross := new(big.Int).Add(net, commission)
-		gross.Add(gross, networkFee)
+		credit := new(big.Int).Add(net, networkFee)
 		key := railID.String()
 		cur := byRail[key]
 		if cur == nil {
 			cur = big.NewInt(0)
 		}
-		byRail[key] = new(big.Int).Add(cur, gross)
+		byRail[key] = new(big.Int).Add(cur, credit)
 	}
 	return byRail, nil
 }

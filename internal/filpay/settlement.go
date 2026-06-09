@@ -698,11 +698,13 @@ func (c *Client) FindActiveTokenRail(ctx context.Context, payer, payee common.Ad
 	return nil, fmt.Errorf("filpay: no active token rail from %s to %s", payer.Hex(), payee.Hex())
 }
 
-// CreditRailPayment verifies a client modifyRailPayment tx and returns the gross charge
+// CreditRailPayment verifies a client modifyRailPayment tx and returns the creditable charge
 // parsed from RailOneTimePaymentProcessed for the payer→payee rail (net payee amount plus
-// operator commission and network fee). The settlement pool is credited at this
-// gross so it matches the quoted price; only the net payee amount is withdrawable on-chain
-// and the SP absorbs commission and network fees as transaction costs.
+// network fee, EXCLUDING operator commission). Commission is excluded because the client is
+// the rail operator and could otherwise route an arbitrary commission back to itself, funding
+// the pool at gross while the SP only receives the net payee amount. The SP absorbs the
+// protocol network fee (non-redirectable) as a transaction cost, matching the honest
+// commission==0 flow where the credit equals the oneTimePayment.
 func (c *Client) CreditRailPayment(ctx context.Context, payer, payee common.Address, paymentTxHash string) (creditRef string, creditedBaseUnits *big.Int, err error) {
 	txHash := strings.TrimSpace(paymentTxHash)
 	c.payInfo("CreditRailPayment start", "payer", payer.Hex(), "payee", payee.Hex(), "payment_tx_hash", txHash)
@@ -717,7 +719,7 @@ func (c *Client) CreditRailPayment(ctx context.Context, payer, payee common.Addr
 	if err != nil {
 		return "", nil, fmt.Errorf("filpay: payment tx receipt: %w", err)
 	}
-	byRail, err := sumRailOneTimePaymentGross(receipt, c.paymentsAddr)
+	byRail, err := sumRailOneTimePaymentCredit(receipt, c.paymentsAddr)
 	if err != nil {
 		return "", nil, err
 	}

@@ -4,8 +4,9 @@
 // Flow (implemented by sqlitestore.Store, orchestrated by piecepayment):
 //
 //  1. InsertQuote — client receives 402; a Deal row is created (one deal_uuid per quote).
-//  2. On first paid GET, CreditPool adds verified rail proceeds to the payer→payee pool
-//     (keyed by PoolCredit.SettleTxHash for idempotency).
+//  2. On first paid GET, CreditPool adds verified rail proceeds to the payer→payee pool.
+//     Idempotency is enforced by a permanent (never-pruned) record of the settlement tx hash,
+//     so an on-chain payment can fund the pool at most once even after pool rows are pruned.
 //  3. TryAllocateDeal debits the pool (AllocateDealRequest) and creates a DealAllocation
 //     granting the client a time-limited paid-access window for that deal/cid.
 //  4. GetActiveAllocation — while AccessExpiresAt is in the future, retries reuse the same
