@@ -57,15 +57,6 @@ func (svc *RetrievalService) PiecePaymentMiddleware(MaxHeaderSize int) func(http
 				)
 			}
 			if rawHdr == "" {
-				// Rate-limit the unauthenticated quote path per client IP: each anonymous
-				// GET triggers an upstream HEAD probe and a quote insert. Paid retries carry
-				// an Authorization header and are not limited here.
-				if !svc.quoteLimiter.Allow(clientIP(r)) {
-					logger.Warn("quote rate limit exceeded", "path", r.URL.Path, "remote", r.RemoteAddr)
-					w.Header().Set("Retry-After", "1")
-					writeProblem(w, http.StatusTooManyRequests, "rate-limited", "Too many quote requests; slow down and retry")
-					return
-				}
 				// Probe upstream with HEAD for existence and piece size before quoting.
 				exists, status, pieceBytes := upstreamProbe(next, r)
 				if !exists {

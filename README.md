@@ -247,7 +247,6 @@ Optional: expose **`HEAD`** on the public proxy path for client size probes (the
 | `--db` | SQLite deal state |
 | `--db-retention` | Max age of SQLite rows before automatic pruning (default `168h` / 1 week); `0` disables |
 | `--pay-withdraw-interval` | Background batch withdraw of Filecoin Pay proceeds to the settler wallet (default `1h`); `0` disables |
-| `--quote-rate-limit-rps`, `--quote-rate-limit-burst` | Per-client-IP rate limit + burst for the unauthenticated quote path (upstream HEAD + quote insert); defaults `20`/`40`; set either to `0` to disable. Paid retries (with `Authorization`) are never throttled here, so resumable/parallel paid downloads are unaffected. |
 | `--price-usdfc-per-gb` | USDFC per billed GiB |
 | `--upstream-host`, `--upstream-port` | Loopback Curio/Boost (`127.0.0.1` + port) |
 | `--pay-rpc-url` | FVM RPC |
@@ -280,6 +279,16 @@ A background task runs every hour (and once at startup) to prune SQLite rows old
 A background worker withdraws available USDFC from the settler’s Filecoin Pay account to wallet on **`--pay-withdraw-interval`** (default **1 hour**), including once at startup. This batches on-chain proceeds so concurrent retrievals from multiple client rails do not race on withdraw nonces. Set `--pay-withdraw-interval 0` to disable automatic withdraw.
 
 Wire format and security model: [docs/mpp-filecoinpay.md](docs/mpp-filecoinpay.md).
+
+### Recommended external controls
+
+Deploy `sp-proxy` behind infrastructure that provides:
+
+- **TLS termination** — protect payment credentials in transit (MITM prevention).
+- **Rate limiting** — the unauthenticated quote path (upstream `HEAD` probe + SQLite quote insert per anonymous `GET`) is relatively expensive; limit per client IP or API key at your reverse proxy, CDN, or API gateway (for example nginx `limit_req`, Cloudflare, or an AWS WAF rule).
+- **Network policy** (optional) — restrict who can reach the public listen address if the SP should not be openly quotable.
+
+The service intentionally does not implement TLS or rate limiting itself; those belong at the internet edge.
 
 ---
 
@@ -327,8 +336,8 @@ Today the standalone proxy is the supported deployment path; middleware extracti
 For each `(payer, payee)` pair the store maintains an open **pool** with a `remaining_base_units` balance. On authorize:
 
 1. **`TryAllocateDeal`** debits the quoted piece price from the pool (or returns insufficient balance).
-2. If the pool is short, **`CreditRailPayment`** (`internal/filpay`) fetches the client’s `modifyRailPayment` receipt, parses `RailOneTimePaymentProcessed`, and verifies the gross charge for the payer→payee rail.
-3. **`CreditPool`** credits the pool at that gross amount (idempotent on `payment_tx_hash`), then allocation retries.
+2. If the pool is short, **`CreditRailPayment`** (`internal/filpay`) fetches the client’s `modifyRailPayment` receipt, rejects txs mined more than 12h ago, parses `RailOneTimePaymentProcessed`, and verifies the creditable charge (net payee + network fee, excluding client-controlled operator commission) for the payer→payee rail.
+3. **`CreditPool`** credits the pool at that amount (idempotent on `payment_tx_hash` while `pool_credits` rows exist), then allocation retries.
 4. After a successful allocation, the client gets a **paid-access window** (default 12h) so large downloads can retry without re-charging; nonce consumption still prevents credential replay on first settlement.
 
 This pool bookkeeping is an **interim SP-side layer**: it ties MPP credentials to verified on-chain rail charges and enforces settle-before-serve without trusting client-reported balances. It will be **replaced** by full **Filecoin Pay Operators and Validator** in a future update.

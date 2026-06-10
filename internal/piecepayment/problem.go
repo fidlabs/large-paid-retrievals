@@ -43,8 +43,6 @@ func writeProblem(w http.ResponseWriter, status int, code, detail string) {
 		title = "Invalid Payment Challenge"
 	case "payment-unavailable":
 		title = "Payment Temporarily Unavailable"
-	case "rate-limited":
-		title = "Too Many Requests"
 	}
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.WriteHeader(status)

@@ -20,8 +20,7 @@ import (
 
 const (
 	// We have a "human scale" of 10 minutes for the challenge TTL to allow wallet funding and retry.
-	challengeTTL  = 10 * time.Minute
-	paidAccessTTL = 12 * time.Hour
+	challengeTTL = 10 * time.Minute
 )
 
 var ErrPieceSizeUnknown = errors.New("piece size unknown for pricing")
@@ -43,8 +42,8 @@ var (
 )
 
 type FilecoinPaySettler interface {
-	// CreditRailPayment returns the gross rail charge (quoted price); the SP absorbs
-	// operator commission and network fees while crediting the payer pool at gross.
+	// CreditRailPayment verifies a recent modifyRailPayment tx and returns the creditable
+	// rail charge (net payee + network fee, excluding client-controlled operator commission).
 	CreditRailPayment(ctx context.Context, payer, payee common.Address, paymentTxHash string) (creditRef string, creditedBaseUnits *big.Int, err error)
 }
 
@@ -86,11 +85,6 @@ type Config struct {
 	FilecoinPay     FilecoinPaySettler
 	Logger          *slog.Logger
 	Store           DealStore
-
-	// QuoteRateLimitRPS / QuoteRateLimitBurst bound the unauthenticated quote path
-	// per client IP. Non-positive values disable rate limiting.
-	QuoteRateLimitRPS   float64
-	QuoteRateLimitBurst int
 }
 
 type settlementLockEntry struct {
@@ -104,8 +98,6 @@ type RetrievalService struct {
 
 	settleMu    sync.Mutex
 	settleLocks map[string]*settlementLockEntry
-
-	quoteLimiter *ipRateLimiter
 }
 
 func NewRetrievalService(cfg Config) *RetrievalService {
@@ -117,10 +109,9 @@ func NewRetrievalService(cfg Config) *RetrievalService {
 		panic("middleware: ServiceConfig.Store is required")
 	}
 	return &RetrievalService{
-		cfg:          cfg,
-		logger:       logger,
-		settleLocks:  make(map[string]*settlementLockEntry),
-		quoteLimiter: newIPRateLimiter(cfg.QuoteRateLimitRPS, cfg.QuoteRateLimitBurst),
+		cfg:         cfg,
+		logger:      logger,
+		settleLocks: make(map[string]*settlementLockEntry),
 	}
 }
 
@@ -301,7 +292,7 @@ func (s *RetrievalService) AuthorizeAndSettle(r *http.Request, cid, rawHdr strin
 	}
 	// Past-expiry is checked only on the first-settlement path. After a successful payment,
 	// clients may retry large downloads with the same (possibly expired) credential while
-	// paidAccessTTL covers the deal; settlement already happened and must not be re-required.
+	// dealstore.PaidAccessTTL covers the deal; settlement already happened and must not be re-required.
 	if err := hdr.ValidateExpiresNotPast(now); err != nil {
 		s.logCredentialValidationFailure("payload_expired",
 			"error", err.Error(),
@@ -340,7 +331,7 @@ func (s *RetrievalService) AuthorizeAndSettle(r *http.Request, cid, rawHdr strin
 		Client:         payerClient,
 		CID:            deal.CID,
 		PriceBaseUnits: priceBaseUnits,
-		AccessTTL:      paidAccessTTL,
+		AccessTTL:      dealstore.PaidAccessTTL,
 	}
 	paymentTxHash := strings.TrimSpace(cred.Payload.PaymentTxHash)
 	if paymentTxHash == "" {

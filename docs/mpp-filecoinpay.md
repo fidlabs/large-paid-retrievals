@@ -118,7 +118,8 @@ For a paid request, proxy must verify:
 - `challenge_id/deal_uuid` match an existing quoted deal
 - nonce is unused for that deal (`used_nonces` table) on the **first-settlement** path; retries within an active paid-access allocation may reuse the same credential (including nonce) without consuming the nonce again
 - Credential includes `payment_tx_hash` bound in the signed canonical message
-- Verified `RailOneTimePaymentProcessed` gross charge (net payee + network fee; operator commission is zero in this design) covers quoted `price_usdfc`; the SP absorbs the network fee while crediting the payer pool at gross
+- `payment_tx_hash` refers to a `modifyRailPayment` tx mined within the last 12 hours (chain block timestamp)
+- Verified `RailOneTimePaymentProcessed` creditable charge (`netPayeeAmount + networkFee`, excluding client-controlled `operatorCommission`) covers quoted `price_usdfc`; the SP absorbs the network fee
 
 If any check fails:
 - reject with `402` and a fresh `WWW-Authenticate: Payment ...` challenge
@@ -127,9 +128,14 @@ If any check fails:
 ## Security Notes
 
 - On-chain rail charge receipts are authoritative; the SP does not trust client-reported balances.
+- Payment txs older than 12 hours are rejected, so an immutable on-chain payment cannot re-fund a pool after SQLite rows are pruned.
 - Nonce replay is blocked on first settlement; paid-access retries within the allocation window skip nonce consumption.
 - On first settlement, piece bytes are served only after nonce consume, then a pool allocation attempt; if the pool balance is insufficient, verified rail receipt and pool credit, then a second allocation attempt — to avoid concurrent drain or similar. Paid-access retries require an active allocation and skip nonce consumption and pool drawdown.
 - Successful paid responses return a `Payment-Receipt` (base64url-no-pad JSON).
+
+### Recommended external controls
+
+Deploy the gateway behind TLS termination and per-IP (or per-API-key) rate limiting at the reverse proxy or CDN. The unauthenticated quote path triggers an upstream `HEAD` probe and a database insert per request; that workload belongs at the network edge, not in application code.
 
 ## Conformance Gaps / Awkward Bits
 

@@ -19,6 +19,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/fidlabs/paid-retrievals/internal/dealstore"
 )
 
 var uint256Max = new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
@@ -98,6 +99,7 @@ type Client struct {
 	rails              paymentsRailsTransactor
 	waitMined          func(ctx context.Context, tx *types.Transaction) (*types.Receipt, error)
 	transactionReceipt func(ctx context.Context, txHash common.Hash) (*types.Receipt, error)
+	blockHeader        func(ctx context.Context, blockNumber *big.Int) (*types.Header, error)
 	usdfc              erc20API
 }
 
@@ -719,6 +721,9 @@ func (c *Client) CreditRailPayment(ctx context.Context, payer, payee common.Addr
 	if err != nil {
 		return "", nil, fmt.Errorf("filpay: payment tx receipt: %w", err)
 	}
+	if err := c.verifyPaymentTxFreshness(ctx, receipt); err != nil {
+		return "", nil, err
+	}
 	byRail, err := sumRailOneTimePaymentCredit(receipt, c.paymentsAddr)
 	if err != nil {
 		return "", nil, err
@@ -763,6 +768,32 @@ func (c *Client) fetchTransactionReceipt(ctx context.Context, txHash common.Hash
 		return nil, errors.New("filpay: no eth client for tx receipt")
 	}
 	return c.eth.TransactionReceipt(ctx, txHash)
+}
+
+func (c *Client) verifyPaymentTxFreshness(ctx context.Context, receipt *types.Receipt) error {
+	if receipt == nil || receipt.BlockNumber == nil {
+		return fmt.Errorf("filpay: payment tx missing block number")
+	}
+	header, err := c.fetchBlockHeader(ctx, receipt.BlockNumber)
+	if err != nil {
+		return fmt.Errorf("filpay: payment tx block header: %w", err)
+	}
+	minedAt := time.Unix(int64(header.Time), 0)
+	if time.Since(minedAt) > dealstore.PaidAccessTTL {
+		return fmt.Errorf("filpay: payment tx mined at %s is older than %s",
+			minedAt.UTC().Format(time.RFC3339), dealstore.PaidAccessTTL)
+	}
+	return nil
+}
+
+func (c *Client) fetchBlockHeader(ctx context.Context, blockNumber *big.Int) (*types.Header, error) {
+	if c.blockHeader != nil {
+		return c.blockHeader(ctx, blockNumber)
+	}
+	if c.eth == nil {
+		return nil, errors.New("filpay: no eth client for block header")
+	}
+	return c.eth.HeaderByNumber(ctx, blockNumber)
 }
 
 func (c *Client) erc20() (erc20API, error) {

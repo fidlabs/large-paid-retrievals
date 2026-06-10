@@ -87,16 +87,6 @@ func (s *Store) migrate() error {
 			FOREIGN KEY(pool_id) REFERENCES pools(pool_id)
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_pool_allocations_access ON pool_allocations(client, cid, access_expires_at);`,
-		// spent_payment_tx is the permanent, never-pruned guard against replaying a verified
-		// on-chain payment. pool_credits rows can be pruned with their (closed) pools, but
-		// on-chain tx receipts are immutable and could otherwise be re-submitted to re-credit
-		// a pool after pruning. This table must NOT be pruned (see prune.go).
-		`CREATE TABLE IF NOT EXISTS spent_payment_tx (
-			tx_hash TEXT PRIMARY KEY,
-			pool_id TEXT NOT NULL,
-			credited_base_units TEXT NOT NULL,
-			spent_at INTEGER NOT NULL
-		);`,
 	}
 	for _, q := range queries {
 		if _, err := s.db.Exec(q); err != nil {

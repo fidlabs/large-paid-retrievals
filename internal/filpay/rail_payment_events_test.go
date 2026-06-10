@@ -12,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/fidlabs/paid-retrievals/internal/dealstore"
 )
 
 func mustBigInt(t *testing.T, s string) *big.Int {
@@ -35,12 +36,19 @@ func testRailOneTimePaymentReceipt(t *testing.T, paymentsAddr common.Address, ra
 		t.Fatal(err)
 	}
 	return &types.Receipt{
-		Status: types.ReceiptStatusSuccessful,
+		Status:      types.ReceiptStatusSuccessful,
+		BlockNumber: big.NewInt(42),
 		Logs: []*types.Log{{
 			Address: paymentsAddr,
 			Topics:  []common.Hash{railOneTimePaymentProcessedTopic, common.BigToHash(railID)},
 			Data:    data,
 		}},
+	}
+}
+
+func withFreshBlockHeader(cl *Client) {
+	cl.blockHeader = func(ctx context.Context, blockNumber *big.Int) (*types.Header, error) {
+		return &types.Header{Time: uint64(time.Now().Unix())}, nil
 	}
 }
 
@@ -95,6 +103,7 @@ func TestCreditRailPayment(t *testing.T) {
 			return &contracts.RailViewResult{Token: token, From: payer, To: payee, EndEpoch: big.NewInt(0)}, nil
 		},
 	}, func(cl *Client) {
+		withFreshBlockHeader(cl)
 		cl.transactionReceipt = func(ctx context.Context, txHash common.Hash) (*types.Receipt, error) {
 			if txHash != tx.Hash() {
 				t.Fatalf("unexpected tx hash %s", txHash.Hex())
@@ -139,8 +148,9 @@ func TestCreditRailPaymentErrors(t *testing.T) {
 
 	tx := testTx(t)
 	c = testClient(t, &mockPayments{}, func(cl *Client) {
+		withFreshBlockHeader(cl)
 		cl.transactionReceipt = func(ctx context.Context, txHash common.Hash) (*types.Receipt, error) {
-			return &types.Receipt{Status: types.ReceiptStatusSuccessful, Logs: nil}, nil
+			return &types.Receipt{Status: types.ReceiptStatusSuccessful, BlockNumber: big.NewInt(1), Logs: nil}, nil
 		}
 	})
 	if _, _, err := c.CreditRailPayment(ctx, payer, payee, tx.Hash().Hex()); err == nil {
@@ -170,6 +180,7 @@ func TestCreditRailPaymentNonMatchingRail(t *testing.T) {
 			return &contracts.RailViewResult{Token: token, From: payer, To: other, EndEpoch: big.NewInt(0)}, nil
 		},
 	}, func(cl *Client) {
+		withFreshBlockHeader(cl)
 		cl.transactionReceipt = func(ctx context.Context, txHash common.Hash) (*types.Receipt, error) {
 			return testRailOneTimePaymentReceipt(t, cl.paymentsAddr, railID, big.NewInt(1), big.NewInt(0), big.NewInt(0)), nil
 		}
@@ -220,6 +231,7 @@ func TestCreditRailPaymentWithFees(t *testing.T) {
 			return &contracts.RailViewResult{Token: token, From: payer, To: payee, EndEpoch: big.NewInt(0)}, nil
 		},
 	}, func(cl *Client) {
+		withFreshBlockHeader(cl)
 		cl.transactionReceipt = func(ctx context.Context, txHash common.Hash) (*types.Receipt, error) {
 			if txHash != tx.Hash() {
 				t.Fatalf("unexpected tx hash %s", txHash.Hex())
@@ -231,5 +243,31 @@ func TestCreditRailPaymentWithFees(t *testing.T) {
 	ref, credited, err := c.CreditRailPayment(ctx, payer, payee, tx.Hash().Hex())
 	if err != nil || ref != tx.Hash().Hex() || credited.Cmp(wantCredit) != 0 {
 		t.Fatalf("ref=%q credited=%s want credit %s err=%v", ref, credited, wantCredit, err)
+	}
+}
+
+func TestCreditRailPaymentRejectsStaleTx(t *testing.T) {
+	ctx := context.Background()
+	payer := common.HexToAddress("0x1000000000000000000000000000000000000001")
+	payee := common.HexToAddress("0x2000000000000000000000000000000000000002")
+	token := constants.USDFCAddressesByChainID[constants.ChainIDCalibration]
+	railID := big.NewInt(9)
+	tx := testTx(t)
+
+	c := testClient(t, &mockPayments{
+		rail: func(ctx context.Context, id *big.Int) (*contracts.RailViewResult, error) {
+			return &contracts.RailViewResult{Token: token, From: payer, To: payee, EndEpoch: big.NewInt(0)}, nil
+		},
+	}, func(cl *Client) {
+		cl.transactionReceipt = func(ctx context.Context, txHash common.Hash) (*types.Receipt, error) {
+			return testRailOneTimePaymentReceipt(t, cl.paymentsAddr, railID, big.NewInt(1), big.NewInt(0), big.NewInt(0)), nil
+		}
+		cl.blockHeader = func(ctx context.Context, blockNumber *big.Int) (*types.Header, error) {
+			stale := time.Now().Add(-dealstore.PaidAccessTTL - time.Hour)
+			return &types.Header{Time: uint64(stale.Unix())}, nil
+		}
+	})
+	if _, _, err := c.CreditRailPayment(ctx, payer, payee, tx.Hash().Hex()); err == nil || !strings.Contains(err.Error(), "older than") {
+		t.Fatalf("expected stale tx error, got %v", err)
 	}
 }

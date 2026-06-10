@@ -62,12 +62,9 @@ func (s *Store) CreditPool(ctx context.Context, credit dealstore.PoolCredit) err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Idempotency guard: spent_payment_tx is permanent and never pruned, so a verified
-	// on-chain payment can fund the pool at most once even after pool_credits/pools are
-	// pruned. (pool_credits also has a UNIQUE settle_tx_hash, but it is prunable.)
 	var existingPoolID string
 	err = tx.QueryRowContext(ctx, `
-		SELECT pool_id FROM spent_payment_tx WHERE tx_hash = ?
+		SELECT pool_id FROM pool_credits WHERE settle_tx_hash = ?
 	`, credit.SettleTxHash).Scan(&existingPoolID)
 	if err == nil {
 		return tx.Commit()
@@ -98,13 +95,6 @@ func (s *Store) CreditPool(ctx context.Context, credit dealstore.PoolCredit) err
 		INSERT INTO pool_credits(credit_id, pool_id, settle_tx_hash, credited_base_units, credited_at)
 		VALUES(?,?,?,?,?)
 	`, uuid.NewString(), poolID, credit.SettleTxHash, credit.CreditedBaseUnits.String(), now); err != nil {
-		return err
-	}
-	// Record the permanent (never-pruned) spend so this on-chain tx can never be re-credited.
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO spent_payment_tx(tx_hash, pool_id, credited_base_units, spent_at)
-		VALUES(?,?,?,?)
-	`, credit.SettleTxHash, poolID, credit.CreditedBaseUnits.String(), now); err != nil {
 		return err
 	}
 	var settledSoFar string

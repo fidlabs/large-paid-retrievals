@@ -19,10 +19,6 @@ type PruneStats struct {
 // Prune deletes SQLite rows older than retention and runs VACUUM to reclaim disk.
 // Retention is measured from last activity timestamps (quote, allocation expiry, pool close).
 // Open settlement pools and deals with active allocations are never removed.
-//
-// IMPORTANT: spent_payment_tx must never be pruned. It is the permanent replay guard for
-// verified on-chain payments; deleting rows there would let an immutable on-chain payment tx
-// be re-submitted to re-credit a pool. Do not add a DELETE for it here.
 func (s *Store) Prune(ctx context.Context, retention time.Duration) (PruneStats, error) {
 	if retention <= 0 {
 		return PruneStats{}, nil

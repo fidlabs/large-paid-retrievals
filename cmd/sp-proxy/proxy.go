@@ -27,8 +27,6 @@ type proxyAppSettings struct {
 	ClientQuery         string
 	ClientHeader        string
 	MaxSkewSec          int
-	QuoteRateLimitRPS   float64
-	QuoteRateLimitBurst int
 	Verbose             bool
 
 	PayRPCURL          string
@@ -88,17 +86,15 @@ func buildProxyHandler(
 
 	filTrace := settings.PayDebug || settings.Verbose
 	config := piecepayment.Config{
-		PriceUSDFCPerGB:     settings.PriceUSDFCPerGB,
-		ClientQuery:         settings.ClientQuery,
-		ClientHeader:        settings.ClientHeader,
-		MaxClockSkew:        time.Duration(settings.MaxSkewSec) * time.Second,
-		QuotePayee0x:        payee,
-		PayDebug:            filTrace,
-		FilecoinPay:         fc,
-		Logger:              logger,
-		Store:               store,
-		QuoteRateLimitRPS:   settings.QuoteRateLimitRPS,
-		QuoteRateLimitBurst: settings.QuoteRateLimitBurst,
+		PriceUSDFCPerGB: settings.PriceUSDFCPerGB,
+		ClientQuery:     settings.ClientQuery,
+		ClientHeader:    settings.ClientHeader,
+		MaxClockSkew:    time.Duration(settings.MaxSkewSec) * time.Second,
+		QuotePayee0x:    payee,
+		PayDebug:        filTrace,
+		FilecoinPay:     fc,
+		Logger:          logger,
+		Store:           store,
 	}
 	svc := piecepayment.NewRetrievalService(config)
 
