@@ -245,7 +245,7 @@ Optional: expose **`HEAD`** on the public proxy path for client size probes (the
 |------|---------|
 | `--listen` | Client-facing listen address (default `:8787` = all interfaces; use `0.0.0.0:8787` explicitly in production) |
 | `--db` | SQLite deal state |
-| `--db-retention` | Max age of SQLite rows before automatic pruning (default `168h` / 1 week); `0` disables |
+| `--db-retention` | Max age of SQLite rows before automatic pruning (default `168h` / 1 week); must be `≥ 12h` or `0` to disable |
 | `--pay-withdraw-interval` | Background batch withdraw of Filecoin Pay proceeds to the settler wallet (default `1h`); `0` disables |
 | `--price-usdfc-per-gb` | USDFC per billed GiB |
 | `--upstream-host`, `--upstream-port` | Loopback Curio/Boost (`127.0.0.1` + port) |
@@ -274,6 +274,8 @@ The dump is also noted in the startup log (`sigusr1_dump=…`).
 
 A background task runs every hour (and once at startup) to prune SQLite rows older than **`--db-retention`** (default **1 week**): expired nonces, expired deal allocations, unpaid/old deals, and closed settlement pools with their credits. **`VACUUM`** runs after each prune to reclaim disk. Open pools and deals with active paid-access windows are kept. Set `--db-retention 0` to disable automatic pruning.
 
+**`--db-retention` must be at least 12 hours** (or `0`) so `pool_credits` idempotency rows outlive the on-chain payment freshness window. `sp-proxy` rejects shorter values at startup; prune also floors closed-pool retention at 12h as defense in depth.
+
 ### Payee withdraw
 
 A background worker withdraws available USDFC from the settler’s Filecoin Pay account to wallet on **`--pay-withdraw-interval`** (default **1 hour**), including once at startup. This batches on-chain proceeds so concurrent retrievals from multiple client rails do not race on withdraw nonces. Set `--pay-withdraw-interval 0` to disable automatic withdraw.
@@ -288,7 +290,7 @@ Deploy `sp-proxy` behind infrastructure that provides:
 - **Rate limiting** — the unauthenticated quote path (upstream `HEAD` probe + SQLite quote insert per anonymous `GET`) is relatively expensive; limit per client IP or API key at your reverse proxy, CDN, or API gateway (for example nginx `limit_req`, Cloudflare, or an AWS WAF rule).
 - **Network policy** (optional) — restrict who can reach the public listen address if the SP should not be openly quotable.
 
-The service intentionally does not implement TLS or rate limiting itself; those belong at the internet edge.
+The service intentionally does not implement TLS or rate limiting itself; those belong at the internet edge. **Public exposure without TLS and edge rate limiting is not a supported deployment.**
 
 ---
 

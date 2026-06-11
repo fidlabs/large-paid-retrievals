@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fidlabs/paid-retrievals/internal/dealstore"
 	pp "github.com/fidlabs/paid-retrievals/internal/piecepayment"
 )
 
@@ -155,6 +156,84 @@ func TestCreditPoolIdempotentOnSettleTxHash(t *testing.T) {
 	}
 	if pool == nil || pool.RemainingBaseUnits != price.String() {
 		t.Fatalf("pool balance=%+v want remaining %s", pool, price)
+	}
+}
+
+// TestPrunePoolCreditsFlooredAtPaidAccessTTL verifies that pool_credits/pools are not
+// pruned until PaidAccessTTL after close even when retention is shorter — so
+// pool_credits.settle_tx_hash idempotency covers the on-chain freshness window.
+func TestPrunePoolCreditsFlooredAtPaidAccessTTL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sp.db")
+	s, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+
+	const (
+		dealUUID = "11111111-2222-3333-4444-555555555555"
+		payer    = "0x1111111111111111111111111111111111111111"
+		payee    = "0x2222222222222222222222222222222222222222"
+		cid      = "bafkreic3gqso3booyry4fwc5wfnhaio574lami3am6nv4k6q6u2legzzdm"
+		settleTx = "0xsettle-fresh"
+	)
+	if err := s.InsertQuote(ctx, dealUUID, payer, cid, "0.01", payee); err != nil {
+		t.Fatal(err)
+	}
+	price := big.NewInt(100_000)
+	credit := pp.PoolCredit{
+		Payer: payer, Payee: payee, SettleTxHash: settleTx, CreditedBaseUnits: price,
+	}
+	if err := s.CreditPool(ctx, credit); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.TryAllocateDeal(ctx, pp.AllocateDealRequest{
+		DealUUID: dealUUID, Payer: payer, Payee: payee, Client: payer, CID: cid,
+		PriceBaseUnits: price, SettleTxHash: settleTx, AccessTTL: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	closedAt := time.Now().Add(-7 * time.Hour).Unix()
+	if err := setPoolClosedAt(ctx, s, payer, payee, closedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := setDealQuotedAt(ctx, s, dealUUID, closedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := setAllocationAccessExpires(ctx, s, dealUUID, closedAt); err != nil {
+		t.Fatal(err)
+	}
+
+	shortRetention := 6 * time.Hour
+	if shortRetention >= dealstore.PaidAccessTTL {
+		t.Fatalf("test retention must be < PaidAccessTTL")
+	}
+	stats, err := s.Prune(ctx, shortRetention)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Pools != 0 || stats.PoolCredits != 0 {
+		t.Fatalf("pool/credits pruned too early with short retention, stats=%+v", stats)
+	}
+	if err := s.CreditPool(ctx, credit); err != nil {
+		t.Fatalf("replay credit should be no-op while credit row exists: %v", err)
+	}
+	if pool, err := s.OpenPool(ctx, payer, payee); err != nil || pool != nil {
+		t.Fatalf("replayed payment re-opened pool: %+v err=%v", pool, err)
+	}
+
+	// Past PaidAccessTTL after close, the floored cutoff allows prune.
+	staleClosed := time.Now().Add(-dealstore.PaidAccessTTL - time.Hour).Unix()
+	if err := setPoolClosedAt(ctx, s, payer, payee, staleClosed); err != nil {
+		t.Fatal(err)
+	}
+	stats, err = s.Prune(ctx, shortRetention)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Pools == 0 || stats.PoolCredits == 0 {
+		t.Fatalf("expected stale pool/credits pruned, stats=%+v", stats)
 	}
 }
 

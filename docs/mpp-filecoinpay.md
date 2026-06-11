@@ -128,7 +128,7 @@ If any check fails:
 ## Security Notes
 
 - On-chain rail charge receipts are authoritative; the SP does not trust client-reported balances.
-- Payment txs older than 12 hours are rejected, so an immutable on-chain payment cannot re-fund a pool after SQLite rows are pruned.
+- Payment txs older than 12 hours are rejected, so an immutable on-chain payment cannot re-fund a pool after SQLite rows are pruned. `pool_credits`/`pools` prune is floored at 12h and `sp-proxy` rejects `--db-retention` shorter than that (defense in depth).
 - Nonce replay is blocked on first settlement; paid-access retries within the allocation window skip nonce consumption.
 - On first settlement, piece bytes are served only after nonce consume, then a pool allocation attempt; if the pool balance is insufficient, verified rail receipt and pool credit, then a second allocation attempt — to avoid concurrent drain or similar. Paid-access retries require an active allocation and skip nonce consumption and pool drawdown.
 - Successful paid responses return a `Payment-Receipt` (base64url-no-pad JSON).
