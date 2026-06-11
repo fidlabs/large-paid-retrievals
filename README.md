@@ -290,7 +290,7 @@ Deploy `sp-proxy` behind infrastructure that provides:
 - **Rate limiting** — the unauthenticated quote path (upstream `HEAD` probe + SQLite quote insert per anonymous `GET`) is relatively expensive; limit per client IP or API key at your reverse proxy, CDN, or API gateway (for example nginx `limit_req`, Cloudflare, or an AWS WAF rule).
 - **Network policy** (optional) — restrict who can reach the public listen address if the SP should not be openly quotable.
 
-The service intentionally does not implement TLS or rate limiting itself; those belong at the internet edge. **Public exposure without TLS and edge rate limiting is not a supported deployment.**
+The service intentionally does not implement TLS or rate limiting itself; those belong at the internet edge.
 
 ---
 
