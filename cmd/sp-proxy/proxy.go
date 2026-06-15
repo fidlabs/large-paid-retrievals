@@ -164,7 +164,7 @@ func runProxyApp(settings proxyAppSettings) error {
 	logger.Info("filecoin pay", "payments", fc.PaymentsAddress().Hex(), "payee_0x", payee, "settler", fc.SignerAddress().Hex(),
 		"pay_debug_flag", settings.PayDebug, "filpay_trace", filTrace, "pool_trace", filTrace, "pay_http_trace", filTrace)
 	logger.Info("sp-proxy listening", "listen", settings.Listen, "db", settings.DBPath, "price_usdfc_per_gb", settings.PriceUSDFCPerGB, "verbose", settings.Verbose,
-		"sigusr1_dump", "kill -USR1 <pid> dumps deals and settlement pools to stderr")
+		"sigusr1_dump", "Unix only: kill -USR1 <pid> dumps deals and settlement pools to stderr")
 
 	startSIGUSR1StateDump(store, logger)
 	startDBRetentionPruner(store, settings.DBRetention, logger)

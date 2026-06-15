@@ -257,11 +257,11 @@ Optional: expose **`HEAD`** on the public proxy path for client size probes (the
 
 ### Monitoring payments
 
-After a successful retrieval, logs include the Filecoin Pay **rail ID** and settle tx. View rail status on [pay.filecoin.cloud](https://pay.filecoin.cloud/) (mainnet: `/rails/<id>`; Calibration: `/calibration/rails/<id>`).
+At default log level, a successful retrieval logs `paid retrieval authorized` with `deal_uuid`, `client`, `cid`, and `pool_id` (or `paid retrieval reused` on paid-access retries). With **`--pay-debug`** or **`--verbose`**, Filecoin Pay tracing may also emit **`rail_id`** and **`payment_tx_hash`** when the proxy runs on-chain payment steps (e.g. `CreditRailPayment` when the pool balance is insufficient); drawdowns from a pre-funded pool or paid-access retries may not produce those fields. View rail status on [pay.filecoin.cloud](https://pay.filecoin.cloud/) (mainnet: `/rails/<id>`; Calibration: `/calibration/rails/<id>`).
 
-### Inspecting quotes and pool state (`SIGUSR1`)
+### Inspecting quotes and pool state (`SIGUSR1`, Unix only)
 
-`sp-proxy` handles **`SIGUSR1`** by printing all deals (quotes), settlement pools, credits, and allocations from the SQLite database to **stderr** — useful for debugging payment or pool balance issues without stopping the process.
+On **Unix** (Linux, macOS, etc.), `sp-proxy` handles **`SIGUSR1`** by printing all deals (quotes), settlement pools, credits, and allocations from the SQLite database to **stderr** — useful for debugging payment or pool balance issues without stopping the process. On Windows and other non-Unix platforms the binary builds, but this signal handler is a no-op.
 
 ```bash
 kill -USR1 $(pidof sp-proxy)
