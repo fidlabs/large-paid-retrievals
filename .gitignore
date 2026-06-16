@@ -12,14 +12,20 @@ vendor/
 .task/
 .venv-pdf/
 *.db
-*.key
 *.car
 *.partial
+
+# Private keys — never commit. Covers client.key/sp.key and the *.priv
+# wallet exports the keygen instructions produce (e.g. f1....calib.priv).
+*.key
+*.priv
+*.priv.*
 
 # IDE
 .idea/
 .vscode/
 .cursor/
+.claude/
 *.swp
 
 # Proxy / local state

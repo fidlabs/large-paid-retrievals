@@ -4,8 +4,9 @@
 // Flow (implemented by sqlitestore.Store, orchestrated by piecepayment):
 //
 //  1. InsertQuote — client receives 402; a Deal row is created (one deal_uuid per quote).
-//  2. On first paid GET, CreditPool adds verified rail proceeds to the payer→payee pool
-//     (keyed by PoolCredit.SettleTxHash for idempotency).
+//  2. On first paid GET, CreditPool adds verified rail proceeds to the payer→payee pool.
+//     Idempotency is enforced by pool_credits.settle_tx_hash UNIQUE while rows exist; txs
+//     older than PaidAccessTTL are rejected at on-chain verification before crediting.
 //  3. TryAllocateDeal debits the pool (AllocateDealRequest) and creates a DealAllocation
 //     granting the client a time-limited paid-access window for that deal/cid.
 //  4. GetActiveAllocation — while AccessExpiresAt is in the future, retries reuse the same
@@ -22,6 +23,10 @@ import (
 	"math/big"
 	"time"
 )
+
+// PaidAccessTTL is how long a client may retry a paid GET without re-charging, and the
+// maximum age of an on-chain payment tx that may fund a settlement pool.
+const PaidAccessTTL = 12 * time.Hour
 
 var (
 	ErrDealNotFound     = errors.New("deal not found")

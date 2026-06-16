@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
+
+	"github.com/fidlabs/paid-retrievals/internal/dealstore"
 )
 
 // PruneStats counts rows removed by Prune.
@@ -19,11 +21,14 @@ type PruneStats struct {
 // Prune deletes SQLite rows older than retention and runs VACUUM to reclaim disk.
 // Retention is measured from last activity timestamps (quote, allocation expiry, pool close).
 // Open settlement pools and deals with active allocations are never removed.
+//
+// pool_credits and pools use max(retention, dealstore.PaidAccessTTL) so idempotency rows
+// outlive the on-chain payment freshness window even if retention is misconfigured short.
 func (s *Store) Prune(ctx context.Context, retention time.Duration) (PruneStats, error) {
 	if retention <= 0 {
 		return PruneStats{}, nil
 	}
-	cutoff := time.Now().Add(-retention).Unix()
+	cutoff, poolCutoff := pruneCutoffs(retention)
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -54,14 +59,14 @@ func (s *Store) Prune(ctx context.Context, retention time.Duration) (PruneStats,
 			SELECT pool_id FROM pools
 			WHERE closed_at IS NOT NULL AND closed_at < ?
 		)
-	`, cutoff)
+	`, poolCutoff)
 	if err != nil {
 		return stats, fmt.Errorf("prune pool_credits: %w", err)
 	}
 	stats.Pools, err = execDelete(ctx, tx, `
 		DELETE FROM pools
 		WHERE closed_at IS NOT NULL AND closed_at < ?
-	`, cutoff)
+	`, poolCutoff)
 	if err != nil {
 		return stats, fmt.Errorf("prune pools: %w", err)
 	}
@@ -76,6 +81,17 @@ func (s *Store) Prune(ctx context.Context, retention time.Duration) (PruneStats,
 		return stats, fmt.Errorf("prune vacuum: %w", err)
 	}
 	return stats, nil
+}
+
+func pruneCutoffs(retention time.Duration) (cutoff, poolCutoff int64) {
+	now := time.Now()
+	cutoff = now.Add(-retention).Unix()
+	poolRetention := retention
+	if poolRetention < dealstore.PaidAccessTTL {
+		poolRetention = dealstore.PaidAccessTTL
+	}
+	poolCutoff = now.Add(-poolRetention).Unix()
+	return cutoff, poolCutoff
 }
 
 func execDelete(ctx context.Context, tx *sql.Tx, query string, args ...any) (int64, error) {

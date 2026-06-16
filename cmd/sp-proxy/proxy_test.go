@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/fidlabs/paid-retrievals/internal/filpay"
@@ -411,6 +412,12 @@ func TestRunProxyAppValidation(t *testing.T) {
 	settings.UpstreamPort = 0
 	if err := runProxyApp(settings); err == nil {
 		t.Fatal("expected invalid port")
+	}
+
+	settings.UpstreamPort = 8788
+	settings.DBRetention = 6 * time.Hour
+	if err := runProxyApp(settings); err == nil {
+		t.Fatal("expected db retention shorter than paid-access TTL error")
 	}
 }
 

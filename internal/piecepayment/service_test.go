@@ -14,6 +14,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/fidlabs/paid-retrievals/internal/dealstore"
 	"github.com/fidlabs/paid-retrievals/internal/mpp"
 )
 
@@ -342,7 +343,7 @@ func TestAuthorizeAndSettleErrors(t *testing.T) {
 		paidStore.allocations = map[string]*DealAllocation{
 			chPaid.ID: {
 				DealUUID: chPaid.ID, Client: clientPaid, CID: testPieceCID,
-				SettleTxHash: paidTx, AllocatedAt: now, AccessExpiresAt: now + int64(paidAccessTTL.Seconds()),
+				SettleTxHash: paidTx, AllocatedAt: now, AccessExpiresAt: now + int64(dealstore.PaidAccessTTL.Seconds()),
 			},
 		}
 		raw := buildProof(t, pkPaid, chPaid, clientPaid, testPieceCID, host, "n-exp-paid", time.Now().Add(-time.Hour).Unix())

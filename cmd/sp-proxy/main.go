@@ -30,7 +30,7 @@ func root() *cobra.Command {
 	}
 	c.Flags().StringVar(&settings.Listen, "listen", ":8787", "Listen address")
 	c.Flags().StringVar(&settings.DBPath, "db", "./sp-proxy.db", "SQLite deals database path")
-	c.Flags().DurationVar(&settings.DBRetention, "db-retention", 7*24*time.Hour, "Max age of SQLite rows before automatic pruning (unpaid deals, expired allocations, closed pools); 0 disables")
+	c.Flags().DurationVar(&settings.DBRetention, "db-retention", 7*24*time.Hour, "Max age of SQLite rows before automatic pruning (unpaid deals, expired allocations, closed pools); must be >= 12h or 0 to disable")
 	c.Flags().DurationVar(&settings.PayWithdrawInterval, "pay-withdraw-interval", time.Hour, "Interval for background batch withdraw of Filecoin Pay proceeds to the settler wallet; 0 disables")
 	c.Flags().StringVar(&settings.PriceUSDFCPerGB, "price-usdfc-per-gb", "0.01", "USDFC per GiB; total charge is rate * ceil(piece_bytes/2^30) from upstream HEAD Content-Length")
 	c.Flags().StringVar(&settings.ClientQuery, "client-query", "client", "Query key used to identify client on challenge requests")

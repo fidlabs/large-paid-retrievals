@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/fidlabs/paid-retrievals/internal/dealstore"
 	"github.com/fidlabs/paid-retrievals/internal/filpay"
 	piecepayment "github.com/fidlabs/paid-retrievals/internal/piecepayment"
 	"github.com/fidlabs/paid-retrievals/internal/sqlitestore"
@@ -130,6 +131,9 @@ func buildProxyHandler(
 func runProxyApp(settings proxyAppSettings) error {
 	upstreamURL, err := validateUpstream(settings.UpstreamHost, settings.UpstreamPort)
 	if err != nil {
+		return err
+	}
+	if err := dealstore.ValidateDBRetention(settings.DBRetention); err != nil {
 		return err
 	}
 
