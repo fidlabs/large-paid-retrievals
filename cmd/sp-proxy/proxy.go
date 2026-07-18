@@ -15,6 +15,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/fidlabs/paid-retrievals/internal/dealstore"
 	"github.com/fidlabs/paid-retrievals/internal/filpay"
+	"github.com/fidlabs/paid-retrievals/internal/pieceaccess"
 	piecepayment "github.com/fidlabs/paid-retrievals/internal/piecepayment"
 	"github.com/fidlabs/paid-retrievals/internal/sqlitestore"
 )
@@ -98,8 +99,9 @@ func buildProxyHandler(
 		Store:           store,
 	}
 	svc := piecepayment.NewRetrievalService(config)
+	access := pieceaccess.NewAuthorizer()
 
-	pieceHandler := svc.PiecePaymentMiddleware(MaxHeaderSize)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	pieceHandler := buildPieceHandler(access, svc, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamProxy.ServeHTTP(w, r)
 	}))
 
@@ -175,6 +177,10 @@ func runProxyApp(settings proxyAppSettings) error {
 	startPayeeWithdrawWorker(fc, settings.PayWithdrawInterval, logger)
 
 	return proxyListenAndServe(settings.Listen, handler)
+}
+
+func buildPieceHandler(access *pieceaccess.Authorizer, svc *piecepayment.RetrievalService, upstream http.Handler) http.Handler {
+	return access.Middleware(svc.PiecePaymentMiddleware(MaxHeaderSize)(upstream))
 }
 
 // preserveUpstreamContentLength sets resp.ContentLength from a Content-Length header
