@@ -147,6 +147,9 @@ func newPorepDealLookup(_ context.Context, settings proxyAppSettings, logger *sl
 	if cdpURL == "" {
 		return nil, func() {}, nil
 	}
+	if settings.PorepProviderID == 0 {
+		return nil, nil, fmt.Errorf("--porep-provider-id is required when --porep-cdp-url is set")
+	}
 	lookup, err := pieceaccess.NewCDPLookup(pieceaccess.CDPLookupConfig{
 		BaseURL:    cdpURL,
 		ProviderID: settings.PorepProviderID,
@@ -200,9 +203,7 @@ func runProxyApp(settings proxyAppSettings) error {
 
 	dealLookup, closeLookup, err := newPorepDealLookup(ctx, settings, logger)
 	if err != nil {
-		logger.Warn("porep deal lookup disabled", "error", err)
-		dealLookup = nil
-		closeLookup = func() {}
+		return fmt.Errorf("porep deal lookup: %w", err)
 	}
 	defer closeLookup()
 

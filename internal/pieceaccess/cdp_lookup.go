@@ -22,11 +22,11 @@ const (
 // CDPLookupConfig configures HTTP lookup against CDP GET /po-rep/deals.
 type CDPLookupConfig struct {
 	BaseURL    string // e.g. https://cdp.allocator.tech or http://127.0.0.1:23300
-	ProviderID uint64 // optional; when set, passed as providerId=f0… filter
+	ProviderID uint64 // when set, passed as providerId=f0… filter and applied client-side
 	HTTPClient *http.Client
 }
 
-// CDPLookup resolves a PoRep deal via CDP pieceCID query.
+// CDPLookup resolves PoRep deals via CDP pieceCID query.
 type CDPLookup struct {
 	baseURL    string
 	providerID uint64
@@ -53,8 +53,9 @@ func NewCDPLookup(cfg CDPLookupConfig) (*CDPLookup, error) {
 	}, nil
 }
 
-// LookupByPieceCID implements DealLookup.
-func (c *CDPLookup) LookupByPieceCID(ctx context.Context, pieceCID string) (*Deal, error) {
+// LookupByPieceCID implements DealLookup. It returns all deals for the piece
+// (optionally filtered to ProviderID), so access checks can match any private owner.
+func (c *CDPLookup) LookupByPieceCID(ctx context.Context, pieceCID string) ([]*Deal, error) {
 	if c == nil {
 		return nil, fmt.Errorf("pieceaccess: CDPLookup is nil")
 	}
@@ -80,32 +81,21 @@ func (c *CDPLookup) LookupByPieceCID(ctx context.Context, pieceCID string) (*Dea
 		return nil, fmt.Errorf("%w: CDP returned no deals for pieceCID", ErrDealNotFound)
 	}
 
-	return pickBestCDPDeal(page.Data).toDeal()
-}
-
-// pickBestCDPDeal prefers a PUBLIC deal (any client may retrieve), then an active
-// deal, then the first result.
-func pickBestCDPDeal(deals []cdpDeal) *cdpDeal {
-	var firstPublic, firstActive, first *cdpDeal
-	for i := range deals {
-		d := &deals[i]
-		if first == nil {
-			first = d
+	out := make([]*Deal, 0, len(page.Data))
+	for i := range page.Data {
+		d, err := page.Data[i].toDeal()
+		if err != nil {
+			return nil, err
 		}
-		if firstPublic == nil && ParseDealType(d.DealType) == DealTypePublic {
-			firstPublic = d
+		if c.providerID != 0 && d.ProviderID != c.providerID {
+			continue
 		}
-		if firstActive == nil && d.Active {
-			firstActive = d
-		}
+		out = append(out, d)
 	}
-	if firstPublic != nil {
-		return firstPublic
+	if len(out) == 0 {
+		return nil, fmt.Errorf("%w: no deals for provider after filter", ErrDealNotFound)
 	}
-	if firstActive != nil {
-		return firstActive
-	}
-	return first
+	return out, nil
 }
 
 func (c *CDPLookup) getJSON(ctx context.Context, rawURL string, dest any) error {

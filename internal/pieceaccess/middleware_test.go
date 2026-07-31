@@ -18,14 +18,24 @@ import (
 )
 
 type stubLookup struct {
-	deal *pieceaccess.Deal
-	err  error
-	cid  string
+	deal  *pieceaccess.Deal
+	deals []*pieceaccess.Deal
+	err   error
+	cid   string
 }
 
-func (s *stubLookup) LookupByPieceCID(_ context.Context, pieceCID string) (*pieceaccess.Deal, error) {
+func (s *stubLookup) LookupByPieceCID(_ context.Context, pieceCID string) ([]*pieceaccess.Deal, error) {
 	s.cid = pieceCID
-	return s.deal, s.err
+	if s.err != nil {
+		return nil, s.err
+	}
+	if len(s.deals) > 0 {
+		return s.deals, nil
+	}
+	if s.deal != nil {
+		return []*pieceaccess.Deal{s.deal}, nil
+	}
+	return nil, nil
 }
 
 func TestMiddlewarePassthrough(t *testing.T) {
@@ -294,6 +304,63 @@ func TestMiddlewarePrivateDealOwnerAllowed(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	if !called || rec.Code != http.StatusOK {
 		t.Fatalf("called=%v code=%d", called, rec.Code)
+	}
+}
+
+func TestMiddlewareMultiplePrivateDealsMatchingOwnerAllowed(t *testing.T) {
+	t.Parallel()
+	ownerA := common.HexToAddress("0xAF6C83b9D33DdEAD8810011abb5cA1Cfc2d8754a")
+	ownerB := common.HexToAddress("0x0553e4ed281E5a0A0654F6E46a0F80b7153ad506")
+	lookup := &stubLookup{deals: []*pieceaccess.Deal{
+		{DealID: "1", Client: ownerA, DealType: pieceaccess.DealTypePrivate},
+		{DealID: "2", Client: ownerB, DealType: pieceaccess.DealTypePrivate},
+	}}
+	called := false
+	var gotDealID string
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		if d, ok := pieceaccess.DealFromContext(r.Context()); ok {
+			gotDealID = d.DealID
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := pieceaccess.NewAuthorizer(pieceaccess.WithDealLookup(lookup)).Middleware(next)
+
+	// Owner B must be allowed even when listed second (not the "picked" first deal).
+	req := httptest.NewRequest(http.MethodGet, "/piece/baga6ea4seaqabc?client="+ownerB.Hex(), nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if !called || rec.Code != http.StatusOK {
+		t.Fatalf("called=%v code=%d", called, rec.Code)
+	}
+	if gotDealID != "2" {
+		t.Fatalf("representative deal: got %q want 2", gotDealID)
+	}
+}
+
+func TestMiddlewareMultiplePrivateDealsPrefersPublic(t *testing.T) {
+	t.Parallel()
+	owner := common.HexToAddress("0xAF6C83b9D33DdEAD8810011abb5cA1Cfc2d8754a")
+	lookup := &stubLookup{deals: []*pieceaccess.Deal{
+		{DealID: "1", Client: owner, DealType: pieceaccess.DealTypePrivate},
+		{DealID: "2", Client: common.HexToAddress("0x1"), DealType: pieceaccess.DealTypePublic},
+	}}
+	var gotType pieceaccess.DealType
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if d, ok := pieceaccess.DealFromContext(r.Context()); ok {
+			gotType = d.DealType
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := pieceaccess.NewAuthorizer(pieceaccess.WithDealLookup(lookup)).Middleware(next)
+	req := httptest.NewRequest(http.MethodGet, "/piece/baga6ea4seaqabc", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d", rec.Code)
+	}
+	if gotType != pieceaccess.DealTypePublic {
+		t.Fatalf("representative type: got %v", gotType)
 	}
 }
 

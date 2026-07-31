@@ -489,6 +489,57 @@ func TestRunProxyAppValidation(t *testing.T) {
 	}
 }
 
+func TestNewPorepDealLookupRequiresProviderID(t *testing.T) {
+	t.Parallel()
+	_, _, err := newPorepDealLookup(context.Background(), proxyAppSettings{
+		PorepCDPURL:     "http://127.0.0.1:23300",
+		PorepProviderID: 0,
+	}, testLogger())
+	if err == nil || !strings.Contains(err.Error(), "--porep-provider-id") {
+		t.Fatalf("got %v", err)
+	}
+
+	lookup, closeFn, err := newPorepDealLookup(context.Background(), proxyAppSettings{}, testLogger())
+	if err != nil || lookup != nil {
+		t.Fatalf("empty CDP URL should disable lookup: lookup=%v err=%v", lookup, err)
+	}
+	closeFn()
+
+	lookup, closeFn, err = newPorepDealLookup(context.Background(), proxyAppSettings{
+		PorepCDPURL:     "http://127.0.0.1:23300",
+		PorepProviderID: 1004,
+	}, testLogger())
+	if err != nil || lookup == nil {
+		t.Fatalf("got lookup=%v err=%v", lookup, err)
+	}
+	closeFn()
+}
+
+func TestRunProxyAppCDPRequiresProviderID(t *testing.T) {
+	defer restoreProxyHooks(t)()
+
+	upstream := upstreamPieceServer(t)
+	defer upstream.Close()
+	host, port := upstreamHostPort(t, upstream.URL)
+
+	proxyOpenStore = sqlitestore.OpenStore
+	proxyNewFilpayClient = stubFilpayFactory()
+	proxyListenAndServe = func(string, http.Handler) error { return nil }
+
+	settings := proxyAppSettings{
+		DBPath:          filepath.Join(t.TempDir(), "sp.db"),
+		UpstreamHost:    host,
+		UpstreamPort:    port,
+		PayPayeeAddress: testQuotePayee0x,
+		PorepCDPURL:     "http://127.0.0.1:23300",
+		PorepProviderID: 0,
+	}
+	err := runProxyApp(settings)
+	if err == nil || !strings.Contains(err.Error(), "porep deal lookup") {
+		t.Fatalf("got %v", err)
+	}
+}
+
 func TestRunProxyAppInvalidPayee(t *testing.T) {
 	defer restoreProxyHooks(t)()
 

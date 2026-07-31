@@ -29,7 +29,7 @@ func AccessChecked(ctx context.Context) bool {
 	return ok
 }
 
-// DealFromContext returns the PoRep deal resolved for this request, if any.
+// DealFromContext returns a representative PoRep deal for this request, if any.
 func DealFromContext(ctx context.Context) (*Deal, bool) {
 	d, ok := ctx.Value(dealContextKey{}).(*Deal)
 	return d, ok && d != nil
@@ -95,8 +95,11 @@ func (a *Authorizer) Middleware(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), accessContextKey{}, struct{}{})
 		if a.lookup != nil {
 			if cid, ok := parsePiecePath(r.URL.Path); ok {
-				deal, err := a.lookup.LookupByPieceCID(ctx, cid)
-				if err == nil && deal != nil {
+				deals, err := a.lookup.LookupByPieceCID(ctx, cid)
+				requester := a.requesterAddress(r)
+				var deal *Deal
+				if err == nil && len(deals) > 0 {
+					deal = selectRepresentativeDeal(deals, requester)
 					ctx = context.WithValue(ctx, dealContextKey{}, deal)
 					a.logDeal(cid, deal)
 				} else if errors.Is(err, ErrDealNotFound) {
@@ -104,7 +107,7 @@ func (a *Authorizer) Middleware(next http.Handler) http.Handler {
 				} else if err != nil {
 					a.logger.Warn("porep deal lookup failed", "piece_cid", cid, "error", err)
 				}
-				if denied, reason := a.denyAccess(r, deal, err); denied {
+				if denied, reason := a.denyAccess(r, deals, err); denied {
 					a.logger.Info("porep piece access denied",
 						"piece_cid", cid,
 						"deal_id", dealID(deal),
@@ -126,13 +129,44 @@ func dealID(deal *Deal) string {
 	return deal.DealID
 }
 
+// selectRepresentativeDeal picks one deal for logging/context: public first,
+// then a private deal owned by requester, then the first deal.
+func selectRepresentativeDeal(deals []*Deal, requester common.Address) *Deal {
+	var firstPublic, matchingPrivate, first *Deal
+	for _, d := range deals {
+		if d == nil {
+			continue
+		}
+		if first == nil {
+			first = d
+		}
+		switch d.DealType {
+		case DealTypePublic:
+			if firstPublic == nil {
+				firstPublic = d
+			}
+		case DealTypePrivate:
+			if matchingPrivate == nil && requester != (common.Address{}) && sameAddress(requester, d.Client) {
+				matchingPrivate = d
+			}
+		}
+	}
+	if firstPublic != nil {
+		return firstPublic
+	}
+	if matchingPrivate != nil {
+		return matchingPrivate
+	}
+	return first
+}
+
 // denyAccess implements piece access policy for probes and paid retrieval.
 //
 // HEAD is never denied (size/existence are public).
-// Unauthenticated GET: only public deals may proceed (402/200); private → 403.
-// GET with ?client=: public OK; private OK only when client is the deal owner.
-// Paid GET (Authorization + client): default-deny; same public/private rules.
-func (a *Authorizer) denyAccess(r *http.Request, deal *Deal, lookupErr error) (bool, string) {
+// Access is allowed if any matching deal is public, or any private deal is owned
+// by the requester. Anonymous GET on private-only pieces returns 403.
+// Paid GET (Authorization + client): default-deny when no usable deal.
+func (a *Authorizer) denyAccess(r *http.Request, deals []*Deal, lookupErr error) (bool, string) {
 	if r.Method == http.MethodHead {
 		return false, ""
 	}
@@ -144,33 +178,44 @@ func (a *Authorizer) denyAccess(r *http.Request, deal *Deal, lookupErr error) (b
 		if lookupErr != nil && !errors.Is(lookupErr, ErrDealNotFound) {
 			return true, "deal lookup failed"
 		}
-		if deal == nil || errors.Is(lookupErr, ErrDealNotFound) {
+		if len(deals) == 0 || errors.Is(lookupErr, ErrDealNotFound) {
 			return true, "no porep deal for piece"
 		}
 	}
 
-	if deal == nil {
+	if len(deals) == 0 {
 		// Unknown deal: allow quote/probe through (no private metadata to enforce).
 		return false, ""
 	}
 
-	switch deal.DealType {
-	case DealTypePublic:
-		return false, ""
-	case DealTypePrivate:
+	var sawPrivate, sawUnknown bool
+	for _, d := range deals {
+		if d == nil {
+			continue
+		}
+		switch d.DealType {
+		case DealTypePublic:
+			return false, ""
+		case DealTypePrivate:
+			sawPrivate = true
+			if requester != (common.Address{}) && sameAddress(requester, d.Client) {
+				return false, ""
+			}
+		default:
+			sawUnknown = true
+		}
+	}
+
+	if sawPrivate {
 		if requester == (common.Address{}) {
 			return true, "private deal requires client identity"
 		}
-		if !sameAddress(requester, deal.Client) {
-			return true, "client is not the private deal owner"
-		}
-		return false, ""
-	default:
-		if paid {
-			return true, "unknown deal type"
-		}
-		return false, ""
+		return true, "client is not the private deal owner"
 	}
+	if sawUnknown && paid {
+		return true, "unknown deal type"
+	}
+	return false, ""
 }
 
 // isPaidRetrieval is true when the request carries Payment Authorization and a

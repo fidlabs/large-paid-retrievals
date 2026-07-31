@@ -43,10 +43,14 @@ func TestCDPLookupByPieceCID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	deal, err := lookup.LookupByPieceCID(context.Background(), piece)
+	deals, err := lookup.LookupByPieceCID(context.Background(), piece)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(deals) != 1 {
+		t.Fatalf("deals: got %d", len(deals))
+	}
+	deal := deals[0]
 	if deal.DealID != "7" {
 		t.Fatalf("deal id: got %s", deal.DealID)
 	}
@@ -68,12 +72,13 @@ func TestCDPLookupByPieceCID(t *testing.T) {
 	}
 }
 
-func TestCDPLookupPrefersActive(t *testing.T) {
+func TestCDPLookupReturnsAllDeals(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"data": []map[string]any{
 				{"dealId": "1", "providerId": "f01", "clientAddress": "0x1", "dealState": "ACCEPTED", "dealType": "PRIVATE", "active": false},
 				{"dealId": "2", "providerId": "f01", "clientAddress": "0x2", "dealState": "COMPLETED", "dealType": "PRIVATE", "active": true},
+				{"dealId": "3", "providerId": "f01", "clientAddress": "0x3", "dealState": "ACCEPTED", "dealType": "PUBLIC", "active": false},
 			},
 		})
 	}))
@@ -83,36 +88,45 @@ func TestCDPLookupPrefersActive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	deal, err := lookup.LookupByPieceCID(context.Background(), "baga6ea4seaqaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	deals, err := lookup.LookupByPieceCID(context.Background(), "baga6ea4seaqaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if deal.DealID != "2" {
-		t.Fatalf("expected active deal 2, got %s", deal.DealID)
+	if len(deals) != 3 {
+		t.Fatalf("expected 3 deals, got %d", len(deals))
+	}
+	ids := map[string]bool{}
+	for _, d := range deals {
+		ids[d.DealID] = true
+	}
+	for _, id := range []string{"1", "2", "3"} {
+		if !ids[id] {
+			t.Fatalf("missing deal %s", id)
+		}
 	}
 }
 
-func TestCDPLookupPrefersPublicOverPrivate(t *testing.T) {
+func TestCDPLookupFiltersProviderClientSide(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"data": []map[string]any{
-				{"dealId": "1", "providerId": "f01", "clientAddress": "0x1", "dealState": "ACCEPTED", "dealType": "PRIVATE", "active": true},
-				{"dealId": "2", "providerId": "f01", "clientAddress": "0x2", "dealState": "ACCEPTED", "dealType": "PUBLIC", "active": false},
+				{"dealId": "1", "providerId": "f01", "clientAddress": "0x1", "dealType": "PRIVATE", "active": true},
+				{"dealId": "2", "providerId": "f02", "clientAddress": "0x2", "dealType": "PUBLIC", "active": true},
 			},
 		})
 	}))
 	t.Cleanup(srv.Close)
 
-	lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: srv.URL, HTTPClient: srv.Client()})
+	lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: srv.URL, ProviderID: 1, HTTPClient: srv.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	deal, err := lookup.LookupByPieceCID(context.Background(), "baga6ea4seaqaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	deals, err := lookup.LookupByPieceCID(context.Background(), "baga6ea4seaqaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if deal.DealID != "2" || deal.DealType != DealTypePublic {
-		t.Fatalf("expected public deal 2, got id=%s type=%v", deal.DealID, deal.DealType)
+	if len(deals) != 1 || deals[0].DealID != "1" {
+		t.Fatalf("got %+v", deals)
 	}
 }
 
@@ -247,12 +261,12 @@ func TestCDPLookupDealIDFormsAndBadProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	deal, err := lookup.LookupByPieceCID(context.Background(), "baga6ea4seaqaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	deals, err := lookup.LookupByPieceCID(context.Background(), "baga6ea4seaqaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if deal.DealID != "42" {
-		t.Fatalf("numeric dealId: got %q", deal.DealID)
+	if len(deals) != 1 || deals[0].DealID != "42" {
+		t.Fatalf("numeric dealId: got %+v", deals)
 	}
 
 	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -279,10 +279,10 @@ Optional: expose **`HEAD`** on the public proxy path for client size probes (the
 | `--pay-payee-address` | Payee advertised in challenges (default: settler) |
 | `--pay-payments-address` | Optional payments contract override |
 | `--porep-cdp-url` | CDP base URL for piece CID → deal (`GET /po-rep/deals?pieceCID=…`; default `https://cdp.allocator.tech`; local Curio: `http://127.0.0.1:23300`). Empty disables. |
-| `--porep-provider-id` | Your miner actor id (numeric; e.g. `1234` for `f01234`). Filters CDP deals to this SP — see [Miner actor ID](#miner-actor-id-porep-provider-id) |
+| `--porep-provider-id` | Your miner actor id (numeric; e.g. `1234` for `f01234`). **Required** when `--porep-cdp-url` is set. Filters CDP deals to this SP — see [Miner actor ID](#miner-actor-id-porep-provider-id) |
 | `--pay-debug`, `--verbose` | Diagnostics |
 
-Piece access resolves PoRep deals via [CDP](https://cdp.allocator.tech) (`GET /po-rep/deals?pieceCID=…`), which returns deal JSON including `dealType` and `clientAddress`. Always set `--porep-provider-id` to your miner so CDP results are scoped to deals you serve. `source ./scripts/devnet-env.sh` sets `SP_PROXY_POREP_CDP_URL=http://127.0.0.1:23300` and `POREP_PROVIDER_ID` for local FCSS CDP.
+Piece access resolves PoRep deals via [CDP](https://cdp.allocator.tech) (`GET /po-rep/deals?pieceCID=…`), which returns deal JSON including `dealType` and `clientAddress`. When `--porep-cdp-url` is set, `--porep-provider-id` is **required** (startup fails if missing/zero) so CDP results are scoped to deals you serve. `source ./scripts/devnet-env.sh` sets `SP_PROXY_POREP_CDP_URL=http://127.0.0.1:23300` and `POREP_PROVIDER_ID` for local FCSS CDP.
 
 ### Piece access (public vs private)
 
