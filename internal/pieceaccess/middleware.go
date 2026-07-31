@@ -163,6 +163,9 @@ func selectRepresentativeDeal(deals []*Deal, requester common.Address) *Deal {
 // denyAccess implements piece access policy for probes and paid retrieval.
 //
 // HEAD is never denied (size/existence are public).
+// Lookup transport/decode errors fail closed on GET (paid or probe) so private
+// pieces cannot appear probeable during a CDP outage. ErrDealNotFound still
+// allows unpaid probes (no private metadata to enforce).
 // Access is allowed if any matching deal is public, or any private deal is owned
 // by the requester. Anonymous GET on private-only pieces returns 403.
 // Paid GET (Authorization + client): default-deny when no usable deal.
@@ -174,10 +177,11 @@ func (a *Authorizer) denyAccess(r *http.Request, deals []*Deal, lookupErr error)
 	requester := a.requesterAddress(r)
 	paid := a.isPaidRetrieval(r)
 
+	if lookupErr != nil && !errors.Is(lookupErr, ErrDealNotFound) {
+		return true, "deal lookup failed"
+	}
+
 	if paid {
-		if lookupErr != nil && !errors.Is(lookupErr, ErrDealNotFound) {
-			return true, "deal lookup failed"
-		}
 		if len(deals) == 0 || errors.Is(lookupErr, ErrDealNotFound) {
 			return true, "no porep deal for piece"
 		}

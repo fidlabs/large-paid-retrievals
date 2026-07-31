@@ -232,7 +232,7 @@ func TestMiddlewareLookupNotFoundContinues(t *testing.T) {
 	}
 }
 
-func TestMiddlewareLookupErrorContinues(t *testing.T) {
+func TestMiddlewareLookupErrorDenied(t *testing.T) {
 	t.Parallel()
 
 	lookup := &stubLookup{err: errors.New("rpc down")}
@@ -254,11 +254,36 @@ func TestMiddlewareLookupErrorContinues(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	if !called {
-		t.Fatal("next should still run")
+	if called {
+		t.Fatal("next must not run when deal lookup fails")
 	}
-	if !strings.Contains(logBuf.String(), "deal lookup failed") {
-		t.Fatalf("expected warn log, got %q", logBuf.String())
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	logs := logBuf.String()
+	if !strings.Contains(logs, "deal lookup failed") {
+		t.Fatalf("expected warn log, got %q", logs)
+	}
+	if !strings.Contains(logs, "porep piece access denied") {
+		t.Fatalf("expected access denied log, got %q", logs)
+	}
+}
+
+func TestMiddlewareLookupErrorHEADAllowed(t *testing.T) {
+	t.Parallel()
+
+	lookup := &stubLookup{err: errors.New("rpc down")}
+	called := false
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := pieceaccess.NewAuthorizer(pieceaccess.WithDealLookup(lookup)).Middleware(next)
+	req := httptest.NewRequest(http.MethodHead, "/piece/baga6ea4seaqabc", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if !called || rec.Code != http.StatusOK {
+		t.Fatalf("called=%v code=%d", called, rec.Code)
 	}
 }
 

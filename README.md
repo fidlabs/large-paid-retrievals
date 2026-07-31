@@ -294,6 +294,7 @@ Deal metadata and piece CIDs are on the public chain (and in CDP), so **existenc
 | Anonymous `GET` (no `?client=`, no `Authorization`) | Allowed → `200` (free) or `402` (paid quote). | **403 Forbidden** — probe must retry with identity. |
 | `GET ?client=<0x…>` (no payment yet) | Allowed → `200` / `402`. | Allowed only if `client` is the deal owner → `200` / `402`; otherwise **403**. |
 | `GET` with `?client=` **and** `Authorization: Payment …` | Allowed (after payment settles). | Allowed only if requester is the deal owner; otherwise **403**. Missing deal in CDP → **403** (default-deny). |
+| Any `GET` when CDP lookup errors (network/HTTP/JSON) | **403 Forbidden** (fail closed). `HEAD` still allowed. | Same. `ErrDealNotFound` (empty result) still allows unpaid probes. |
 
 **Client probe sequence** (`retrieval-client` / `pieceurls`):
 
