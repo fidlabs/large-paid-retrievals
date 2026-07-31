@@ -84,16 +84,17 @@ const withdrawABIJSON = `[
 
 // Client performs Filecoin Pay reads and settlement txs using USDFC on the connected chain.
 type Client struct {
-	eth          ethClient
-	payments     paymentsAPI
-	chainID      *big.Int
-	signerKey    *ecdsa.PrivateKey
-	signerAddr   common.Address
-	paymentsAddr common.Address
-	paymentToken common.Address // USDFC for the chain
-	log          *slog.Logger
-	payTrace     bool // Info-level step logs (--pay-debug); independent of global log level
-	txProgress   TxProgress
+	eth                  ethClient
+	payments             paymentsAPI
+	chainID              *big.Int
+	signerKey            *ecdsa.PrivateKey
+	signerAddr           common.Address
+	paymentsAddr         common.Address
+	paymentToken         common.Address // USDFC for the chain
+	paymentTokenOverride string         // set via WithPaymentToken before resolve
+	log                  *slog.Logger
+	payTrace             bool // Info-level step logs (--pay-debug); independent of global log level
+	txProgress           TxProgress
 
 	// Optional test hooks (nil uses eth / bind.WaitMined / ERC20 bind).
 	rails              paymentsRailsTransactor
@@ -135,6 +136,14 @@ func WithPayLogging(log *slog.Logger, trace bool) Option {
 	}
 }
 
+// WithPaymentToken overrides the USDFC (payment token) address resolved from chain ID.
+// Required on local Curio/FOC devnets where MockUSDFC is redeployed each genesis.
+func WithPaymentToken(addr string) Option {
+	return func(c *Client) {
+		c.paymentTokenOverride = strings.TrimSpace(addr)
+	}
+}
+
 // NewClient connects to RPC, parses private key, and binds the payments contract.
 // paymentsAddress: empty uses go-synapse known address for the chain ID from RPC.
 func NewClient(ctx context.Context, rpcURL, privateKeyHex, privateKeyFile, privateKeyEnv, paymentsAddress string, opts ...Option) (*Client, error) {
@@ -160,7 +169,18 @@ func NewClient(ctx context.Context, rpcURL, privateKeyHex, privateKeyFile, priva
 		ethCli.Close()
 		return nil, fmt.Errorf("filpay: unknown payments contract for chain %d (set payments address explicitly)", chainID.Int64())
 	}
-	tokenAddr, err := resolvePaymentToken(chainID.Int64())
+	addr := crypto.PubkeyToAddress(pk.PublicKey)
+	c := &Client{
+		eth:          ethCli,
+		chainID:      chainID,
+		signerKey:    pk,
+		signerAddr:   addr,
+		paymentsAddr: payAddr,
+	}
+	for _, o := range opts {
+		o(c)
+	}
+	tokenAddr, err := resolvePaymentToken(c.paymentTokenOverride, chainID.Int64())
 	if err != nil {
 		ethCli.Close()
 		return nil, err
@@ -170,19 +190,8 @@ func NewClient(ctx context.Context, rpcURL, privateKeyHex, privateKeyFile, priva
 		ethCli.Close()
 		return nil, fmt.Errorf("filpay: bind payments: %w", err)
 	}
-	addr := crypto.PubkeyToAddress(pk.PublicKey)
-	c := &Client{
-		eth:          ethCli,
-		payments:     pc,
-		chainID:      chainID,
-		signerKey:    pk,
-		signerAddr:   addr,
-		paymentsAddr: payAddr,
-		paymentToken: tokenAddr,
-	}
-	for _, o := range opts {
-		o(c)
-	}
+	c.payments = pc
+	c.paymentToken = tokenAddr
 	c.payInfo("client initialized",
 		"chain_id", chainID.String(),
 		"payments_contract", payAddr.Hex(),
@@ -568,7 +577,8 @@ func (c *Client) waitTxMined(ctx context.Context, tx *types.Transaction, op stri
 	waitCtx := ctx
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
 		var cancel context.CancelFunc
-		waitCtx, cancel = context.WithTimeout(ctx, 90*time.Second)
+		// Local 2k/devnet eth receipt indexing can lag tipset production.
+		waitCtx, cancel = context.WithTimeout(ctx, 3*time.Minute)
 		defer cancel()
 	}
 	txHash := tx.Hash().Hex()
@@ -639,13 +649,16 @@ func (c *Client) PreparePayerForPayee(ctx context.Context, payer, payee common.A
 	return nil
 }
 
-// FindActiveTokenRail returns a rail ID where payer pays payee in the correct token, rail not terminated and not past end epoch.
+// FindActiveTokenRail returns a rail ID where payer pays payee in the correct token, rail not
+// terminated and not past end epoch, and the client signer is the rail operator.
+// Rails operated by another party (e.g. FOC / market tooling) are skipped so PreparePayerForPayee
+// can create a self-operated rail this client can charge.
 func (c *Client) FindActiveTokenRail(ctx context.Context, payer, payee common.Address) (*big.Int, error) {
 	if payer == (common.Address{}) || payee == (common.Address{}) {
 		return nil, errors.New("filpay: empty payer or payee")
 	}
 	nowEp := synpayments.CurrentEpoch(c.chainID.Int64())
-	c.payInfo("searching token rails", "payer", payer.Hex(), "payee", payee.Hex(), "current_epoch", nowEp.String())
+	c.payInfo("searching token rails", "payer", payer.Hex(), "payee", payee.Hex(), "operator", c.signerAddr.Hex(), "current_epoch", nowEp.String())
 	offset := big.NewInt(0)
 	limit := big.NewInt(100)
 	for {
@@ -682,6 +695,11 @@ func (c *Client) FindActiveTokenRail(ctx context.Context, payer, payee common.Ad
 					"from", view.From.Hex(), "to", view.To.Hex())
 				continue
 			}
+			if view.Operator != c.signerAddr {
+				c.payDebug("skip rail (foreign operator)", "rail_id", ri.RailId.String(),
+					"operator", view.Operator.Hex(), "signer", c.signerAddr.Hex())
+				continue
+			}
 			if view.EndEpoch != nil && view.EndEpoch.Sign() > 0 && nowEp.Sign() > 0 && view.EndEpoch.Cmp(nowEp) <= 0 {
 				c.payDebug("skip rail (past end epoch)", "rail_id", ri.RailId.String(), "end_epoch", view.EndEpoch.String())
 				continue
@@ -696,7 +714,7 @@ func (c *Client) FindActiveTokenRail(ctx context.Context, payer, payee common.Ad
 		}
 		offset = nextOff
 	}
-	c.payInfo("no matching token rail", "payer", payer.Hex(), "payee", payee.Hex())
+	c.payInfo("no matching token rail", "payer", payer.Hex(), "payee", payee.Hex(), "operator", c.signerAddr.Hex())
 	return nil, fmt.Errorf("filpay: no active token rail from %s to %s", payer.Hex(), payee.Hex())
 }
 
@@ -821,7 +839,17 @@ func (c *Client) receiptForTx(ctx context.Context, tx *types.Transaction) (*type
 	return bind.WaitMined(ctx, c.eth, tx)
 }
 
-func resolvePaymentToken(chainID int64) (common.Address, error) {
+func resolvePaymentToken(raw string, chainID int64) (common.Address, error) {
+	if s := strings.TrimSpace(raw); s != "" {
+		if !common.IsHexAddress(s) {
+			return common.Address{}, fmt.Errorf("filpay: invalid USDFC token address %q", s)
+		}
+		addr := common.HexToAddress(s)
+		if addr == (common.Address{}) {
+			return common.Address{}, fmt.Errorf("filpay: invalid USDFC token address %q", s)
+		}
+		return addr, nil
+	}
 	if addr, ok := constants.USDFCAddressesByChainID[chainID]; ok && addr != (common.Address{}) {
 		return addr, nil
 	}
@@ -834,11 +862,11 @@ func resolvePaymentToken(chainID int64) (common.Address, error) {
 	case constants.ChainIDDevnet:
 		net = constants.NetworkDevnet
 	default:
-		return common.Address{}, fmt.Errorf("filpay: unknown USDFC token for chain %d", chainID)
+		return common.Address{}, fmt.Errorf("filpay: unknown USDFC token for chain %d (set --pay-token-address)", chainID)
 	}
 	addr := constants.USDFCAddresses[net]
 	if addr == (common.Address{}) {
-		return common.Address{}, fmt.Errorf("filpay: unknown USDFC token for chain %d", chainID)
+		return common.Address{}, fmt.Errorf("filpay: unknown USDFC token for chain %d (set --pay-token-address)", chainID)
 	}
 	return addr, nil
 }

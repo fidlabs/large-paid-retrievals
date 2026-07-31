@@ -208,7 +208,7 @@ func TestPreparePayerForPayeeCreatesRail(t *testing.T) {
 			return []contracts.RailInfoResult{{RailId: railID, IsTerminated: false, EndEpoch: big.NewInt(0)}}, big.NewInt(0), big.NewInt(1), nil
 		},
 		rail: func(ctx context.Context, id *big.Int) (*contracts.RailViewResult, error) {
-			return &contracts.RailViewResult{Token: token, From: payer, To: payee, EndEpoch: big.NewInt(0)}, nil
+			return &contracts.RailViewResult{Token: token, From: payer, To: payee, Operator: payer, EndEpoch: big.NewInt(0)}, nil
 		},
 	})
 	c.signerAddr = payer
@@ -223,6 +223,58 @@ func TestPreparePayerForPayeeCreatesRail(t *testing.T) {
 	}
 	if listCalls < 2 {
 		t.Fatalf("expected rail list after create, got %d calls", listCalls)
+	}
+}
+
+func TestPreparePayerForPayeeSkipsForeignOperatorCreatesRail(t *testing.T) {
+	ctx := context.Background()
+	payer := common.HexToAddress("0x1000000000000000000000000000000000000001")
+	payee := common.HexToAddress("0x2000000000000000000000000000000000000002")
+	foreignOp := common.HexToAddress("0x5607327BDc0CA5538faA108555Ce09D89075B527")
+	token := constants.USDFCAddressesByChainID[constants.ChainIDCalibration]
+	selfRailID := big.NewInt(11)
+	tx := testTx(t)
+	listCalls := 0
+	created := false
+
+	c := testClient(t, &mockPayments{
+		operatorApproval: func(ctx context.Context, token, client, operator common.Address) (bool, *big.Int, *big.Int, *big.Int, *big.Int, *big.Int, error) {
+			return true, big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), nil
+		},
+		accountInfo: func(ctx context.Context, token, owner common.Address) (*big.Int, *big.Int, *big.Int, *big.Int, error) {
+			return big.NewInt(0), big.NewInt(0), big.NewInt(500), big.NewInt(0), nil
+		},
+		railsForPayer: func(ctx context.Context, p, tok common.Address, offset, limit *big.Int) ([]contracts.RailInfoResult, *big.Int, *big.Int, error) {
+			listCalls++
+			if !created {
+				return []contracts.RailInfoResult{{RailId: big.NewInt(10), IsTerminated: false, EndEpoch: big.NewInt(0)}}, big.NewInt(0), big.NewInt(1), nil
+			}
+			return []contracts.RailInfoResult{
+				{RailId: big.NewInt(10), IsTerminated: false, EndEpoch: big.NewInt(0)},
+				{RailId: selfRailID, IsTerminated: false, EndEpoch: big.NewInt(0)},
+			}, big.NewInt(0), big.NewInt(2), nil
+		},
+		rail: func(ctx context.Context, id *big.Int) (*contracts.RailViewResult, error) {
+			op := foreignOp
+			if id.Cmp(selfRailID) == 0 {
+				op = payer
+			}
+			return &contracts.RailViewResult{Token: token, From: payer, To: payee, Operator: op, EndEpoch: big.NewInt(0)}, nil
+		},
+	})
+	c.signerAddr = payer
+	withMockRails(&mockRailsTransactor{
+		createRail: func(ctx context.Context, opts *bind.TransactOpts, p, pe common.Address) (*types.Transaction, error) {
+			created = true
+			return tx, nil
+		},
+	})(c)
+
+	if err := c.PreparePayerForPayee(ctx, payer, payee, big.NewInt(10)); err != nil {
+		t.Fatal(err)
+	}
+	if !created || listCalls < 2 {
+		t.Fatalf("expected create after skipping foreign rail; created=%v listCalls=%d", created, listCalls)
 	}
 }
 
@@ -262,9 +314,10 @@ func TestChargeRailOneTimeEnsureLockupFails(t *testing.T) {
 	railID := big.NewInt(8)
 
 	c := testClient(t, &mockPayments{})
+	// Foreign-operated rail is invisible to FindActiveTokenRail (signer must be operator).
 	c.payments = activeRailPayments(payer, payee, common.HexToAddress("0x9999"), railID)
 	_, err := c.ChargeRailOneTime(ctx, payer, payee, big.NewInt(50))
-	if err == nil || !strings.Contains(err.Error(), "not rail operator") {
+	if err == nil || !strings.Contains(err.Error(), "no active token rail") {
 		t.Fatalf("got %v", err)
 	}
 }

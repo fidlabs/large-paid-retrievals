@@ -333,7 +333,7 @@ func TestBuildProxyHandlerRoutes(t *testing.T) {
 		ClientHeader:    "X-Client-Address",
 		MaxSkewSec:      30,
 	}
-	h := buildProxyHandler(upURL, host, port, store, stub, testQuotePayee0x, settings, testLogger())
+	h := buildProxyHandler(upURL, host, port, store, stub, testQuotePayee0x, settings, testLogger(), nil)
 	ts := httptest.NewServer(h)
 	defer ts.Close()
 

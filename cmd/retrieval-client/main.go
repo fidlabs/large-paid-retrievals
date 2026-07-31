@@ -121,6 +121,7 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 		parallel           int
 		payRPCURL          string
 		payPaymentsAddress string
+		payTokenAddress    string
 	)
 	c := &cobra.Command{
 		Use:   "fetch",
@@ -170,6 +171,7 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 			discoverCli := &http.Client{Timeout: 90 * time.Second}
 			discovery := newPieceDiscoveryClient(discoverCli, payRPCURL)
 			pieceProber := pieceurls.NewClient(probeCli)
+			pieceProber.ProbeClient = client
 			ctx := cmd.Context()
 			if ctx == nil {
 				ctx = context.Background()
@@ -292,6 +294,9 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 			}
 
 			var filpayOpts []filpay.Option
+			if tok := strings.TrimSpace(payTokenAddress); tok != "" {
+				filpayOpts = append(filpayOpts, filpay.WithPaymentToken(tok))
+			}
 			if payDebug || verbose {
 				level := slog.LevelInfo
 				if verbose {
@@ -499,6 +504,7 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 	c.Flags().BoolVar(&payDebug, "pay-debug", false, "Log Filecoin Pay chain operations to stderr ([filpay-client])")
 	c.Flags().StringVar(&payRPCURL, "pay-rpc-url", getenv("SP_PROXY_PAY_RPC_URL", "https://api.node.glif.io/rpc/v1"), "Filecoin JSON-RPC URL: FVM payments + Lotus StateMinerInfo for discovery")
 	c.Flags().StringVar(&payPaymentsAddress, "pay-payments-address", getenv("SP_PROXY_PAY_PAYMENTS_ADDRESS", ""), "Filecoin Pay payments contract (0x); empty uses chain default")
+	c.Flags().StringVar(&payTokenAddress, "pay-token-address", getenv("SP_PROXY_PAY_TOKEN_ADDRESS", ""), "USDFC token (0x); empty uses chain default (required override on Curio/FOC localnet)")
 	return c
 }
 
@@ -512,6 +518,7 @@ func cmdRailCheck(keyOpts *filpayKeyOpts) *cobra.Command {
 		payDebug           bool
 		payRPCURL          string
 		payPaymentsAddress string
+		payTokenAddress    string
 	)
 	c := &cobra.Command{
 		Use:   "rail-check",
@@ -524,10 +531,15 @@ func cmdRailCheck(keyOpts *filpayKeyOpts) *cobra.Command {
 			client := crypto.PubkeyToAddress(evmPK.PublicKey).Hex()
 			fmt.Printf("Client (payer): %s\n", client)
 
+			var filpayOpts []filpay.Option
+			if tok := strings.TrimSpace(payTokenAddress); tok != "" {
+				filpayOpts = append(filpayOpts, filpay.WithPaymentToken(tok))
+			}
 			var filpayLogger *slog.Logger
 			if payDebug {
 				filpayLogger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 			}
+			filpayOpts = append(filpayOpts, filpay.WithPayLogging(filpayLogger, payDebug))
 			fc, err := filpayNewClient(
 				context.Background(),
 				payRPCURL,
@@ -535,7 +547,7 @@ func cmdRailCheck(keyOpts *filpayKeyOpts) *cobra.Command {
 				keyOpts.privateKeyFile,
 				keyOpts.privateKeyEnv,
 				payPaymentsAddress,
-				filpay.WithPayLogging(filpayLogger, payDebug),
+				filpayOpts...,
 			)
 			if err != nil {
 				return fmt.Errorf("init filpay client: %w", err)
@@ -559,6 +571,7 @@ func cmdRailCheck(keyOpts *filpayKeyOpts) *cobra.Command {
 				discoverCli := &http.Client{Timeout: 90 * time.Second}
 				discovery := newPieceDiscoveryClient(discoverCli, payRPCURL)
 				pieceProber := pieceurls.NewClient(cli)
+				pieceProber.ProbeClient = client
 				ctx := cmd.Context()
 				if ctx == nil {
 					ctx = context.Background()
@@ -731,6 +744,7 @@ func cmdRailCheck(keyOpts *filpayKeyOpts) *cobra.Command {
 	c.Flags().BoolVar(&payDebug, "pay-debug", false, "Log Filecoin Pay operation details to stderr ([filpay-client])")
 	c.Flags().StringVar(&payRPCURL, "pay-rpc-url", getenv("SP_PROXY_PAY_RPC_URL", "https://api.node.glif.io/rpc/v1"), "Filecoin JSON-RPC URL: FVM payments + Lotus StateMinerInfo for discovery")
 	c.Flags().StringVar(&payPaymentsAddress, "pay-payments-address", getenv("SP_PROXY_PAY_PAYMENTS_ADDRESS", ""), "Filecoin Pay payments contract (0x); empty uses chain default")
+	c.Flags().StringVar(&payTokenAddress, "pay-token-address", getenv("SP_PROXY_PAY_TOKEN_ADDRESS", ""), "USDFC token (0x); empty uses chain default (required override on Curio/FOC localnet)")
 	return c
 }
 

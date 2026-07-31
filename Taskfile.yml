@@ -16,6 +16,11 @@ env:
   GOCACHE: "{{.TASKFILE_DIR}}/{{.LOCAL_GOCACHE}}"
   GOMODCACHE: "{{.TASKFILE_DIR}}/{{.LOCAL_GOMODCACHE}}"
 
+includes:
+  fcss-devnet:
+    taskfile: ./taskfiles/fcss-devnet.yml
+    dir: .
+
 tasks:
   default:
     desc: List available tasks
@@ -74,70 +79,25 @@ tasks:
           exit 1
         fi
         echo "** discovered CIDs: ${cid1}, ${cid2}"
+        mkdir -p ./downloads
         ./bin/retrieval-client fetch \
           --filpay-private-key-file ./client.key \
           --pay-rpc-url "https://api.node.glif.io/rpc/v1" \
+          --out-dir ./downloads \
           --yes \
           --cid "${cid1}" \
           --cid "${cid2}"
         for piece in "${cid1}" "${cid2}"; do
-          echo "** inspecting ${piece}.car"
-          "{{.LOCAL_BIN}}/car" inspect "${piece}.car"
-          "{{.LOCAL_BIN}}/car" verify "${piece}.car"
+          echo "** inspecting downloads/${piece}.car"
+          "{{.LOCAL_BIN}}/car" inspect "downloads/${piece}.car"
+          "{{.LOCAL_BIN}}/car" verify "downloads/${piece}.car"
         done
         echo "*** all pieces fetched and verified ***"
 
-  test:e2e:filpay:
-    desc: Local sp-proxy + envoy + nginx paid fetch through Filecoin Pay on Calibration network
-    deps:
-      - build
-      - piece:server
-      - tools
+  test:e2e:fcss-devnet:
+    desc: Alias for fcss-devnet:e2e (local paid fetch + CDP deal lookup)
     cmds:
-      - |
-        set -euo pipefail
-        sp_proxy_port=8787
-        sp_proxy_price_per_gb=0.0003
-        command -v lsof >/dev/null 2>&1 || {
-          echo "lsof is required for sp-proxy cleanup in test:e2e:filpay" >&2
-          exit 1
-        }
-        mkdir -p .task
-        rm -f .task/sp-proxy-test.log
-        ./bin/sp-proxy \
-          --listen ":${sp_proxy_port}" \
-          --db ".task/sp-proxy-test.db" \
-          --price-usdfc-per-gb "${sp_proxy_price_per_gb}" \
-          --pay-private-key-file ./sp.key \
-          --pay-rpc-url "https://api.calibration.node.glif.io/rpc/v1" \
-          --upstream-host "127.0.0.1" \
-          --upstream-port 8789 \
-          > .task/sp-proxy-test.log 2>&1 &
-        cleanup() {
-          # Task runs mvdan/sh where "$!" is a job id and "kill" is an unsupported builtin;
-          # use lsof to discover the PID of the background process and kill it with /bin/kill.
-          pids=$(lsof -tiTCP:"${sp_proxy_port}" -sTCP:LISTEN 2>/dev/null || true)
-          echo "${pids}" | while read -r pid; do
-            [ -n "${pid}" ] && /bin/kill "${pid}" 2>/dev/null || true
-          done
-        }
-        trap cleanup EXIT
-        for _ in {1..20}; do
-          if curl -fsS --head "http://127.0.0.1:${sp_proxy_port}/piece/baga6ea4seaqchqdzwxltukzwbtajfugthjhikv2ezg46qjvsevzbe7nghsxtmbj" >/dev/null 2>&1; then
-            break
-          fi
-          sleep 1
-        done
-        curl -fsS --head "http://127.0.0.1:${sp_proxy_port}/piece/baga6ea4seaqchqdzwxltukzwbtajfugthjhikv2ezg46qjvsevzbe7nghsxtmbj" >/dev/null 2>&1
-        ./bin/retrieval-client fetch \
-          --filpay-private-key-file ./client.key \
-          --pay-rpc-url "https://api.calibration.node.glif.io/rpc/v1" \
-          --sp-base-url "http://127.0.0.1:${sp_proxy_port}" \
-          --yes \
-          --cid baga6ea4seaqchqdzwxltukzwbtajfugthjhikv2ezg46qjvsevzbe7nghsxtmbj \
-          --cid baga6ea4seaqchqdzwxltukzwbtajfugthjhikv2ezg46qjvsevzbe7nghsxtmbk
-        # we fetch a dummy CAR file which is all zeros so we can't usefully verify it
-        echo "*** piece fetched ***"
+      - task: fcss-devnet:e2e
 
   test:coverage:
     desc: Run unit tests and write coverage report
@@ -147,7 +107,9 @@ tasks:
       - |
         set -euo pipefail
         mkdir -p .task
-        if ! go test -coverprofile=coverage.out ./... > .task/coverage-test.log 2>&1; then
+        # Chaos helper has no unit tests; omit from coverage totals / CI summary.
+        pkgs="$(go list ./... | grep -v '/cmd/bytecut-proxy$')"
+        if ! go test -coverprofile=coverage.out ${pkgs} > .task/coverage-test.log 2>&1; then
           cat .task/coverage-test.log
           exit 1
         fi
@@ -167,7 +129,7 @@ tasks:
       - bootstrap
     cmds:
       - mkdir -p bin
-      - go build -o bin/ ./cmd/retrieval-client ./cmd/sp-proxy
+      - go build -o bin/ ./cmd/retrieval-client ./cmd/sp-proxy ./cmd/bytecut-proxy
 
   vuln:
     desc: Run vulnerability checks
@@ -205,130 +167,3 @@ tasks:
     desc: Remove build outputs
     cmds:
       - rm -rf bin "{{.LOCAL_ROOT}}"
-
-  piece:server:
-    desc: Start piece test server stack (nginx origin + envoy timeout proxy)
-    deps:
-      - envoy:piece
-
-  piece:server:clean:
-    desc: Stop piece test server stack (envoy + nginx) and remove local state
-    deps:
-      - envoy:piece:clean
-      - nginx:piece:clean
-
-  nginx:piece:
-    internal: true
-    desc: Start stock nginx serving a 32 GiB sparse dummy file under /piece/<cid>
-    cmds:
-      - mkdir -p .task/nginx-piece/piece
-      - truncate -s 32G .task/nginx-piece/piece/data.car
-      - |
-        cat > .task/nginx-piece/default.conf <<'EOF'
-        server {
-          listen 80;
-          server_name _;
-          root /usr/share/nginx/html;
-
-          location ~ ^/piece/ {
-            default_type application/octet-stream;
-            try_files /piece/data.car =404;
-          }
-        }
-        EOF
-      - docker rm -f paid-retrievals-nginx-piece >/dev/null 2>&1 || true
-      - |
-        docker run -d --name paid-retrievals-nginx-piece -p 8788:80 \
-          -v "{{.TASKFILE_DIR}}/.task/nginx-piece/piece:/usr/share/nginx/html/piece:ro" \
-          -v "{{.TASKFILE_DIR}}/.task/nginx-piece/default.conf:/etc/nginx/conf.d/default.conf:ro" \
-          nginx:stable-alpine
-      - echo "nginx started at http://127.0.0.1:8788/piece/<cid> (32 GiB sparse zeros, Content-Length 34359738368)"
-
-  nginx:piece:clean:
-    internal: true
-    desc: Stop nginx piece container and remove local dummy data
-    cmds:
-      - docker rm -f paid-retrievals-nginx-piece >/dev/null 2>&1 || true
-      - rm -rf .task/nginx-piece
-      - echo "nginx piece container stopped and .task/nginx-piece removed"
-
-  envoy:piece:
-    internal: true
-    desc: Start Envoy proxy in front of nginx /piece with hard stream timeout
-    deps:
-      - nginx:piece
-    cmds:
-      - mkdir -p .task/envoy-piece
-      - |
-        cat > .task/envoy-piece/envoy.yaml <<'EOF'
-        static_resources:
-          listeners:
-            - name: piece_listener
-              address:
-                socket_address:
-                  address: 0.0.0.0
-                  port_value: 8789
-              filter_chains:
-                - filters:
-                    - name: envoy.filters.network.http_connection_manager
-                      typed_config:
-                        "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
-                        stat_prefix: piece_hcm
-                        codec_type: AUTO
-                        route_config:
-                          name: local_routes
-                          virtual_hosts:
-                            - name: piece_host
-                              domains: ["*"]
-                              routes:
-                                - match:
-                                    prefix: "/piece/"
-                                  route:
-                                    cluster: nginx_piece
-                                    max_stream_duration:
-                                      max_stream_duration: 3s
-                                - match:
-                                    prefix: "/"
-                                  direct_response:
-                                    status: 404
-                        http_filters:
-                          - name: envoy.filters.http.router
-                            typed_config:
-                              "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
-          clusters:
-            - name: nginx_piece
-              connect_timeout: 2s
-              type: STRICT_DNS
-              lb_policy: ROUND_ROBIN
-              load_assignment:
-                cluster_name: nginx_piece
-                endpoints:
-                  - lb_endpoints:
-                      - endpoint:
-                          address:
-                            socket_address:
-                              address: host.docker.internal
-                              port_value: 8788
-
-        admin:
-          access_log_path: /tmp/admin_access.log
-          address:
-            socket_address:
-              address: 0.0.0.0
-              port_value: 9901
-        EOF
-      - docker rm -f paid-retrievals-envoy-piece >/dev/null 2>&1 || true
-      - |
-        docker run -d --name paid-retrievals-envoy-piece -p 8789:8789 -p 9901:9901 \
-          --add-host=host.docker.internal:host-gateway \
-          -v "{{.TASKFILE_DIR}}/.task/envoy-piece/envoy.yaml:/etc/envoy/envoy.yaml:ro" \
-          envoyproxy/envoy:v1.31-latest
-      - echo "envoy started at http://127.0.0.1:8789/piece/<cid> (proxied to nginx:8788, max stream 3s)"
-
-  envoy:piece:clean:
-    internal: true
-    desc: Stop Envoy piece proxy container and remove local config
-    cmds:
-      - docker rm -f paid-retrievals-envoy-piece >/dev/null 2>&1 || true
-      - rm -rf .task/envoy-piece
-      - echo "envoy piece container stopped and .task/envoy-piece removed"

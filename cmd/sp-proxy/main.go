@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fidlabs/paid-retrievals/internal/pieceaccess"
 	"github.com/spf13/cobra"
 )
 
@@ -43,10 +44,13 @@ func root() *cobra.Command {
 	c.Flags().StringVar(&settings.PayPrivateKeyFile, "pay-private-key-file", "", "File containing hex private key for Filecoin Pay")
 	c.Flags().StringVar(&settings.PayPrivateKeyEnv, "pay-private-key-env", getenv("SP_PROXY_PAY_PRIVATE_KEY_ENV", "SP_PROXY_PAY_PRIVATE_KEY"), "Env var for Filecoin Pay private key")
 	c.Flags().StringVar(&settings.PayPaymentsAddress, "pay-payments-address", getenv("SP_PROXY_PAY_PAYMENTS_ADDRESS", ""), "Filecoin Pay payments contract (0x); empty = built-in address for chain")
+	c.Flags().StringVar(&settings.PayTokenAddress, "pay-token-address", getenv("SP_PROXY_PAY_TOKEN_ADDRESS", ""), "USDFC token (0x); empty = built-in address for chain (required override on Curio/FOC localnet)")
 	c.Flags().StringVar(&settings.PayPayeeAddress, "pay-payee-address", getenv("SP_PROXY_PAY_PAYEE_ADDRESS", ""), "FVM address clients should open/fund rails to; empty = settlement wallet address")
 	c.Flags().BoolVar(&settings.PayDebug, "pay-debug", false, "Log Filecoin Pay and settlement pool steps (funding, drawdown, balances); Info level. Implied filpay trace; use with --verbose for more RPC detail")
 	c.Flags().StringVar(&settings.UpstreamHost, "upstream-host", getenv("SP_PROXY_UPSTREAM_HOST", "127.0.0.1"), "Upstream HTTP server host for proxied /piece requests")
 	c.Flags().IntVar(&settings.UpstreamPort, "upstream-port", mustParsePort(getenv("SP_PROXY_UPSTREAM_PORT", "8788")), "Upstream HTTP server port for proxied /piece requests")
+	c.Flags().StringVar(&settings.PorepCDPURL, "porep-cdp-url", getenv("SP_PROXY_POREP_CDP_URL", pieceaccess.DefaultCDPBaseURL), "CDP base URL for piece CID → deal (GET /po-rep/deals?pieceCID=…; default https://cdp.allocator.tech; local Curio: http://127.0.0.1:23300). Empty disables")
+	c.Flags().Uint64Var(&settings.PorepProviderID, "porep-provider-id", mustParseUint64(getenv("SP_PROXY_POREP_PROVIDER_ID", "0")), "Miner actor ID (f0…) used to filter CDP deals")
 	initCLIUsage(c)
 	return c
 }
@@ -63,6 +67,14 @@ func mustParsePort(raw string) int {
 	v, err := strconv.Atoi(strings.TrimSpace(raw))
 	if err != nil {
 		return 8788
+	}
+	return v
+}
+
+func mustParseUint64(raw string) uint64 {
+	v, err := strconv.ParseUint(strings.TrimSpace(raw), 10, 64)
+	if err != nil {
+		return 0
 	}
 	return v
 }

@@ -32,9 +32,11 @@ type Selection struct {
 	TotalBytes int64
 }
 
-// SelectBestPieceSource probes each base with HEAD (size) and bare GET {base}/piece/{cid} (concurrently).
-// Any GET 200 marks the piece as free (response body is not downloaded during probe).
-// Among 402 responses with a valid MPP WWW-Authenticate challenge, the lowest price_usdfc (parsed as base units) wins.
+// SelectBestPieceSource probes each base with HEAD (size) and GET {base}/piece/{cid}
+// (concurrently). The first GET is anonymous; on 403 (private deal) it retries with
+// ?client=ProbeClient when set. Any GET 200 marks the piece as free (response body
+// is not downloaded during probe). Among 402 responses with a valid MPP
+// WWW-Authenticate challenge, the lowest price_usdfc (parsed as base units) wins.
 // Other status codes and failures are ignored.
 func (c *Client) SelectBestPieceSource(ctx context.Context, pieceCID string, bases []*url.URL, log func(string, ...any), probe ProbeCallback) (*Selection, error) {
 	if c == nil || c.HTTP == nil {
@@ -134,32 +136,66 @@ func cloneURLBase(b *url.URL) *url.URL {
 	return &u
 }
 
-func pieceProbeURL(base *url.URL, cid string) string {
+func pieceProbeURL(base *url.URL, cid, client0x string) string {
 	u := *base
 	u.Path = "/piece/" + cid
 	u.RawQuery = ""
 	u.Fragment = ""
+	if c := strings.TrimSpace(client0x); c != "" {
+		q := u.Query()
+		q.Set("client", c)
+		u.RawQuery = q.Encode()
+	}
 	return u.String()
 }
 
 func (c *Client) probePieceEndpoint(ctx context.Context, base *url.URL, cid string, log func(string, ...any), freeClaimed *atomic.Bool, freeResult *atomic.Pointer[Selection], cancel context.CancelFunc) (*Selection, error) {
-	full := pieceProbeURL(base, cid)
+	// HEAD is anonymous (size/existence are public).
+	totalBytes := c.probeHEAD(ctx, pieceProbeURL(base, cid, ""), log)
+
+	// First try without client — public deals return 200/402; private return 403.
+	sel, forbidden, err := c.probeGET(ctx, base, cid, "", totalBytes, log, freeClaimed, freeResult, cancel)
+	if err != nil {
+		return nil, err
+	}
+	if sel != nil || !forbidden {
+		return sel, nil
+	}
+
+	client0x := ""
+	if c != nil {
+		client0x = strings.TrimSpace(c.ProbeClient)
+	}
+	if client0x == "" {
+		if log != nil {
+			log("probe forbidden cid=%s base=%s (private deal; no ProbeClient to retry)", cid, base.String())
+		}
+		return nil, nil
+	}
+	if log != nil {
+		log("probe forbidden without client; retrying with client=%s cid=%s base=%s", client0x, cid, base.String())
+	}
+	sel, _, err = c.probeGET(ctx, base, cid, client0x, totalBytes, log, freeClaimed, freeResult, cancel)
+	return sel, err
+}
+
+// probeGET performs one GET probe. forbidden is true when the SP returned 403.
+func (c *Client) probeGET(ctx context.Context, base *url.URL, cid, client0x string, totalBytes int64, log func(string, ...any), freeClaimed *atomic.Bool, freeResult *atomic.Pointer[Selection], cancel context.CancelFunc) (sel *Selection, forbidden bool, err error) {
+	full := pieceProbeURL(base, cid, client0x)
 	if log != nil {
 		log("probing endpoint %s", full)
 	}
 
-	totalBytes := c.probeHEAD(ctx, full, log)
-
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, full, nil)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	res, err := c.HTTP.Do(req)
 	if err != nil {
 		if log != nil {
 			log("probe GET %s failed: %v", full, err)
 		}
-		return nil, err
+		return nil, false, err
 	}
 	defer res.Body.Close()
 
@@ -168,23 +204,22 @@ func (c *Client) probePieceEndpoint(ctx context.Context, base *url.URL, cid stri
 		// Do not drain the full CAR during probe (only checking availability).
 		_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 8192))
 		if !freeClaimed.CompareAndSwap(false, true) {
-			return nil, nil
+			return nil, false, nil
 		}
-		sel := &Selection{
+		out := &Selection{
 			Base:       cloneURLBase(base),
 			CID:        cid,
 			Free:       true,
 			TotalBytes: totalBytes,
 		}
-		freeResult.Store(sel)
+		freeResult.Store(out)
 		if log != nil {
 			log("probe free endpoint cid=%s base=%s (HTTP 200, download deferred)", cid, base.String())
 		}
 		cancel()
-		return nil, nil
+		return nil, false, nil
 
 	case http.StatusPaymentRequired:
-		defer res.Body.Close()
 		body, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 		if log != nil {
 			log("challenge response status=%d cid=%s", res.StatusCode, cid)
@@ -197,13 +232,13 @@ func (c *Client) probePieceEndpoint(ctx context.Context, base *url.URL, cid stri
 			if log != nil {
 				log("probe 402 cid=%s base=%s: bad WWW-Authenticate: %v", cid, base.String(), err)
 			}
-			return nil, err
+			return nil, false, err
 		}
 		if ch.Request.DealUUID == "" || ch.Request.PriceUSDFC == "" {
 			if log != nil {
 				log("probe 402 challenge OK cid=%s base=%s: invalid MPP challenge request", cid, base.String())
 			}
-			return nil, errors.New("invalid MPP challenge payload")
+			return nil, false, errors.New("invalid MPP challenge payload")
 		}
 		if log != nil {
 			log("challenge OK payment={id:%s deal_uuid:%s cid:%s price_usdfc:%s payee_0x:%q}", ch.ID, ch.Request.DealUUID, ch.Request.CID, ch.Request.PriceUSDFC, ch.Request.Payee0x)
@@ -217,14 +252,21 @@ func (c *Client) probePieceEndpoint(ctx context.Context, base *url.URL, cid stri
 			PriceUSDFC: ch.Request.PriceUSDFC,
 			Payee0x:    strings.TrimSpace(ch.Request.Payee0x),
 			Challenge:  *ch,
-		}, nil
+		}, false, nil
+
+	case http.StatusForbidden:
+		_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 1<<16))
+		if log != nil {
+			log("probe forbidden cid=%s base=%s status=403", cid, base.String())
+		}
+		return nil, true, nil
 
 	default:
 		if log != nil {
 			log("probe skip cid=%s base=%s status=%d", cid, base.String(), res.StatusCode)
 		}
 		_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 1<<16))
-		return nil, nil
+		return nil, false, nil
 	}
 }
 
