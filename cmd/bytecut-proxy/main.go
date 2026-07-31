@@ -73,9 +73,7 @@ func (h *cutHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	outReq.URL.Scheme = h.upstream.Scheme
 	outReq.URL.Host = h.upstream.Host
 	outReq.RequestURI = ""
-	if outReq.Host == "" {
-		outReq.Host = h.upstream.Host
-	}
+	outReq.Host = h.upstream.Host
 
 	res, err := http.DefaultTransport.RoundTrip(outReq)
 	if err != nil {
