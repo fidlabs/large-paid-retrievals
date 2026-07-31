@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -80,6 +81,7 @@ func TestCDPLookupReturnsAllDeals(t *testing.T) {
 				{"dealId": "2", "providerId": "f01", "clientAddress": "0x2", "dealState": "COMPLETED", "dealType": "PRIVATE", "active": true},
 				{"dealId": "3", "providerId": "f01", "clientAddress": "0x3", "dealState": "ACCEPTED", "dealType": "PUBLIC", "active": false},
 			},
+			"pagination": map[string]any{"page": 1, "pagesCount": 1, "totalCount": 3},
 		})
 	}))
 	t.Cleanup(srv.Close)
@@ -104,6 +106,110 @@ func TestCDPLookupReturnsAllDeals(t *testing.T) {
 			t.Fatalf("missing deal %s", id)
 		}
 	}
+}
+
+func TestCDPLookupPaginatesAllPages(t *testing.T) {
+	var pages []int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("page")
+		limit := r.URL.Query().Get("limit")
+		if limit != "100" {
+			t.Errorf("limit=%s want 100", limit)
+		}
+		pages = append(pages, atoi(t, page))
+		switch page {
+		case "1":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]any{
+					{"dealId": "1", "providerId": "f01", "clientAddress": "0x1", "dealType": "PRIVATE", "active": true},
+					{"dealId": "2", "providerId": "f01", "clientAddress": "0x2", "dealType": "PRIVATE", "active": true},
+				},
+				"pagination": map[string]any{"page": 1, "pagesCount": 2, "totalCount": 3},
+			})
+		case "2":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]any{
+					{"dealId": "3", "providerId": "f01", "clientAddress": "0x3", "dealType": "PUBLIC", "active": true},
+				},
+				"pagination": map[string]any{"page": 2, "pagesCount": 2, "totalCount": 3},
+			})
+		default:
+			t.Errorf("unexpected page %s", page)
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}})
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: srv.URL, HTTPClient: srv.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deals, err := lookup.LookupByPieceCID(context.Background(), "baga6ea4seaqaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deals) != 3 {
+		t.Fatalf("expected 3 deals across pages, got %d", len(deals))
+	}
+	if len(pages) != 2 || pages[0] != 1 || pages[1] != 2 {
+		t.Fatalf("pages fetched: %v", pages)
+	}
+	if deals[2].DealID != "3" || deals[2].DealType != DealTypePublic {
+		t.Fatalf("page-2 deal: %+v", deals[2])
+	}
+}
+
+func TestCDPLookupPaginatesWithoutPagesCount(t *testing.T) {
+	// When pagination metadata is missing, keep fetching while pages are full.
+	n := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
+		page := r.URL.Query().Get("page")
+		if page == "1" {
+			data := make([]map[string]any, cdpDealsPageLimit)
+			for i := range data {
+				data[i] = map[string]any{
+					"dealId": strconv.Itoa(i + 1), "providerId": "f01",
+					"clientAddress": "0x1", "dealType": "PRIVATE", "active": true,
+				}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{
+				{"dealId": "101", "providerId": "f01", "clientAddress": "0x2", "dealType": "PUBLIC", "active": true},
+			},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: srv.URL, HTTPClient: srv.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deals, err := lookup.LookupByPieceCID(context.Background(), "baga6ea4seaqaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deals) != cdpDealsPageLimit+1 {
+		t.Fatalf("got %d deals want %d", len(deals), cdpDealsPageLimit+1)
+	}
+	if n != 2 {
+		t.Fatalf("expected 2 HTTP fetches, got %d", n)
+	}
+	if deals[len(deals)-1].DealID != "101" {
+		t.Fatalf("last deal: %+v", deals[len(deals)-1])
+	}
+}
+
+func atoi(t *testing.T, s string) int {
+	t.Helper()
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
 }
 
 func TestCDPLookupFiltersProviderClientSide(t *testing.T) {
