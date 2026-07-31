@@ -142,8 +142,8 @@ func (c *CDPLookup) getJSON(ctx context.Context, rawURL string, dest any) error 
 }
 
 type cdpDealsPage struct {
-	Data       []cdpDeal      `json:"data"`
-	Pagination cdpPagination  `json:"pagination"`
+	Data       []cdpDeal     `json:"data"`
+	Pagination cdpPagination `json:"pagination"`
 }
 
 type cdpPagination struct {
