@@ -95,8 +95,8 @@ func (a *Authorizer) Middleware(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), accessContextKey{}, struct{}{})
 		if a.lookup != nil {
 			if cid, ok := parsePiecePath(r.URL.Path); ok {
-				deals, err := a.lookup.LookupByPieceCID(ctx, cid)
 				requester := a.requesterAddress(r)
+				deals, err := a.lookup.LookupByPieceCID(ctx, cid, requester)
 				var deal *Deal
 				if err == nil && len(deals) > 0 {
 					deal = selectRepresentativeDeal(deals, requester)

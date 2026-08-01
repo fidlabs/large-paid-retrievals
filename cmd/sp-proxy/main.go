@@ -50,7 +50,7 @@ func root() *cobra.Command {
 	c.Flags().StringVar(&settings.UpstreamHost, "upstream-host", getenv("SP_PROXY_UPSTREAM_HOST", "127.0.0.1"), "Upstream HTTP server host for proxied /piece requests")
 	c.Flags().IntVar(&settings.UpstreamPort, "upstream-port", mustParsePort(getenv("SP_PROXY_UPSTREAM_PORT", "8788")), "Upstream HTTP server port for proxied /piece requests")
 	c.Flags().StringVar(&settings.PorepCDPURL, "porep-cdp-url", getenv("SP_PROXY_POREP_CDP_URL", pieceaccess.DefaultCDPBaseURL), "CDP base URL for piece CID → deal (GET /po-rep/deals?pieceCID=…; default https://cdp.allocator.tech; local Curio: http://127.0.0.1:23300). Empty disables")
-	c.Flags().Uint64Var(&settings.PorepProviderID, "porep-provider-id", mustParseUint64(getenv("SP_PROXY_POREP_PROVIDER_ID", "0")), "Miner actor ID (f0…) used to filter CDP deals")
+	c.Flags().Uint64Var(&settings.PorepProviderID, "porep-provider-id", mustParseUint64(getenv("SP_PROXY_POREP_PROVIDER_ID", "0")), "Miner actor ID (f0…); required when --porep-cdp-url is set; always filters CDP deals to this SP")
 	initCLIUsage(c)
 	return c
 }

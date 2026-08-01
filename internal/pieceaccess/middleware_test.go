@@ -24,7 +24,7 @@ type stubLookup struct {
 	cid   string
 }
 
-func (s *stubLookup) LookupByPieceCID(_ context.Context, pieceCID string) ([]*pieceaccess.Deal, error) {
+func (s *stubLookup) LookupByPieceCID(_ context.Context, pieceCID string, _ common.Address) ([]*pieceaccess.Deal, error) {
 	s.cid = pieceCID
 	if s.err != nil {
 		return nil, s.err

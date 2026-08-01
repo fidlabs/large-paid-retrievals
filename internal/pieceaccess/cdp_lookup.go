@@ -24,11 +24,11 @@ const (
 // CDPLookupConfig configures HTTP lookup against CDP GET /po-rep/deals.
 type CDPLookupConfig struct {
 	BaseURL    string // e.g. https://cdp.allocator.tech or http://127.0.0.1:23300
-	ProviderID uint64 // when set, passed as providerId=f0… filter and applied client-side
+	ProviderID uint64 // required; passed as providerId=f0… and enforced client-side
 	HTTPClient *http.Client
 }
 
-// CDPLookup resolves PoRep deals via CDP pieceCID query.
+// CDPLookup resolves PoRep deals via CDP pieceCID query, scoped to one provider.
 type CDPLookup struct {
 	baseURL    string
 	providerID uint64
@@ -44,6 +44,9 @@ func NewCDPLookup(cfg CDPLookupConfig) (*CDPLookup, error) {
 	if _, err := url.ParseRequestURI(base); err != nil {
 		return nil, fmt.Errorf("pieceaccess: invalid CDP base URL %q: %w", base, err)
 	}
+	if cfg.ProviderID == 0 {
+		return nil, fmt.Errorf("pieceaccess: CDP ProviderID is required")
+	}
 	hc := cfg.HTTPClient
 	if hc == nil {
 		hc = &http.Client{Timeout: 30 * time.Second}
@@ -55,10 +58,11 @@ func NewCDPLookup(cfg CDPLookupConfig) (*CDPLookup, error) {
 	}, nil
 }
 
-// LookupByPieceCID implements DealLookup. It returns all deals for the piece
-// (optionally filtered to ProviderID), paging through CDP results as needed so
-// access checks can match any private owner.
-func (c *CDPLookup) LookupByPieceCID(ctx context.Context, pieceCID string) ([]*Deal, error) {
+// LookupByPieceCID implements DealLookup. It pages CDP deals for the piece
+// filtered to ProviderID and stops early once a public deal or a private deal
+// owned by requester is found (enough to allow access). If neither appears,
+// it returns every matching deal so denyAccess can explain the denial.
+func (c *CDPLookup) LookupByPieceCID(ctx context.Context, pieceCID string, requester common.Address) ([]*Deal, error) {
 	if c == nil {
 		return nil, fmt.Errorf("pieceaccess: CDPLookup is nil")
 	}
@@ -73,9 +77,7 @@ func (c *CDPLookup) LookupByPieceCID(ctx context.Context, pieceCID string) ([]*D
 		q.Set("pieceCID", pieceCID)
 		q.Set("limit", strconv.Itoa(cdpDealsPageLimit))
 		q.Set("page", strconv.Itoa(pageNum))
-		if c.providerID != 0 {
-			q.Set("providerId", fmt.Sprintf("f0%d", c.providerID))
-		}
+		q.Set("providerId", fmt.Sprintf("f0%d", c.providerID))
 
 		rawURL := c.baseURL + "/po-rep/deals?" + q.Encode()
 		var page cdpDealsPage
@@ -91,8 +93,11 @@ func (c *CDPLookup) LookupByPieceCID(ctx context.Context, pieceCID string) ([]*D
 			if err != nil {
 				return nil, err
 			}
-			if c.providerID != 0 && d.ProviderID != c.providerID {
+			if d.ProviderID != c.providerID {
 				continue
+			}
+			if dealAllowsAccess(d, requester) {
+				return []*Deal{d}, nil
 			}
 			out = append(out, d)
 		}
@@ -109,6 +114,21 @@ func (c *CDPLookup) LookupByPieceCID(ctx context.Context, pieceCID string) ([]*D
 		return nil, fmt.Errorf("%w: CDP returned no deals for pieceCID", ErrDealNotFound)
 	}
 	return out, nil
+}
+
+// dealAllowsAccess is true when this deal alone is enough to permit the requester.
+func dealAllowsAccess(d *Deal, requester common.Address) bool {
+	if d == nil {
+		return false
+	}
+	switch d.DealType {
+	case DealTypePublic:
+		return true
+	case DealTypePrivate:
+		return requester != (common.Address{}) && sameAddress(requester, d.Client)
+	default:
+		return false
+	}
 }
 
 func (c *CDPLookup) getJSON(ctx context.Context, rawURL string, dest any) error {

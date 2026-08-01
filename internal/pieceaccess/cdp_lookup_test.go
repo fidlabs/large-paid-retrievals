@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/ethereum/go-ethereum/common"
 )
 
 func TestCDPLookupByPieceCID(t *testing.T) {
@@ -44,7 +46,7 @@ func TestCDPLookupByPieceCID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	deals, err := lookup.LookupByPieceCID(context.Background(), piece)
+	deals, err := lookup.LookupByPieceCID(context.Background(), piece, common.Address{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,38 +75,98 @@ func TestCDPLookupByPieceCID(t *testing.T) {
 	}
 }
 
+func TestCDPLookupEarlyOutOnPublic(t *testing.T) {
+	var pages int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pages++
+		page := r.URL.Query().Get("page")
+		if page != "1" {
+			t.Errorf("unexpected page %s after early out", page)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{
+				{"dealId": "1", "providerId": "f01", "clientAddress": "0x1", "dealType": "PRIVATE", "active": true},
+				{"dealId": "2", "providerId": "f01", "clientAddress": "0x2", "dealType": "PUBLIC", "active": true},
+				{"dealId": "3", "providerId": "f01", "clientAddress": "0x3", "dealType": "PRIVATE", "active": true},
+			},
+			"pagination": map[string]any{"page": 1, "pagesCount": 5, "totalCount": 50},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: srv.URL, ProviderID: 1, HTTPClient: srv.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deals, err := lookup.LookupByPieceCID(context.Background(), "baga6ea4seaqaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", common.Address{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deals) != 1 || deals[0].DealID != "2" || deals[0].DealType != DealTypePublic {
+		t.Fatalf("expected early public deal 2, got %+v", deals)
+	}
+	if pages != 1 {
+		t.Fatalf("pages=%d want 1", pages)
+	}
+}
+
+func TestCDPLookupEarlyOutOnMatchingPrivate(t *testing.T) {
+	owner := common.HexToAddress("0x0000000000000000000000000000000000000002")
+	var pages int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pages++
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{
+				{"dealId": "1", "providerId": "f01", "clientAddress": "0x0000000000000000000000000000000000000001", "dealType": "PRIVATE", "active": true},
+				{"dealId": "2", "providerId": "f01", "clientAddress": owner.Hex(), "dealType": "PRIVATE", "active": true},
+				{"dealId": "3", "providerId": "f01", "clientAddress": "0x0000000000000000000000000000000000000003", "dealType": "PRIVATE", "active": true},
+			},
+			"pagination": map[string]any{"page": 1, "pagesCount": 9, "totalCount": 90},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: srv.URL, ProviderID: 1, HTTPClient: srv.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deals, err := lookup.LookupByPieceCID(context.Background(), "baga6ea4seaqaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deals) != 1 || deals[0].DealID != "2" {
+		t.Fatalf("expected matching private deal 2, got %+v", deals)
+	}
+	if pages != 1 {
+		t.Fatalf("pages=%d want 1", pages)
+	}
+}
+
 func TestCDPLookupReturnsAllDeals(t *testing.T) {
+	// No public deal and anonymous requester: must collect every private deal
+	// (cannot allow early) so denyAccess can require client identity.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"data": []map[string]any{
 				{"dealId": "1", "providerId": "f01", "clientAddress": "0x1", "dealState": "ACCEPTED", "dealType": "PRIVATE", "active": false},
 				{"dealId": "2", "providerId": "f01", "clientAddress": "0x2", "dealState": "COMPLETED", "dealType": "PRIVATE", "active": true},
-				{"dealId": "3", "providerId": "f01", "clientAddress": "0x3", "dealState": "ACCEPTED", "dealType": "PUBLIC", "active": false},
+				{"dealId": "3", "providerId": "f01", "clientAddress": "0x3", "dealState": "ACCEPTED", "dealType": "PRIVATE", "active": false},
 			},
 			"pagination": map[string]any{"page": 1, "pagesCount": 1, "totalCount": 3},
 		})
 	}))
 	t.Cleanup(srv.Close)
 
-	lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: srv.URL, HTTPClient: srv.Client()})
+	lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: srv.URL, ProviderID: 1, HTTPClient: srv.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	deals, err := lookup.LookupByPieceCID(context.Background(), "baga6ea4seaqaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	deals, err := lookup.LookupByPieceCID(context.Background(), "baga6ea4seaqaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", common.Address{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(deals) != 3 {
 		t.Fatalf("expected 3 deals, got %d", len(deals))
-	}
-	ids := map[string]bool{}
-	for _, d := range deals {
-		ids[d.DealID] = true
-	}
-	for _, id := range []string{"1", "2", "3"} {
-		if !ids[id] {
-			t.Fatalf("missing deal %s", id)
-		}
 	}
 }
 
@@ -113,8 +175,12 @@ func TestCDPLookupPaginatesAllPages(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		page := r.URL.Query().Get("page")
 		limit := r.URL.Query().Get("limit")
+		provider := r.URL.Query().Get("providerId")
 		if limit != "100" {
 			t.Errorf("limit=%s want 100", limit)
+		}
+		if provider != "f01" {
+			t.Errorf("providerId=%s want f01", provider)
 		}
 		pages = append(pages, atoi(t, page))
 		switch page {
@@ -140,22 +206,19 @@ func TestCDPLookupPaginatesAllPages(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: srv.URL, HTTPClient: srv.Client()})
+	lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: srv.URL, ProviderID: 1, HTTPClient: srv.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	deals, err := lookup.LookupByPieceCID(context.Background(), "baga6ea4seaqaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	deals, err := lookup.LookupByPieceCID(context.Background(), "baga6ea4seaqaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", common.Address{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(deals) != 3 {
-		t.Fatalf("expected 3 deals across pages, got %d", len(deals))
+	if len(deals) != 1 || deals[0].DealID != "3" || deals[0].DealType != DealTypePublic {
+		t.Fatalf("expected early public from page 2, got %+v", deals)
 	}
 	if len(pages) != 2 || pages[0] != 1 || pages[1] != 2 {
 		t.Fatalf("pages fetched: %v", pages)
-	}
-	if deals[2].DealID != "3" || deals[2].DealType != DealTypePublic {
-		t.Fatalf("page-2 deal: %+v", deals[2])
 	}
 }
 
@@ -184,22 +247,19 @@ func TestCDPLookupPaginatesWithoutPagesCount(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: srv.URL, HTTPClient: srv.Client()})
+	lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: srv.URL, ProviderID: 1, HTTPClient: srv.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	deals, err := lookup.LookupByPieceCID(context.Background(), "baga6ea4seaqaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	deals, err := lookup.LookupByPieceCID(context.Background(), "baga6ea4seaqaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", common.Address{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(deals) != cdpDealsPageLimit+1 {
-		t.Fatalf("got %d deals want %d", len(deals), cdpDealsPageLimit+1)
+	if len(deals) != 1 || deals[0].DealID != "101" {
+		t.Fatalf("expected early public on page 2, got %+v", deals)
 	}
 	if n != 2 {
 		t.Fatalf("expected 2 HTTP fetches, got %d", n)
-	}
-	if deals[len(deals)-1].DealID != "101" {
-		t.Fatalf("last deal: %+v", deals[len(deals)-1])
 	}
 }
 
@@ -227,7 +287,7 @@ func TestCDPLookupFiltersProviderClientSide(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	deals, err := lookup.LookupByPieceCID(context.Background(), "baga6ea4seaqaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	deals, err := lookup.LookupByPieceCID(context.Background(), "baga6ea4seaqaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", common.Address{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,11 +302,11 @@ func TestCDPLookupNotFound(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: srv.URL, HTTPClient: srv.Client()})
+	lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: srv.URL, ProviderID: 1, HTTPClient: srv.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = lookup.LookupByPieceCID(context.Background(), "baga6ea4seaqaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	_, err = lookup.LookupByPieceCID(context.Background(), "baga6ea4seaqaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", common.Address{})
 	if !errors.Is(err, ErrDealNotFound) {
 		t.Fatalf("got %v", err)
 	}
@@ -286,7 +346,10 @@ func TestNewCDPLookupValidation(t *testing.T) {
 	if _, err := NewCDPLookup(CDPLookupConfig{BaseURL: "://bad"}); err == nil {
 		t.Fatal("expected invalid URL error")
 	}
-	lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: "http://127.0.0.1:9"})
+	if _, err := NewCDPLookup(CDPLookupConfig{BaseURL: "http://127.0.0.1:9"}); err == nil {
+		t.Fatal("expected missing ProviderID error")
+	}
+	lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: "http://127.0.0.1:9", ProviderID: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,15 +360,15 @@ func TestNewCDPLookupValidation(t *testing.T) {
 
 func TestCDPLookupEmptyPieceCID(t *testing.T) {
 	t.Parallel()
-	lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: "http://example.invalid"})
+	lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: "http://example.invalid", ProviderID: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := lookup.LookupByPieceCID(context.Background(), "  "); err == nil {
+	if _, err := lookup.LookupByPieceCID(context.Background(), "  ", common.Address{}); err == nil {
 		t.Fatal("expected empty piece CID error")
 	}
 	var nilLookup *CDPLookup
-	if _, err := nilLookup.LookupByPieceCID(context.Background(), "baga"); err == nil {
+	if _, err := nilLookup.LookupByPieceCID(context.Background(), "baga", common.Address{}); err == nil {
 		t.Fatal("expected nil receiver error")
 	}
 }
@@ -317,11 +380,11 @@ func TestCDPLookupHTTPErrors(t *testing.T) {
 			http.Error(w, strings.Repeat("x", 250), http.StatusBadGateway)
 		}))
 		t.Cleanup(srv.Close)
-		lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: srv.URL, HTTPClient: srv.Client()})
+		lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: srv.URL, ProviderID: 1, HTTPClient: srv.Client()})
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, err = lookup.LookupByPieceCID(context.Background(), "baga6ea4seaqaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+		_, err = lookup.LookupByPieceCID(context.Background(), "baga6ea4seaqaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", common.Address{})
 		if err == nil || !strings.Contains(err.Error(), "HTTP 502") {
 			t.Fatalf("got %v", err)
 		}
@@ -334,11 +397,11 @@ func TestCDPLookupHTTPErrors(t *testing.T) {
 			_, _ = w.Write([]byte("{"))
 		}))
 		t.Cleanup(srv.Close)
-		lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: srv.URL, HTTPClient: srv.Client()})
+		lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: srv.URL, ProviderID: 1, HTTPClient: srv.Client()})
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, err = lookup.LookupByPieceCID(context.Background(), "baga6ea4seaqaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+		_, err = lookup.LookupByPieceCID(context.Background(), "baga6ea4seaqaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", common.Address{})
 		if err == nil || !strings.Contains(err.Error(), "decode") {
 			t.Fatalf("got %v", err)
 		}
@@ -363,11 +426,11 @@ func TestCDPLookupDealIDFormsAndBadProvider(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: srv.URL, HTTPClient: srv.Client()})
+	lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: srv.URL, ProviderID: 1004, HTTPClient: srv.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	deals, err := lookup.LookupByPieceCID(context.Background(), "baga6ea4seaqaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	deals, err := lookup.LookupByPieceCID(context.Background(), "baga6ea4seaqaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", common.Address{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -383,11 +446,11 @@ func TestCDPLookupDealIDFormsAndBadProvider(t *testing.T) {
 		})
 	}))
 	t.Cleanup(bad.Close)
-	lookup, err = NewCDPLookup(CDPLookupConfig{BaseURL: bad.URL, HTTPClient: bad.Client()})
+	lookup, err = NewCDPLookup(CDPLookupConfig{BaseURL: bad.URL, ProviderID: 1, HTTPClient: bad.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = lookup.LookupByPieceCID(context.Background(), "baga6ea4seaqaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	_, err = lookup.LookupByPieceCID(context.Background(), "baga6ea4seaqaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", common.Address{})
 	if err == nil || !strings.Contains(err.Error(), "providerId") {
 		t.Fatalf("got %v", err)
 	}

@@ -11,9 +11,11 @@ import (
 // ErrDealNotFound is returned when no PoRep market deal maps to the piece CID.
 var ErrDealNotFound = errors.New("pieceaccess: porep deal not found for piece CID")
 
-// DealLookup resolves PoRep deals from a piece CID (one piece may appear on several deals).
+// DealLookup resolves PoRep deals from a piece CID for access checks.
+// requester may be the zero address (anonymous); implementations may stop early
+// once a public deal or a private deal owned by requester is found.
 type DealLookup interface {
-	LookupByPieceCID(ctx context.Context, pieceCID string) ([]*Deal, error)
+	LookupByPieceCID(ctx context.Context, pieceCID string, requester common.Address) ([]*Deal, error)
 }
 
 // DealType mirrors PoRepMarket dealType (public=10, private=20).
