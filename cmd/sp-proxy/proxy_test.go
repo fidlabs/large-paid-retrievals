@@ -565,6 +565,11 @@ func TestRunProxyAppInvalidPayee(t *testing.T) {
 func TestCobraExecuteStartsProxy(t *testing.T) {
 	defer restoreProxyHooks(t)()
 
+	// Flag defaults read SP_PROXY_POREP_* at registration; clear so ambient
+	// devnet env cannot enable CDP without a provider ID.
+	t.Setenv("SP_PROXY_POREP_CDP_URL", "")
+	t.Setenv("SP_PROXY_POREP_PROVIDER_ID", "0")
+
 	upstream := upstreamPieceServer(t)
 	defer upstream.Close()
 	host, port := upstreamHostPort(t, upstream.URL)
@@ -586,6 +591,7 @@ func TestCobraExecuteStartsProxy(t *testing.T) {
 		"--upstream-host", host,
 		"--upstream-port", strconv.Itoa(port),
 		"--pay-payee-address", testQuotePayee0x,
+		"--porep-cdp-url", "", // disable CDP for this routing smoke test
 	})
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
