@@ -272,7 +272,7 @@ func TestResolvePaymentsAddress(t *testing.T) {
 }
 
 func TestResolvePaymentTokenDevnet(t *testing.T) {
-	got, err := resolvePaymentToken(constants.ChainIDDevnet)
+	got, err := resolvePaymentToken("", constants.ChainIDDevnet)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,21 +291,30 @@ func TestResolvePaymentsAddressDevnet(t *testing.T) {
 
 func TestResolvePaymentToken(t *testing.T) {
 	calib := constants.USDFCAddressesByChainID[constants.ChainIDCalibration]
-	got, err := resolvePaymentToken(constants.ChainIDCalibration)
+	got, err := resolvePaymentToken("", constants.ChainIDCalibration)
 	if err != nil || got != calib {
 		t.Fatalf("calibration: got %s err %v", got.Hex(), err)
 	}
-	got, err = resolvePaymentToken(constants.ChainIDMainnet)
+	got, err = resolvePaymentToken("", constants.ChainIDMainnet)
 	if err != nil || got != constants.USDFCAddresses[constants.NetworkMainnet] {
 		t.Fatalf("mainnet: got %s err %v", got.Hex(), err)
 	}
-	got, err = resolvePaymentToken(constants.ChainIDDevnet)
+	got, err = resolvePaymentToken("", constants.ChainIDDevnet)
 	if err != nil || got != constants.USDFCAddresses[constants.NetworkDevnet] {
 		t.Fatalf("devnet: got %s err %v", got.Hex(), err)
 	}
-	_, err = resolvePaymentToken(424242)
+	explicit := common.HexToAddress("0x9413F0e06D69a44A9169fA6AF7308537e1D95193")
+	got, err = resolvePaymentToken(explicit.Hex(), constants.ChainIDDevnet)
+	if err != nil || got != explicit {
+		t.Fatalf("explicit override: got %s err %v", got.Hex(), err)
+	}
+	_, err = resolvePaymentToken("", 424242)
 	if err == nil || !strings.Contains(err.Error(), "unknown USDFC") {
 		t.Fatalf("expected unknown chain error, got %v", err)
+	}
+	_, err = resolvePaymentToken("not-an-address", constants.ChainIDDevnet)
+	if err == nil || !strings.Contains(err.Error(), "invalid USDFC") {
+		t.Fatalf("expected invalid address error, got %v", err)
 	}
 }
 
@@ -419,6 +428,7 @@ func TestFindActiveTokenRail(t *testing.T) {
 	ctx := context.Background()
 	payer := common.HexToAddress("0x1000000000000000000000000000000000000001")
 	payee := common.HexToAddress("0x2000000000000000000000000000000000000002")
+	foreignOp := common.HexToAddress("0x5607327BDc0CA5538faA108555Ce09D89075B527")
 	token := constants.USDFCAddressesByChainID[constants.ChainIDCalibration]
 	railID := big.NewInt(7)
 
@@ -427,7 +437,8 @@ func TestFindActiveTokenRail(t *testing.T) {
 		t.Fatal("expected empty payer error")
 	}
 
-	active := testClient(t, &mockPayments{
+	active := testClient(t, &mockPayments{})
+	active.payments = &mockPayments{
 		railsForPayer: func(ctx context.Context, p, tok common.Address, offset, limit *big.Int) ([]contracts.RailInfoResult, *big.Int, *big.Int, error) {
 			return []contracts.RailInfoResult{{
 				RailId:       railID,
@@ -437,38 +448,68 @@ func TestFindActiveTokenRail(t *testing.T) {
 		},
 		rail: func(ctx context.Context, id *big.Int) (*contracts.RailViewResult, error) {
 			return &contracts.RailViewResult{
-				Token: token, From: payer, To: payee,
+				Token: token, From: payer, To: payee, Operator: active.signerAddr,
 				SettledUpTo: big.NewInt(0), EndEpoch: big.NewInt(0),
 			}, nil
 		},
-	})
+	}
 	got, err := active.FindActiveTokenRail(ctx, payer, payee)
 	if err != nil || got.Cmp(railID) != 0 {
 		t.Fatalf("rail=%s err=%v", got, err)
 	}
 
-	skips := testClient(t, &mockPayments{
+	// Prefer self-operated rail when a foreign-operated rail for the same pair exists first.
+	selfID := big.NewInt(9)
+	prefersSelf := testClient(t, &mockPayments{})
+	prefersSelf.payments = &mockPayments{
+		railsForPayer: func(ctx context.Context, p, tok common.Address, offset, limit *big.Int) ([]contracts.RailInfoResult, *big.Int, *big.Int, error) {
+			return []contracts.RailInfoResult{
+				{RailId: big.NewInt(8), IsTerminated: false},
+				{RailId: selfID, IsTerminated: false},
+			}, big.NewInt(0), big.NewInt(2), nil
+		},
+		rail: func(ctx context.Context, id *big.Int) (*contracts.RailViewResult, error) {
+			op := foreignOp
+			if id.Cmp(selfID) == 0 {
+				op = prefersSelf.signerAddr
+			}
+			return &contracts.RailViewResult{
+				Token: token, From: payer, To: payee, Operator: op,
+				SettledUpTo: big.NewInt(0), EndEpoch: big.NewInt(0),
+			}, nil
+		},
+	}
+	got, err = prefersSelf.FindActiveTokenRail(ctx, payer, payee)
+	if err != nil || got.Cmp(selfID) != 0 {
+		t.Fatalf("want self-operated rail %s, got %s err=%v", selfID, got, err)
+	}
+
+	skips := testClient(t, &mockPayments{})
+	skips.payments = &mockPayments{
 		railsForPayer: func(ctx context.Context, p, tok common.Address, offset, limit *big.Int) ([]contracts.RailInfoResult, *big.Int, *big.Int, error) {
 			return []contracts.RailInfoResult{
 				{RailId: big.NewInt(1), IsTerminated: true},
 				{RailId: big.NewInt(2), IsTerminated: false},
 				{RailId: big.NewInt(3), IsTerminated: false},
 				{RailId: big.NewInt(4), IsTerminated: false},
-			}, big.NewInt(0), big.NewInt(4), nil
+				{RailId: big.NewInt(5), IsTerminated: false},
+			}, big.NewInt(0), big.NewInt(5), nil
 		},
 		rail: func(ctx context.Context, id *big.Int) (*contracts.RailViewResult, error) {
 			switch id.Int64() {
 			case 2:
-				return &contracts.RailViewResult{Token: common.HexToAddress("0xdead"), From: payer, To: payee}, nil
+				return &contracts.RailViewResult{Token: common.HexToAddress("0xdead"), From: payer, To: payee, Operator: skips.signerAddr}, nil
 			case 3:
-				return &contracts.RailViewResult{Token: token, From: payer, To: common.HexToAddress("0xbad")}, nil
+				return &contracts.RailViewResult{Token: token, From: payer, To: common.HexToAddress("0xbad"), Operator: skips.signerAddr}, nil
 			case 4:
-				return &contracts.RailViewResult{Token: token, From: payer, To: payee, EndEpoch: big.NewInt(1)}, nil
+				return &contracts.RailViewResult{Token: token, From: payer, To: payee, Operator: skips.signerAddr, EndEpoch: big.NewInt(1)}, nil
+			case 5:
+				return &contracts.RailViewResult{Token: token, From: payer, To: payee, Operator: foreignOp, EndEpoch: big.NewInt(0)}, nil
 			default:
 				return nil, errors.New("skip")
 			}
 		},
-	})
+	}
 	if _, err := skips.FindActiveTokenRail(ctx, payer, payee); err == nil || !strings.Contains(err.Error(), "no active token rail") {
 		t.Fatalf("expected not found, got %v", err)
 	}
@@ -675,7 +716,7 @@ func TestPreparePayerForPayeeExistingRail(t *testing.T) {
 			return []contracts.RailInfoResult{{RailId: railID, IsTerminated: false, EndEpoch: big.NewInt(0)}}, big.NewInt(0), big.NewInt(1), nil
 		},
 		rail: func(ctx context.Context, id *big.Int) (*contracts.RailViewResult, error) {
-			return &contracts.RailViewResult{Token: token, From: payer, To: payee, EndEpoch: big.NewInt(0)}, nil
+			return &contracts.RailViewResult{Token: token, From: payer, To: payee, Operator: payer, EndEpoch: big.NewInt(0)}, nil
 		},
 	})
 	// PreparePayerForPayee uses payer as operator too; use signer as payer for approval path.
@@ -878,7 +919,8 @@ func TestFindActiveTokenRailPaginates(t *testing.T) {
 	token := constants.USDFCAddressesByChainID[constants.ChainIDCalibration]
 	target := big.NewInt(100)
 	page := 0
-	c := testClient(t, &mockPayments{
+	c := testClient(t, &mockPayments{})
+	c.payments = &mockPayments{
 		railsForPayer: func(ctx context.Context, p, tok common.Address, offset, limit *big.Int) ([]contracts.RailInfoResult, *big.Int, *big.Int, error) {
 			page++
 			if page == 1 {
@@ -891,9 +933,9 @@ func TestFindActiveTokenRailPaginates(t *testing.T) {
 			return []contracts.RailInfoResult{{RailId: target, IsTerminated: false, EndEpoch: big.NewInt(0)}}, big.NewInt(0), big.NewInt(101), nil
 		},
 		rail: func(ctx context.Context, id *big.Int) (*contracts.RailViewResult, error) {
-			return &contracts.RailViewResult{Token: token, From: payer, To: payee, EndEpoch: big.NewInt(0)}, nil
+			return &contracts.RailViewResult{Token: token, From: payer, To: payee, Operator: c.signerAddr, EndEpoch: big.NewInt(0)}, nil
 		},
-	})
+	}
 	got, err := c.FindActiveTokenRail(ctx, payer, payee)
 	if err != nil || got.Cmp(target) != 0 {
 		t.Fatalf("rail=%s err=%v page=%d", got, err, page)

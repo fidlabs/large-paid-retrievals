@@ -1,0 +1,375 @@
+version: "3"
+
+# FCSS-devnet integration helpers and e2e (local Curio + CDP + seed-deals).
+# Prerequisite: sibling ../FCSS-devnet is up (`just up` + `just seed-deals`) with
+# .runtime/seed-deals/summary.json present.
+#
+# Path: retrieval-client → sp-proxy (:8787) → bytecut-proxy (:22311, RST after 0.5 MiB) → Curio (:22310).
+#
+# From repo root:
+#   task fcss-devnet:e2e
+#   task fcss-devnet:bytecut / task fcss-devnet:bytecut:clean
+#   task fcss-devnet --list
+
+vars:
+  SP_PROXY_PORT: "8787"
+  SP_PROXY_PRICE: "0.01"
+  SP_PROXY_LOG: .task/sp-proxy-fcss.log
+  SP_PROXY_DB: .task/sp-proxy-fcss.db
+  SP_KEY: ./sp.key
+  OUT_DIR: ./downloads
+  SEED_SUMMARY: ../FCSS-devnet/.runtime/seed-deals/summary.json
+  # bytecut-proxy sits between sp-proxy and Curio; TCP-resets /piece GETs after 0.5 MiB.
+  BYTECUT_LISTEN_PORT: "22311"
+  BYTECUT_LOG: .task/bytecut-proxy.log
+  BYTECUT_DROP_BYTES: "524288"
+
+tasks:
+  default:
+    desc: List FCSS-devnet integration tasks
+    cmds:
+      - task --list | grep -E 'fcss-devnet:' || true
+    silent: true
+
+  env:
+    desc: Load and print FCSS-devnet env (scripts/devnet-env.sh)
+    cmds:
+      - |
+        set -euo pipefail
+        unset DEVNET_ROOT CONTRACTS_DIR POREP_ENV_FILE PAY_RPC_URL \
+          SP_PROXY_POREP_CDP_URL SP_PROXY_UPSTREAM_PORT SP_PROXY_UPSTREAM_HOST || true
+        # shellcheck disable=SC1091
+        source ./scripts/devnet-env.sh
+
+  keys:
+    desc: Extract settler sp.key from FCSS-devnet tooling .env
+    cmds:
+      - ./scripts/extract-keys-from-env.sh
+
+  fund:
+    desc: Fund client.key / sp.key with FIL + USDFC on local Curio chain
+    deps:
+      - keys
+    cmds:
+      - ./scripts/fund-devnet-wallets.sh
+
+  check:
+    desc: Verify Curio piece HEAD for c1-private data CID and seed summary
+    cmds:
+      - |
+        set -euo pipefail
+        unset DEVNET_ROOT CONTRACTS_DIR POREP_ENV_FILE PAY_RPC_URL \
+          SP_PROXY_POREP_CDP_URL SP_PROXY_UPSTREAM_PORT SP_PROXY_UPSTREAM_HOST || true
+        # shellcheck disable=SC1091
+        source ./scripts/devnet-env.sh
+        summary="{{.SEED_SUMMARY}}"
+        [[ -f "${summary}" ]] || { echo "missing ${summary} (run just seed-deals in FCSS-devnet)" >&2; exit 1; }
+        cid="$(jq -r '.[] | select(.slot=="c1-private") | .pieces[] | select(.pieceType=="data") | .pieceCid' "${summary}")"
+        [[ -n "${cid}" && "${cid}" != "null" ]] || { echo "c1-private data piece missing in summary" >&2; exit 1; }
+        echo "** HEAD Curio piece ${cid} via ${SP_PROXY_UPSTREAM_HOST}:${SP_PROXY_UPSTREAM_PORT}"
+        curl -fsS --head "http://${SP_PROXY_UPSTREAM_HOST}:${SP_PROXY_UPSTREAM_PORT}/piece/${cid}" \
+          | tr -d '\r' | grep -E '^(HTTP/|Content-Length:)'
+
+  bytecut:
+    desc: Start bytecut-proxy between host and Curio; TCP-RST /piece GETs after 0.5 MiB
+    deps:
+      - :build
+    cmds:
+      - |
+        set -euo pipefail
+        command -v lsof >/dev/null 2>&1 || { echo "lsof required for fcss-devnet:bytecut" >&2; exit 1; }
+        unset DEVNET_ROOT CONTRACTS_DIR POREP_ENV_FILE PAY_RPC_URL \
+          SP_PROXY_POREP_CDP_URL SP_PROXY_UPSTREAM_PORT SP_PROXY_UPSTREAM_HOST || true
+        # shellcheck disable=SC1091
+        source ./scripts/devnet-env.sh
+        mkdir -p .task
+        listen_port="{{.BYTECUT_LISTEN_PORT}}"
+        drop_bytes="{{.BYTECUT_DROP_BYTES}}"
+        log="{{.BYTECUT_LOG}}"
+        # Stop any prior bytecut-proxy on this port.
+        pids=$(lsof -tiTCP:"${listen_port}" -sTCP:LISTEN 2>/dev/null || true)
+        echo "${pids}" | while read -r pid; do
+          [ -n "${pid}" ] && /bin/kill "${pid}" 2>/dev/null || true
+        done
+        rm -f "${log}"
+        ./bin/bytecut-proxy \
+          --listen "127.0.0.1:${listen_port}" \
+          --upstream "http://${SP_PROXY_UPSTREAM_HOST}:${SP_PROXY_UPSTREAM_PORT}" \
+          --drop-bytes "${drop_bytes}" \
+          > "${log}" 2>&1 &
+        for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+          if grep -q 'bytecut-proxy listening' "${log}" 2>/dev/null; then
+            break
+          fi
+          sleep 0.1
+        done
+        grep -q 'bytecut-proxy listening' "${log}" || {
+          echo "bytecut-proxy failed to start; log:" >&2
+          cat "${log}" >&2
+          exit 1
+        }
+        echo "bytecut-proxy: http://127.0.0.1:${listen_port}/piece/<cid> → ${SP_PROXY_UPSTREAM_HOST}:${SP_PROXY_UPSTREAM_PORT} (RST after ${drop_bytes} bytes)"
+        echo "point sp-proxy --upstream-host 127.0.0.1 --upstream-port ${listen_port}"
+
+  bytecut:clean:
+    desc: Stop bytecut-proxy on BYTECUT_LISTEN_PORT
+    cmds:
+      - |
+        set -euo pipefail
+        listen_port="{{.BYTECUT_LISTEN_PORT}}"
+        pids=$(lsof -tiTCP:"${listen_port}" -sTCP:LISTEN 2>/dev/null || true)
+        echo "${pids}" | while read -r pid; do
+          [ -n "${pid}" ] && /bin/kill "${pid}" 2>/dev/null || true
+        done
+        rm -f "{{.BYTECUT_LOG}}"
+        echo "bytecut-proxy on :${listen_port} stopped"
+
+  e2e:
+    desc: Seed-deals access matrix via sp-proxy; bytecut-proxy RST after 0.5 MiB
+    deps:
+      - :build
+      - :tools
+      - keys
+      - bytecut
+    cmds:
+      - |
+        set -euo pipefail
+        command -v lsof >/dev/null 2>&1 || { echo "lsof required" >&2; exit 1; }
+        command -v jq >/dev/null 2>&1 || { echo "jq required" >&2; exit 1; }
+        command -v cast >/dev/null 2>&1 || { echo "cast required" >&2; exit 1; }
+        car_bin="{{.ROOT_DIR}}/.task/bin/car"
+        [[ -x "${car_bin}" ]] || { echo "missing ${car_bin} (task tools)" >&2; exit 1; }
+
+        unset DEVNET_ROOT CONTRACTS_DIR POREP_ENV_FILE PAY_RPC_URL \
+          SP_PROXY_POREP_CDP_URL SP_PROXY_UPSTREAM_PORT SP_PROXY_UPSTREAM_HOST || true
+        # shellcheck disable=SC1091
+        source ./scripts/devnet-env.sh
+
+        summary="{{.SEED_SUMMARY}}"
+        [[ -f "${summary}" ]] || { echo "missing ${summary} (run just seed-deals in FCSS-devnet)" >&2; exit 1; }
+
+        mkdir -p .task "{{.OUT_DIR}}"
+        sp_proxy_port="{{.SP_PROXY_PORT}}"
+        bytecut_port="{{.BYTECUT_LISTEN_PORT}}"
+        log="{{.SP_PROXY_LOG}}"
+        db="{{.SP_PROXY_DB}}"
+        rm -f "${log}"
+
+        # Materialize c1/c2 wallets from summary (data piece CIDs only).
+        c1_key=".task/c1.key"
+        c2_key=".task/c2.key"
+        jq -r '.[] | select(.client=="c1") | .private_key' "${summary}" | head -n1 | sed 's/^0x//' > "${c1_key}"
+        jq -r '.[] | select(.client=="c2") | .private_key' "${summary}" | head -n1 | sed 's/^0x//' > "${c2_key}"
+        chmod 600 "${c1_key}" "${c2_key}"
+        c1_addr="$(cast wallet address --private-key "0x$(tr -d '\n' <"${c1_key}")")"
+        c2_addr="$(cast wallet address --private-key "0x$(tr -d '\n' <"${c2_key}")")"
+
+        c1_private_cid="$(jq -r '.[] | select(.slot=="c1-private") | .pieces[] | select(.pieceType=="data") | .pieceCid' "${summary}")"
+        c1_public_cid="$(jq -r '.[] | select(.slot=="c1-public") | .pieces[] | select(.pieceType=="data") | .pieceCid' "${summary}")"
+        [[ -n "${c1_private_cid}" && "${c1_private_cid}" != "null" ]] || { echo "c1-private data CID missing" >&2; exit 1; }
+        [[ -n "${c1_public_cid}" && "${c1_public_cid}" != "null" ]] || { echo "c1-public data CID missing" >&2; exit 1; }
+
+        echo "** ensuring c1=${c1_addr} c2=${c2_addr} funded"
+        deployer_key="$(tr -d '\n\r' <"${CONTRACTS_DIR}/deployer.private-key")"
+        # Thresholds: enough gas + a few 0.01 USDFC retrievals (skip slow lotus send / wait-msg when already funded).
+        min_fil_eth="1"
+        min_usdfc_wei="$(cast to-wei 10 ether)"
+        fund_fil_amount="50"
+        fund_usdfc_wei="$(cast to-wei 1000 ether)"
+        wei_ge() { python3 -c "import sys; a=int(sys.argv[1].split()[0],0); b=int(sys.argv[2].split()[0],0); raise SystemExit(0 if a>=b else 1)" "$1" "$2"; }
+        for addr in "${c1_addr}" "${c2_addr}"; do
+          fil_eth="$(cast balance --ether --rpc-url "${PAY_RPC_URL}" "${addr}")"
+          if awk -v b="${fil_eth}" -v m="${min_fil_eth}" 'BEGIN{exit !(b+0 >= m)}'; then
+            echo "    ${addr} FIL ok (${fil_eth})"
+          else
+            echo "    ${addr} FIL low (${fil_eth}); sending ${fund_fil_amount}"
+            cid="$(docker exec lotus lotus send "${addr}" "${fund_fil_amount}" | awk '/^bafy|^bafk/{print $1; exit}')"
+            docker exec lotus lotus state wait-msg "${cid}" >/dev/null
+          fi
+          usdfc_wei="$(cast call "${USDFC}" "balanceOf(address)(uint256)" "${addr}" --rpc-url "${PAY_RPC_URL}")"
+          if wei_ge "${usdfc_wei}" "${min_usdfc_wei}"; then
+            echo "    ${addr} USDFC ok"
+          else
+            echo "    ${addr} USDFC low; transferring 1000"
+            cast send "${USDFC}" "transfer(address,uint256)" "${addr}" "${fund_usdfc_wei}" \
+              --rpc-url "${PAY_RPC_URL}" --private-key "${deployer_key}" >/dev/null
+          fi
+        done
+
+        echo "** HEAD Curio pieces (direct)"
+        for cid in "${c1_private_cid}" "${c1_public_cid}"; do
+          curl -fsS --head "http://${SP_PROXY_UPSTREAM_HOST}:${SP_PROXY_UPSTREAM_PORT}/piece/${cid}" >/dev/null
+        done
+        echo "** HEAD via bytecut-proxy :${bytecut_port}"
+        for cid in "${c1_private_cid}" "${c1_public_cid}"; do
+          curl -fsS --head "http://127.0.0.1:${bytecut_port}/piece/${cid}" >/dev/null
+        done
+
+        # sp-proxy → bytecut-proxy → Curio (RST after 0.5 MiB on GET bodies).
+        ./bin/sp-proxy \
+          --listen "127.0.0.1:${sp_proxy_port}" \
+          --db "${db}" \
+          --price-usdfc-per-gb "{{.SP_PROXY_PRICE}}" \
+          --upstream-host "127.0.0.1" \
+          --upstream-port "${bytecut_port}" \
+          --pay-rpc-url "${PAY_RPC_URL}" \
+          --pay-payments-address "${PAYMENTS}" \
+          --pay-token-address "${USDFC}" \
+          --pay-private-key-file "{{.SP_KEY}}" \
+          --porep-cdp-url "${SP_PROXY_POREP_CDP_URL:-http://127.0.0.1:23300}" \
+          --porep-provider-id "${POREP_PROVIDER_ID}" \
+          > "${log}" 2>&1 &
+
+        cleanup() {
+          pids=$(lsof -tiTCP:"${sp_proxy_port}" -sTCP:LISTEN 2>/dev/null || true)
+          echo "${pids}" | while read -r pid; do
+            [ -n "${pid}" ] && /bin/kill "${pid}" 2>/dev/null || true
+          done
+          pids=$(lsof -tiTCP:"${bytecut_port}" -sTCP:LISTEN 2>/dev/null || true)
+          echo "${pids}" | while read -r pid; do
+            [ -n "${pid}" ] && /bin/kill "${pid}" 2>/dev/null || true
+          done
+        }
+        trap cleanup EXIT
+
+        for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+          grep -q 'sp-proxy listening' "${log}" 2>/dev/null && break
+          sleep 0.5
+        done
+        grep -q 'porep CDP lookup enabled' "${log}" || {
+          echo "CDP lookup not enabled; log:" >&2
+          cat "${log}" >&2
+          exit 1
+        }
+
+        results=""
+        record() {
+          # record "case" "client" "deal" "expected" "result"
+          results="${results}$1|$2|$3|$4|$5"$'\n'
+        }
+        print_results() {
+          echo ""
+          echo "FCSS-devnet e2e access matrix"
+          printf '%s\n' "-------------------------"
+          printf '%-42s %-8s %-12s %-10s %-6s\n' "CASE" "CLIENT" "DEAL" "EXPECTED" "RESULT"
+          printf '%-42s %-8s %-12s %-10s %-6s\n' "----" "------" "----" "--------" "------"
+          printf '%s' "${results}" | while IFS='|' read -r case client deal expected result; do
+            [ -n "${case}" ] || continue
+            printf '%-42s %-8s %-12s %-10s %-6s\n' "${case}" "${client}" "${deal}" "${expected}" "${result}"
+          done
+          echo ""
+        }
+
+        # HTTP probes: access-middleware status codes only (no payment / no CAR).
+        # Complementary to fetch_* below — do not re-assert owner quote or non-owner
+        # ?client= 403; those are covered by fetch allow/deny.
+        # Use curl --head (not -X HEAD): -X HEAD still waits for a Content-Length body.
+        proxy_base="http://127.0.0.1:${sp_proxy_port}"
+        http_code() {
+          # http_code METHOD URL [extra curl args...]
+          local method="$1" url="$2"
+          shift 2
+          if [ "${method}" = "HEAD" ]; then
+            curl -sS --max-time 10 -o /dev/null -w '%{http_code}' --head "$@" "${url}"
+          else
+            curl -sS --max-time 10 -o /dev/null -w '%{http_code}' -X "${method}" "$@" "${url}"
+          fi
+        }
+        expect_codes() {
+          # expect_codes "case" "client" "deal" "expected_label" "got" "code1" ["code2"...]
+          local case="$1" client="$2" deal="$3" expected="$4" got="$5"
+          shift 5
+          local ok=0 c
+          for c in "$@"; do
+            if [ "${got}" = "${c}" ]; then ok=1; break; fi
+          done
+          if [ "${ok}" -eq 1 ]; then
+            record "${case}" "${client}" "${deal}" "${expected}" "PASS"
+            echo "    ${case}: HTTP ${got} (ok)"
+          else
+            record "${case}" "${client}" "${deal}" "${expected}" "FAIL"
+            echo "expected HTTP $* for ${case}, got ${got}" >&2
+            print_results
+            exit 1
+          fi
+        }
+
+        echo "** HTTP access probes (middleware status codes) via sp-proxy :${sp_proxy_port}"
+        code="$(http_code HEAD "${proxy_base}/piece/${c1_private_cid}")"
+        expect_codes "http HEAD private (anon)" "-" "c1-private" "200" "${code}" 200
+
+        code="$(http_code GET "${proxy_base}/piece/${c1_private_cid}")"
+        expect_codes "http GET private (anon)" "-" "c1-private" "403" "${code}" 403
+
+        code="$(http_code GET "${proxy_base}/piece/${c1_public_cid}")"
+        expect_codes "http GET public (anon)" "-" "c1-public" "402/200" "${code}" 402 200
+
+        code="$(http_code GET "${proxy_base}/piece/${c1_private_cid}?client=${c2_addr}" -H 'Authorization: Payment dummy')"
+        expect_codes "http GET private (paid, non-owner)" "c2" "c1-private" "403" "${code}" 403
+
+        fetch_ok() {
+          local key="$1" piece="$2" client_label="$3" deal_label="$4" case_label="$5"
+          local car_path="{{.OUT_DIR}}/${piece}.car"
+          echo "** expect OK: ${case_label}"
+          rm -f "${car_path}" "${car_path}.partial"
+          if ./bin/retrieval-client fetch \
+            --filpay-private-key-file "${key}" \
+            --pay-rpc-url "${PAY_RPC_URL}" \
+            --pay-payments-address "${PAYMENTS}" \
+            --pay-token-address "${USDFC}" \
+            --sp-base-url "http://127.0.0.1:${sp_proxy_port}" \
+            --cid "${piece}" \
+            --out-dir "{{.OUT_DIR}}" \
+            --yes; then
+            echo "** verifying ${car_path}"
+            if [[ ! -f "${car_path}" ]]; then
+              record "${case_label}" "${client_label}" "${deal_label}" "allow" "FAIL"
+              echo "missing downloaded CAR ${car_path}" >&2
+              print_results
+              exit 1
+            fi
+            if ! "${car_bin}" inspect "${car_path}" || ! "${car_bin}" verify "${car_path}"; then
+              record "${case_label}" "${client_label}" "${deal_label}" "allow" "FAIL"
+              echo "CAR inspect/verify failed for ${car_path}" >&2
+              print_results
+              exit 1
+            fi
+            record "${case_label}" "${client_label}" "${deal_label}" "allow" "PASS"
+          else
+            record "${case_label}" "${client_label}" "${deal_label}" "allow" "FAIL"
+            echo "expected allow for ${case_label}" >&2
+            print_results
+            exit 1
+          fi
+        }
+
+        fetch_deny() {
+          local key="$1" piece="$2" client_label="$3" deal_label="$4" case_label="$5"
+          echo "** expect DENY: ${case_label}"
+          if ./bin/retrieval-client fetch \
+            --filpay-private-key-file "${key}" \
+            --pay-rpc-url "${PAY_RPC_URL}" \
+            --pay-payments-address "${PAYMENTS}" \
+            --pay-token-address "${USDFC}" \
+            --sp-base-url "http://127.0.0.1:${sp_proxy_port}" \
+            --cid "${piece}" \
+            --out-dir "{{.OUT_DIR}}" \
+            --yes; then
+            record "${case_label}" "${client_label}" "${deal_label}" "deny" "FAIL"
+            echo "expected denial for ${case_label}" >&2
+            print_results
+            exit 1
+          fi
+          record "${case_label}" "${client_label}" "${deal_label}" "deny" "PASS"
+          echo "    denied as expected"
+        }
+
+        # Paid fetch + CAR verify (and Range resume via bytecut). Covers owner quote
+        # and non-owner ?client= denial that HTTP probes intentionally skip.
+        fetch_ok "${c1_key}" "${c1_private_cid}" "c1" "c1-private" "fetch private as owner"
+        fetch_deny "${c2_key}" "${c1_private_cid}" "c2" "c1-private" "fetch private as non-owner"
+        fetch_ok "${c1_key}" "${c1_public_cid}" "c1" "c1-public" "fetch public as owner"
+        fetch_ok "${c2_key}" "${c1_public_cid}" "c2" "c1-public" "fetch public as non-owner"
+
+        print_results
+        echo "*** fcss-devnet e2e ok: HTTP probes + paid fetch matrix + CAR verify ***"

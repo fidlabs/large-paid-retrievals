@@ -20,6 +20,8 @@ import (
 	"github.com/fidlabs/paid-retrievals/internal/filpay"
 	"github.com/fidlabs/paid-retrievals/internal/mpp"
 	"github.com/fidlabs/paid-retrievals/internal/paymentheader"
+	"github.com/fidlabs/paid-retrievals/internal/pieceaccess"
+	piecepayment "github.com/fidlabs/paid-retrievals/internal/piecepayment"
 	"github.com/fidlabs/paid-retrievals/internal/sqlitestore"
 )
 
@@ -248,6 +250,72 @@ func TestResolvePayee(t *testing.T) {
 	}
 }
 
+func TestBuildProxyHandlerAccessBeforePayment(t *testing.T) {
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !pieceaccess.AccessChecked(r.Context()) {
+			t.Errorf("pieceaccess middleware did not run before upstream %s %s", r.Method, r.URL.Path)
+		}
+		if r.Method == http.MethodHead {
+			w.Header().Set("Content-Length", "13")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("Content-Type", "application/vnd.ipld.car")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("DUMMY-CAR"))
+	})
+
+	store := openTestStore(t)
+	config := piecepayment.Config{
+		PriceUSDFCPerGB: "0.01",
+		ClientQuery:     "client",
+		ClientHeader:    "X-Client-Address",
+		MaxClockSkew:    30 * time.Second,
+		QuotePayee0x:    testQuotePayee0x,
+		FilecoinPay:     defaultStubFilpay(),
+		Store:           store,
+	}
+	svc := piecepayment.NewRetrievalService(config)
+	handler := buildPieceHandler(pieceaccess.NewAuthorizer(), svc, upstream)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/piece/") {
+			handler.ServeHTTP(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer ts.Close()
+
+	const testCID = "bafkreidde4sfyosf2pm6u4vxb65wogjg464a6y6tcg75opo6q5wv34bley"
+
+	t.Run("GET quote probe", func(t *testing.T) {
+		res, err := http.Get(ts.URL + "/piece/" + testCID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		if res.StatusCode != http.StatusPaymentRequired {
+			t.Fatalf("expected 402 got %d", res.StatusCode)
+		}
+	})
+
+	t.Run("HEAD passthrough", func(t *testing.T) {
+		req, err := http.NewRequest(http.MethodHead, ts.URL+"/piece/bafytestpiece", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 got %d", res.StatusCode)
+		}
+	})
+}
+
 func TestBuildProxyHandlerRoutes(t *testing.T) {
 	upstream := upstreamPieceServer(t)
 	defer upstream.Close()
@@ -265,7 +333,7 @@ func TestBuildProxyHandlerRoutes(t *testing.T) {
 		ClientHeader:    "X-Client-Address",
 		MaxSkewSec:      30,
 	}
-	h := buildProxyHandler(upURL, host, port, store, stub, testQuotePayee0x, settings, testLogger())
+	h := buildProxyHandler(upURL, host, port, store, stub, testQuotePayee0x, settings, testLogger(), nil)
 	ts := httptest.NewServer(h)
 	defer ts.Close()
 
@@ -421,6 +489,57 @@ func TestRunProxyAppValidation(t *testing.T) {
 	}
 }
 
+func TestNewPorepDealLookupRequiresProviderID(t *testing.T) {
+	t.Parallel()
+	_, _, err := newPorepDealLookup(context.Background(), proxyAppSettings{
+		PorepCDPURL:     "http://127.0.0.1:23300",
+		PorepProviderID: 0,
+	}, testLogger())
+	if err == nil || !strings.Contains(err.Error(), "--porep-provider-id") {
+		t.Fatalf("got %v", err)
+	}
+
+	lookup, closeFn, err := newPorepDealLookup(context.Background(), proxyAppSettings{}, testLogger())
+	if err != nil || lookup != nil {
+		t.Fatalf("empty CDP URL should disable lookup: lookup=%v err=%v", lookup, err)
+	}
+	closeFn()
+
+	lookup, closeFn, err = newPorepDealLookup(context.Background(), proxyAppSettings{
+		PorepCDPURL:     "http://127.0.0.1:23300",
+		PorepProviderID: 1004,
+	}, testLogger())
+	if err != nil || lookup == nil {
+		t.Fatalf("got lookup=%v err=%v", lookup, err)
+	}
+	closeFn()
+}
+
+func TestRunProxyAppCDPRequiresProviderID(t *testing.T) {
+	defer restoreProxyHooks(t)()
+
+	upstream := upstreamPieceServer(t)
+	defer upstream.Close()
+	host, port := upstreamHostPort(t, upstream.URL)
+
+	proxyOpenStore = sqlitestore.OpenStore
+	proxyNewFilpayClient = stubFilpayFactory()
+	proxyListenAndServe = func(string, http.Handler) error { return nil }
+
+	settings := proxyAppSettings{
+		DBPath:          filepath.Join(t.TempDir(), "sp.db"),
+		UpstreamHost:    host,
+		UpstreamPort:    port,
+		PayPayeeAddress: testQuotePayee0x,
+		PorepCDPURL:     "http://127.0.0.1:23300",
+		PorepProviderID: 0,
+	}
+	err := runProxyApp(settings)
+	if err == nil || !strings.Contains(err.Error(), "porep deal lookup") {
+		t.Fatalf("got %v", err)
+	}
+}
+
 func TestRunProxyAppInvalidPayee(t *testing.T) {
 	defer restoreProxyHooks(t)()
 
@@ -446,6 +565,11 @@ func TestRunProxyAppInvalidPayee(t *testing.T) {
 func TestCobraExecuteStartsProxy(t *testing.T) {
 	defer restoreProxyHooks(t)()
 
+	// Flag defaults read SP_PROXY_POREP_* at registration; clear so ambient
+	// devnet env cannot enable CDP without a provider ID.
+	t.Setenv("SP_PROXY_POREP_CDP_URL", "")
+	t.Setenv("SP_PROXY_POREP_PROVIDER_ID", "0")
+
 	upstream := upstreamPieceServer(t)
 	defer upstream.Close()
 	host, port := upstreamHostPort(t, upstream.URL)
@@ -467,6 +591,7 @@ func TestCobraExecuteStartsProxy(t *testing.T) {
 		"--upstream-host", host,
 		"--upstream-port", strconv.Itoa(port),
 		"--pay-payee-address", testQuotePayee0x,
+		"--porep-cdp-url", "", // disable CDP for this routing smoke test
 	})
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)

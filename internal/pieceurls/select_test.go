@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -209,6 +210,50 @@ func TestSelectBestPieceSource_BareGETProbe(t *testing.T) {
 	}
 	if gotQuery := <-gotQueryCh; gotQuery != "" {
 		t.Fatalf("probe GET query = %q, want bare path", gotQuery)
+	}
+}
+
+func TestSelectBestPieceSource_RetryClientOnForbidden(t *testing.T) {
+	t.Parallel()
+	const cid = "bafkreidcbkgxoddug6vawnjrzb4aaublfn46sd2rvxnykbxkkarke7y76e"
+	const payee = "0x2222222222222222222222222222222222222222"
+	const client = "0x1111111111111111111111111111111111111111"
+
+	var queries []string
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		mu.Lock()
+		queries = append(queries, r.URL.RawQuery)
+		mu.Unlock()
+		if r.URL.Query().Get("client") == "" {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		mpp402Handler(cid, "11111111-1111-1111-1111-111111111111", "0.01", payee)(w, r)
+	}))
+	t.Cleanup(srv.Close)
+
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := NewClient(srv.Client())
+	c.ProbeClient = client
+	sel, err := c.SelectBestPieceSource(context.Background(), cid, []*url.URL{u}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sel == nil || sel.PriceUSDFC != "0.01" {
+		t.Fatalf("selection: %+v", sel)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(queries) != 2 || queries[0] != "" || queries[1] != "client="+client {
+		t.Fatalf("queries=%v", queries)
 	}
 }
 

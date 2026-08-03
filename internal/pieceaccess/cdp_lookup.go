@@ -1,0 +1,243 @@
+package pieceaccess
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/ethereum/go-ethereum/common"
+)
+
+const (
+	// DefaultCDPBaseURL is the public Compliance Data Platform API.
+	DefaultCDPBaseURL = "https://cdp.allocator.tech"
+	cdpDealsPageLimit = 100
+	cdpDealsMaxPages  = 1000 // safety cap against broken pagination
+)
+
+// CDPLookupConfig configures HTTP lookup against CDP GET /po-rep/deals.
+type CDPLookupConfig struct {
+	BaseURL    string // e.g. https://cdp.allocator.tech or http://127.0.0.1:23300
+	ProviderID uint64 // required; passed as providerId=f0… and enforced client-side
+	HTTPClient *http.Client
+}
+
+// CDPLookup resolves PoRep deals via CDP pieceCID query, scoped to one provider.
+type CDPLookup struct {
+	baseURL    string
+	providerID uint64
+	client     *http.Client
+}
+
+// NewCDPLookup prepares an HTTP DealLookup against CDP.
+func NewCDPLookup(cfg CDPLookupConfig) (*CDPLookup, error) {
+	base := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
+	if base == "" {
+		return nil, fmt.Errorf("pieceaccess: CDP base URL is required")
+	}
+	if _, err := url.ParseRequestURI(base); err != nil {
+		return nil, fmt.Errorf("pieceaccess: invalid CDP base URL %q: %w", base, err)
+	}
+	if cfg.ProviderID == 0 {
+		return nil, fmt.Errorf("pieceaccess: CDP ProviderID is required")
+	}
+	hc := cfg.HTTPClient
+	if hc == nil {
+		hc = &http.Client{Timeout: 30 * time.Second}
+	}
+	return &CDPLookup{
+		baseURL:    base,
+		providerID: cfg.ProviderID,
+		client:     hc,
+	}, nil
+}
+
+// LookupByPieceCID implements DealLookup. It pages CDP deals for the piece
+// filtered to ProviderID and stops early once a public deal or a private deal
+// owned by requester is found (enough to allow access). If neither appears,
+// it returns every matching deal so denyAccess can explain the denial.
+func (c *CDPLookup) LookupByPieceCID(ctx context.Context, pieceCID string, requester common.Address) ([]*Deal, error) {
+	if c == nil {
+		return nil, fmt.Errorf("pieceaccess: CDPLookup is nil")
+	}
+	pieceCID = strings.TrimSpace(pieceCID)
+	if pieceCID == "" {
+		return nil, fmt.Errorf("pieceaccess: empty piece CID")
+	}
+
+	out := make([]*Deal, 0)
+	for pageNum := 1; pageNum <= cdpDealsMaxPages; pageNum++ {
+		q := url.Values{}
+		q.Set("pieceCID", pieceCID)
+		q.Set("limit", strconv.Itoa(cdpDealsPageLimit))
+		q.Set("page", strconv.Itoa(pageNum))
+		q.Set("providerId", fmt.Sprintf("f0%d", c.providerID))
+
+		rawURL := c.baseURL + "/po-rep/deals?" + q.Encode()
+		var page cdpDealsPage
+		if err := c.getJSON(ctx, rawURL, &page); err != nil {
+			return nil, err
+		}
+		if len(page.Data) == 0 {
+			break
+		}
+
+		for i := range page.Data {
+			d, err := page.Data[i].toDeal()
+			if err != nil {
+				return nil, err
+			}
+			if d.ProviderID != c.providerID {
+				continue
+			}
+			if dealAllowsAccess(d, requester) {
+				return []*Deal{d}, nil
+			}
+			out = append(out, d)
+		}
+
+		if !page.hasMore(pageNum, cdpDealsPageLimit) {
+			break
+		}
+		if pageNum == cdpDealsMaxPages {
+			return nil, fmt.Errorf("pieceaccess: CDP pagination exceeded %d pages for pieceCID", cdpDealsMaxPages)
+		}
+	}
+
+	if len(out) == 0 {
+		return nil, fmt.Errorf("%w: CDP returned no deals for pieceCID", ErrDealNotFound)
+	}
+	return out, nil
+}
+
+// dealAllowsAccess is true when this deal alone is enough to permit the requester.
+func dealAllowsAccess(d *Deal, requester common.Address) bool {
+	if d == nil {
+		return false
+	}
+	switch d.DealType {
+	case DealTypePublic:
+		return true
+	case DealTypePrivate:
+		return requester != (common.Address{}) && sameAddress(requester, d.Client)
+	default:
+		return false
+	}
+}
+
+func (c *CDPLookup) getJSON(ctx context.Context, rawURL string, dest any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return fmt.Errorf("pieceaccess: CDP request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+
+	res, err := c.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("pieceaccess: CDP GET %s: %w", rawURL, err)
+	}
+	defer res.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(res.Body, 8<<20))
+	if err != nil {
+		return fmt.Errorf("pieceaccess: CDP read: %w", err)
+	}
+	if res.StatusCode != http.StatusOK {
+		msg := strings.TrimSpace(string(body))
+		if len(msg) > 200 {
+			msg = msg[:200] + "…"
+		}
+		return fmt.Errorf("pieceaccess: CDP GET %s: HTTP %d: %s", rawURL, res.StatusCode, msg)
+	}
+	if err := json.Unmarshal(body, dest); err != nil {
+		return fmt.Errorf("pieceaccess: CDP decode: %w", err)
+	}
+	return nil
+}
+
+type cdpDealsPage struct {
+	Data       []cdpDeal     `json:"data"`
+	Pagination cdpPagination `json:"pagination"`
+}
+
+type cdpPagination struct {
+	Page       int `json:"page"`
+	PagesCount int `json:"pagesCount"`
+	TotalCount int `json:"totalCount"`
+}
+
+// hasMore reports whether another page should be fetched after pageNum.
+// Prefer pagination.pagesCount when present; otherwise continue while this
+// page was full (len == limit).
+func (p cdpDealsPage) hasMore(pageNum, limit int) bool {
+	if p.Pagination.PagesCount > 0 {
+		return pageNum < p.Pagination.PagesCount
+	}
+	return len(p.Data) >= limit
+}
+
+type cdpDeal struct {
+	DealID        json.RawMessage `json:"dealId"`
+	ProviderID    string          `json:"providerId"`
+	ClientAddress string          `json:"clientAddress"`
+	DealState     string          `json:"dealState"`
+	DealType      string          `json:"dealType"`
+	Active        bool            `json:"active"`
+}
+
+func (d *cdpDeal) toDeal() (*Deal, error) {
+	if d == nil {
+		return nil, fmt.Errorf("pieceaccess: nil CDP deal")
+	}
+	providerID, err := parseF0ActorID(d.ProviderID)
+	if err != nil {
+		return nil, fmt.Errorf("pieceaccess: CDP providerId %q: %w", d.ProviderID, err)
+	}
+	return &Deal{
+		DealID:     decodeJSONStringish(d.DealID),
+		Client:     common.HexToAddress(d.ClientAddress),
+		ProviderID: providerID,
+		DealType:   ParseDealType(d.DealType),
+		State:      strings.TrimSpace(d.DealState),
+	}, nil
+}
+
+func decodeJSONStringish(raw json.RawMessage) string {
+	raw = json.RawMessage(strings.TrimSpace(string(raw)))
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	var n json.Number
+	if err := json.Unmarshal(raw, &n); err == nil {
+		return n.String()
+	}
+	return strings.Trim(string(raw), `"`)
+}
+
+func parseF0ActorID(s string) (uint64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, fmt.Errorf("empty")
+	}
+	lower := strings.ToLower(s)
+	if strings.HasPrefix(lower, "f0") || strings.HasPrefix(lower, "t0") {
+		s = s[2:]
+	}
+	id, err := strconv.ParseUint(s, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+var _ DealLookup = (*CDPLookup)(nil)

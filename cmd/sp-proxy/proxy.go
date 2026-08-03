@@ -15,6 +15,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/fidlabs/paid-retrievals/internal/dealstore"
 	"github.com/fidlabs/paid-retrievals/internal/filpay"
+	"github.com/fidlabs/paid-retrievals/internal/pieceaccess"
 	piecepayment "github.com/fidlabs/paid-retrievals/internal/piecepayment"
 	"github.com/fidlabs/paid-retrievals/internal/sqlitestore"
 )
@@ -35,11 +36,15 @@ type proxyAppSettings struct {
 	PayPrivateKeyFile  string
 	PayPrivateKeyEnv   string
 	PayPaymentsAddress string
+	PayTokenAddress    string
 	PayPayeeAddress    string
 	PayDebug           bool
 
 	UpstreamHost string
 	UpstreamPort int
+
+	PorepCDPURL     string
+	PorepProviderID uint64
 }
 
 func validateUpstream(host string, port int) (*url.URL, error) {
@@ -77,6 +82,7 @@ func buildProxyHandler(
 	payee string,
 	settings proxyAppSettings,
 	logger *slog.Logger,
+	dealLookup pieceaccess.DealLookup,
 ) http.Handler {
 	upstreamProxy := httputil.NewSingleHostReverseProxy(upstreamURL)
 	upstreamProxy.ModifyResponse = preserveUpstreamContentLength
@@ -98,8 +104,16 @@ func buildProxyHandler(
 		Store:           store,
 	}
 	svc := piecepayment.NewRetrievalService(config)
+	accessOpts := []pieceaccess.Option{
+		pieceaccess.WithLogger(logger),
+		pieceaccess.WithClientIdentity(settings.ClientQuery, settings.ClientHeader),
+	}
+	if dealLookup != nil {
+		accessOpts = append(accessOpts, pieceaccess.WithDealLookup(dealLookup))
+	}
+	access := pieceaccess.NewAuthorizer(accessOpts...)
 
-	pieceHandler := svc.PiecePaymentMiddleware(MaxHeaderSize)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	pieceHandler := buildPieceHandler(access, svc, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamProxy.ServeHTTP(w, r)
 	}))
 
@@ -128,6 +142,25 @@ func buildProxyHandler(
 	})
 }
 
+func newPorepDealLookup(_ context.Context, settings proxyAppSettings, logger *slog.Logger) (pieceaccess.DealLookup, func(), error) {
+	cdpURL := strings.TrimSpace(settings.PorepCDPURL)
+	if cdpURL == "" {
+		return nil, func() {}, nil
+	}
+	if settings.PorepProviderID == 0 {
+		return nil, nil, fmt.Errorf("--porep-provider-id is required when --porep-cdp-url is set")
+	}
+	lookup, err := pieceaccess.NewCDPLookup(pieceaccess.CDPLookupConfig{
+		BaseURL:    cdpURL,
+		ProviderID: settings.PorepProviderID,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	logger.Info("porep CDP lookup enabled", "cdp_url", cdpURL, "provider_id", settings.PorepProviderID)
+	return lookup, func() {}, nil
+}
+
 func runProxyApp(settings proxyAppSettings) error {
 	upstreamURL, err := validateUpstream(settings.UpstreamHost, settings.UpstreamPort)
 	if err != nil {
@@ -151,8 +184,13 @@ func runProxyApp(settings proxyAppSettings) error {
 
 	ctx := context.Background()
 	filTrace := settings.PayDebug || settings.Verbose
+	var filpayOpts []filpay.Option
+	filpayOpts = append(filpayOpts, filpay.WithPayLogging(logger, filTrace))
+	if tok := strings.TrimSpace(settings.PayTokenAddress); tok != "" {
+		filpayOpts = append(filpayOpts, filpay.WithPaymentToken(tok))
+	}
 	fc, err := proxyNewFilpayClient(ctx, settings.PayRPCURL, settings.PayPrivateKey, settings.PayPrivateKeyFile, settings.PayPrivateKeyEnv, settings.PayPaymentsAddress,
-		filpay.WithPayLogging(logger, filTrace))
+		filpayOpts...)
 	if err != nil {
 		return fmt.Errorf("filecoin pay: %w", err)
 	}
@@ -163,7 +201,13 @@ func runProxyApp(settings proxyAppSettings) error {
 		return err
 	}
 
-	handler := buildProxyHandler(upstreamURL, settings.UpstreamHost, settings.UpstreamPort, store, fc, payee, settings, logger)
+	dealLookup, closeLookup, err := newPorepDealLookup(ctx, settings, logger)
+	if err != nil {
+		return fmt.Errorf("porep deal lookup: %w", err)
+	}
+	defer closeLookup()
+
+	handler := buildProxyHandler(upstreamURL, settings.UpstreamHost, settings.UpstreamPort, store, fc, payee, settings, logger, dealLookup)
 
 	logger.Info("filecoin pay", "payments", fc.PaymentsAddress().Hex(), "payee_0x", payee, "settler", fc.SignerAddress().Hex(),
 		"pay_debug_flag", settings.PayDebug, "filpay_trace", filTrace, "pool_trace", filTrace, "pay_http_trace", filTrace)
@@ -175,6 +219,10 @@ func runProxyApp(settings proxyAppSettings) error {
 	startPayeeWithdrawWorker(fc, settings.PayWithdrawInterval, logger)
 
 	return proxyListenAndServe(settings.Listen, handler)
+}
+
+func buildPieceHandler(access *pieceaccess.Authorizer, svc *piecepayment.RetrievalService, upstream http.Handler) http.Handler {
+	return access.Middleware(svc.PiecePaymentMiddleware(MaxHeaderSize)(upstream))
 }
 
 // preserveUpstreamContentLength sets resp.ContentLength from a Content-Length header

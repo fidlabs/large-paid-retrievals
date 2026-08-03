@@ -24,6 +24,7 @@ vendor/
 # IDE
 .idea/
 .vscode/
+.continue/
 .cursor/
 .claude/
 *.swp

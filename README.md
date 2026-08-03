@@ -1,6 +1,6 @@
 # PoRep paid-retrievals
 
-HTTP tools for retrieving Filecoin **piece** data (CAR files) from storage providers (SPs), including **free** endpoints and **paid** retrievals settled on-chain via Filecoin Pay.
+HTTP tools for retrieving **pieces** (CAR files) that are part of datasets stored in Filecoin **PoRep Market V2** deals, from storage providers (SPs) — including **free** endpoints and **paid** retrievals settled on-chain via Filecoin Pay.
 
 | If you are… | Start here |
 |-------------|------------|
@@ -9,6 +9,8 @@ HTTP tools for retrieving Filecoin **piece** data (CAR files) from storage provi
 | **Developer** — maintain or extend this repo | [For developers](#for-developers) |
 
 **Binaries:** `retrieval-client` (fetch) and `sp-proxy` (paid gateway in front of an SP piece server).
+
+**Authorization:** who may retrieve a piece is decided by the deal in CDP / on-chain PoRep market state — **`dealType`** (`public` or `private`) and **`clientAddress`** (deal owner). Public deals: any client may probe/quote/download (subject to payment). Private deals: only the deal owner (`clientAddress`) may; others get `403`. Piece existence and size remain public (`HEAD` is always allowed). Payment (MPP / Filecoin Pay) is separate: it settles the quoted USDFC after access is allowed. Details: [Piece access](#piece-access-public-vs-private).
 
 ### Design context
 
@@ -45,7 +47,7 @@ When the window expires, paid retries stop: request a **new** `402` quote (new `
 
 ### What you need
 
-1. **Go 1.26.4+** or a pre-built `retrieval-client` binary.
+1. **Go 1.26.5+** or a pre-built `retrieval-client` binary.
 2. A **client private key** (`client.key`) — secp256k1 hex; see [Generate keys](#generate-keys).
 3. **FIL** on your network (mainnet by default) for Filecoin Pay transaction gas.
 4. **USDFC** in the client wallet for paid retrievals (amount depends on piece sizes and SP rates).
@@ -94,8 +96,6 @@ Use `--yes` to skip the funding confirmation prompt (scripts/CI).
   --cid baga6ea4seaq...
 ```
 
-For a **local test proxy** funded on Calibration, add `--pay-rpc-url "https://api.calibration.node.glif.io/rpc/v1"`.
-
 ### Quote before you pay
 
 **Dry run** — probe and print prices; no rails, no downloads:
@@ -120,7 +120,7 @@ For a **local test proxy** funded on Calibration, add `--pay-rpc-url "https://ap
 For each piece CID (unless `--sp-base-url` is set):
 
 1. Discover candidate HTTP bases (on-chain miner info + configured RPC).
-2. Probe endpoints in parallel (`HEAD` for size; `GET` without auth for free vs paid).
+2. Probe endpoints in parallel (see [Piece access (public vs private)](#piece-access-public-vs-private)): `HEAD` for size, then `GET` (anonymous, then `?client=` on `403`).
 3. Prefer **free** if any endpoint returns `200`.
 4. Among paid `402` responses, pick the **lowest** quoted `price_usdfc`.
 5. Fund rails and download each paid piece with `Authorization: Payment …`.
@@ -150,8 +150,9 @@ Paid SPs bill in **USDFC per GiB** (binary `2^30` bytes), **rounded up** to whol
 
 - **Insufficient USDFC / FIL** — fund client wallet; check logs for `0x` address and rail IDs.
 - **No endpoints found** — CID may not be advertised on-chain, or RPC/discovery failed; try `--sp-base-url` if you know a working URL.
+- **Private piece denied at probe** — anonymous `GET` returns `403` for private deals; the client retries with `?client=`. Non-owners get no usable endpoint (see [Piece access](#piece-access-public-vs-private)).
 - **Paid fetch fails after quote** — run `rail-check`; ensure operator approval and rail balance.
-- **Verify settlement** — note rail ID from logs; view on [Filecoin Pay](https://pay.filecoin.cloud/) (mainnet: `/rails/<id>`; Calibration: `/calibration/rails/<id>`).
+- **Verify settlement** — note rail ID from logs; view on [Filecoin Pay](https://pay.filecoin.cloud/) (mainnet: `/rails/<id>`).
 
 ---
 
@@ -176,10 +177,11 @@ Clients using `retrieval-client` discover your proxy URL, as published by Curio/
 ### What you need
 
 1. An **upstream piece HTTP server** on **`127.0.0.1` only** (`/piece/<cid>`), reachable from `sp-proxy` on the same machine but **not** from the public internet.
-2. **`sp-proxy`** with a settler private key (`sp.key`) — pays FIL gas for on-chain settlement.
+2. **`sp-proxy`** with a settler private key (`sp.key`) — pays FIL gas for on-chain settlement (Filecoin Pay payee; **not** your miner actor key).
 3. **FIL** on the settler wallet for gas.
 4. A **payee `0x` address** (defaults to settler) that receives USDFC from Filecoin Pay rails.
 5. **SQLite** path for deal/quote state (`--db`).
+6. Your **miner actor ID** for CDP piece-access filtering (`--porep-provider-id`) — see [Miner actor ID](#miner-actor-id-porep-provider-id).
 
 ### Network layout (recommended)
 
@@ -219,10 +221,33 @@ go build -o bin/sp-proxy ./cmd/sp-proxy
   --price-usdfc-per-gb 0.01 \
   --upstream-host 127.0.0.1 \
   --upstream-port 8788 \
-  --pay-private-key-file ./sp.key
+  --pay-private-key-file ./sp.key \
+  --porep-cdp-url https://cdp.allocator.tech \
+  --porep-provider-id 1234
 ```
 
-`--listen 0.0.0.0:8787` accepts client connections on all interfaces; use a specific IP or put TLS/reverse-proxy in front in production. `--upstream-host 127.0.0.1` assumes Curio/Boost is bound to localhost on the same host.
+Replace `1234` with **your** miner actor id (numeric part of `f01234`). `--listen 0.0.0.0:8787` accepts client connections on all interfaces; use a specific IP or put TLS/reverse-proxy in front in production. `--upstream-host 127.0.0.1` assumes Curio/Boost is bound to localhost on the same host.
+
+### Miner actor ID (`--porep-provider-id`)
+
+CDP can return PoRep deals for the same piece CID from **multiple** providers. `sp-proxy` must filter to **your** miner so public/private access matches the deals you actually serve. Pass the **numeric** actor id only (`1234` for `f01234` / `t01234`).
+
+This is **not** derived from `sp.key`. The settler key is the Filecoin Pay wallet; the miner id is whichever actor Curio is running as.
+
+**Mainnet (local Curio):** use the miner already configured for that Curio node:
+
+1. **Curio config / UI** — the miner address you set when bringing Curio up (e.g. `Miner` / actor field showing `f0…`). Strip the `f0` / `t0` prefix for the flag.
+2. **Curio CLI / Harmony** — wherever the node reports its miner identity.
+3. **Lotus** (same chain Curio uses), if you know the miner address:
+   ```bash
+   lotus state get-actor f01234
+   # or: lotus-miner info   # when talking to that miner’s API
+   ```
+4. **Block explorers** — search your miner on [Filfox](https://filfox.info) / similar; copy the `f0…` id and use the digits after `f0`.
+
+Optional env: `SP_PROXY_POREP_PROVIDER_ID` (same numeric value).
+
+**Local FCSS-devnet:** `source ./scripts/devnet-env.sh` exports `POREP_PROVIDER_ID` from `CURIO_MINER_ID` in the market-tooling `.env`.
 
 ### Pricing
 
@@ -253,11 +278,35 @@ Optional: expose **`HEAD`** on the public proxy path for client size probes (the
 | `--pay-private-key-file` | Settler key |
 | `--pay-payee-address` | Payee advertised in challenges (default: settler) |
 | `--pay-payments-address` | Optional payments contract override |
+| `--porep-cdp-url` | CDP base URL for piece CID → deal (`GET /po-rep/deals?pieceCID=…`; default `https://cdp.allocator.tech`; local Curio: `http://127.0.0.1:23300`). Empty disables. |
+| `--porep-provider-id` | Your miner actor id (numeric; e.g. `1234` for `f01234`). **Required** when `--porep-cdp-url` is set. Filters CDP deals to this SP — see [Miner actor ID](#miner-actor-id-porep-provider-id) |
 | `--pay-debug`, `--verbose` | Diagnostics |
+
+Piece access resolves PoRep deals via [CDP](https://cdp.allocator.tech) (`GET /po-rep/deals?pieceCID=…`), which returns deal JSON including `dealType` and `clientAddress`. When `--porep-cdp-url` is set, `--porep-provider-id` is **required** (startup fails if missing/zero) so CDP results are scoped to deals you serve. `source ./scripts/devnet-env.sh` sets `SP_PROXY_POREP_CDP_URL=http://127.0.0.1:23300` and `POREP_PROVIDER_ID` for local FCSS CDP.
+
+### Piece access (public vs private)
+
+Deal metadata and piece CIDs are on the public chain (and in CDP), so **existence and size are not secrets**. `pieceaccess` only restricts who may obtain a quote or download CAR bytes.
+
+| Request | Public deal | Private deal |
+|---------|-------------|--------------|
+| `HEAD /piece/<cid>` | Always allowed (no client). Used for size probes. | Always allowed (no client). |
+| Anonymous `GET` (no `?client=`, no `Authorization`) | Allowed → `200` (free) or `402` (paid quote). | **403 Forbidden** — probe must retry with identity. |
+| `GET ?client=<0x…>` (no payment yet) | Allowed → `200` / `402`. | Allowed only if `client` is the deal owner → `200` / `402`; otherwise **403**. |
+| `GET` with `?client=` **and** `Authorization: Payment …` | Allowed (after payment settles). | Allowed only if requester is the deal owner; otherwise **403**. Missing deal in CDP → **403** (default-deny). |
+| Any `GET` when CDP lookup errors (network/HTTP/JSON) | **403 Forbidden** (fail closed). `HEAD` still allowed. | Same. `ErrDealNotFound` (empty result) still allows unpaid probes. |
+
+**Client probe sequence** (`retrieval-client` / `pieceurls`):
+
+1. `HEAD` — always anonymous; learns `Content-Length` when the SP allows it.
+2. Anonymous `GET` — succeeds for public pieces (`200`/`402`).
+3. On **403**, retry the same `GET` with `?client=<wallet>` (the fetch wallet). Owner of a private deal gets a quote; non-owners stay denied and that endpoint is skipped.
+
+Paid download still sends `Authorization: Payment …` (and usually `?client=`); access is checked again before settlement and upstream proxying.
 
 ### Monitoring payments
 
-At default log level, a successful retrieval logs `paid retrieval authorized` with `deal_uuid`, `client`, `cid`, and `pool_id` (or `paid retrieval reused` on paid-access retries). With **`--pay-debug`** or **`--verbose`**, Filecoin Pay tracing may also emit **`rail_id`** and **`payment_tx_hash`** when the proxy runs on-chain payment steps (e.g. `CreditRailPayment` when the pool balance is insufficient); drawdowns from a pre-funded pool or paid-access retries may not produce those fields. View rail status on [pay.filecoin.cloud](https://pay.filecoin.cloud/) (mainnet: `/rails/<id>`; Calibration: `/calibration/rails/<id>`).
+At default log level, a successful retrieval logs `paid retrieval authorized` with `deal_uuid`, `client`, `cid`, and `pool_id` (or `paid retrieval reused` on paid-access retries). With **`--pay-debug`** or **`--verbose`**, Filecoin Pay tracing may also emit **`rail_id`** and **`payment_tx_hash`** when the proxy runs on-chain payment steps (e.g. `CreditRailPayment` when the pool balance is insufficient); drawdowns from a pre-funded pool or paid-access retries may not produce those fields. View rail status on [pay.filecoin.cloud](https://pay.filecoin.cloud/) (mainnet: `/rails/<id>`).
 
 ### Inspecting quotes and pool state (`SIGUSR1`, Unix only)
 
@@ -356,9 +405,22 @@ task ci            # fmt, vet, lint, test, vuln
 **E2E (shell):**
 
 - `task test:e2e:discovery` — two CIDs from public sp-tool API, mainnet fetch (free paths).
-- `task test:e2e:filpay` — local nginx piece + envoy router + `sp-proxy` on `:8787`, paid fetch on Calibration (`0.0003` USDFC/GiB).
+- `task fcss-devnet:e2e` (alias `task test:e2e:fcss-devnet`) — [FCSS-devnet](https://github.com/fidlabs/FCSS-devnet) seed-deals access matrix via local `sp-proxy` with `bytecut-proxy` between proxy and Curio (TCP-RST `/piece` GETs after 0.5 MiB so Range resume is exercised). Successful fetches run `car inspect` + `car verify` on `./downloads/<cid>.car`. Requires sibling [`../FCSS-devnet`](https://github.com/fidlabs/FCSS-devnet) with `just seed-deals` summary.
 
-Local piece server for tests: `task nginx:piece` (32 GiB sparse dummy `/piece/<cid>` with envoy router to mock network instability).
+### Local FCSS-devnet helpers
+
+These tasks prepare wallets and env so you can run `sp-proxy` and `retrieval-client` against a local Curio stack from [FCSS-devnet](https://github.com/fidlabs/FCSS-devnet) (sibling checkout at [`../FCSS-devnet`](https://github.com/fidlabs/FCSS-devnet)). That stack has PoRep market deals (public and private) and piece HTTP on Curio; CDP indexes deal type and client for piece access.
+
+| Task | Purpose |
+|------|---------|
+| `task fcss-devnet:env` | Sources `scripts/devnet-env.sh`: prints/exports `PAY_RPC_URL`, `PAYMENTS`, `USDFC`, `POREP_PROVIDER_ID`, `SP_PROXY_UPSTREAM_*`, `SP_PROXY_POREP_CDP_URL`, and a sample `PIECE_CID` from VerifReg claims. |
+| `task fcss-devnet:keys` | Writes `./sp.key` (and related keys) from the FCSS-devnet market-tooling `.env` so the settler wallet matches the local chain. |
+| `task fcss-devnet:fund` | Funds `./client.key` / `./sp.key` with FIL + USDFC on the local Curio chain (needed after a chain reset). |
+| `task fcss-devnet:check` | Confirms Curio serves a seed-deals data piece (`HEAD` on upstream `/piece/<cid>`). |
+| `task fcss-devnet:bytecut` | Starts `bytecut-proxy` on `:22311` in front of Curio; TCP-RST `/piece` GETs after 0.5 MiB (HEAD untouched). Point `sp-proxy --upstream-port 22311`. |
+| `task fcss-devnet:bytecut:clean` | Stops `bytecut-proxy` on `:22311`. |
+
+Typical flow after `just up` + `just seed-deals` in FCSS-devnet: `task fcss-devnet:env`, `fcss-devnet:keys`, `fcss-devnet:fund` (once), then start `sp-proxy` with the exported CDP/upstream flags and run `retrieval-client` (or `task fcss-devnet:e2e` for the full access matrix, which starts `bytecut-proxy` automatically).
 
 ### Protocol
 
@@ -374,6 +436,8 @@ Implementers and reviewers should read [docs/mpp-filecoinpay.md](docs/mpp-fileco
 | `SP_PROXY_PAY_PAYMENTS_ADDRESS` | sp-proxy | Optional payments contract |
 | `SP_PROXY_PAY_PAYEE_ADDRESS` | sp-proxy | Optional default payee |
 | `SP_PROXY_UPSTREAM_HOST` / `SP_PROXY_UPSTREAM_PORT` | sp-proxy | Default upstream |
+| `SP_PROXY_POREP_CDP_URL` | sp-proxy | CDP HTTP base (default mainnet `https://cdp.allocator.tech`; local `http://127.0.0.1:23300`) |
+| `SP_PROXY_POREP_PROVIDER_ID` | sp-proxy | Miner actor id (numeric) for CDP deal filter; same as `--porep-provider-id` |
 
 ### Generate keys
 
@@ -446,4 +510,4 @@ There is no per-byte metering during download: one quote, one charge, one served
 
 HTTP payment flow, challenge JSON, and settlement semantics: **[docs/mpp-filecoinpay.md](docs/mpp-filecoinpay.md)**.
 
-**Validation:** confirm rail IDs in client/proxy logs against [Filecoin Pay rails dashboard](https://pay.filecoin.cloud/) (mainnet: `https://pay.filecoin.cloud/rails/<RAIL_ID>`; Calibration: `https://pay.filecoin.cloud/calibration/rails/<RAIL_ID>`).
+**Validation:** confirm rail IDs in client/proxy logs against [Filecoin Pay rails dashboard](https://pay.filecoin.cloud/) (mainnet: `https://pay.filecoin.cloud/rails/<RAIL_ID>`).

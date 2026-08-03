@@ -17,6 +17,10 @@ type Client struct {
 	// LotusRPC is used for Filecoin.StateMinerInfo (same chain as FVM / payments RPC).
 	LotusRPC string
 
+	// ProbeClient, when set, is sent as ?client=<addr> on a second probe attempt
+	// after an anonymous GET returns 403 (private deal).
+	ProbeClient string
+
 	FilecoinToolsAPI    string
 	CIDContactBaseURL   string
 	SearchPageLimit     int
