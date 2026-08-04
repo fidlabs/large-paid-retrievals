@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -60,7 +62,7 @@ func TestDownloadCARSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	outDir := t.TempDir()
-	err = downloadCAR(http.DefaultClient, base, cid, "/piece/"+cid, "", "Payment test", outDir, -1, noopProgress{}, true)
+	err = downloadCAR(http.DefaultClient, base, cid, "/piece/"+cid, "", "Payment test", outDir, -1, noopProgress{}, true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,6 +79,72 @@ func TestDownloadCARSuccess(t *testing.T) {
 	}
 }
 
+func TestDownloadCARPaymentAndBearerVouchers(t *testing.T) {
+	const cid = "bafyVoucherOk"
+	const client = "0x1111111111111111111111111111111111111111"
+	body := []byte("CAR-WITH-VOUCHER")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("client") != client {
+			http.Error(w, "missing client", http.StatusBadRequest)
+			return
+		}
+		auths := r.Header.Values("Authorization")
+		want := []string{"Payment test", "Bearer tok-a", "Bearer tok-b"}
+		if len(auths) != len(want) {
+			http.Error(w, fmt.Sprintf("Authorization=%v", auths), http.StatusUnauthorized)
+			return
+		}
+		for i := range want {
+			if auths[i] != want[i] {
+				http.Error(w, fmt.Sprintf("Authorization=%v", auths), http.StatusUnauthorized)
+				return
+			}
+		}
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	}))
+	defer ts.Close()
+
+	base, err := url.Parse(ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outDir := t.TempDir()
+	err = downloadCAR(http.DefaultClient, base, cid, "/piece/"+cid, client, "Payment test", outDir, int64(len(body)), noopProgress{}, false, []string{"tok-a", "tok-b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDownloadCAROmitsVouchersWithoutClient(t *testing.T) {
+	const cid = "bafyNoClientVoucher"
+	body := []byte("CAR-ANON")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.RawQuery != "" {
+			http.Error(w, "expected anonymous", http.StatusBadRequest)
+			return
+		}
+		if len(r.Header.Values("Authorization")) != 0 {
+			http.Error(w, fmt.Sprintf("unexpected Authorization=%v", r.Header.Values("Authorization")), http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	}))
+	defer ts.Close()
+
+	base, err := url.Parse(ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = downloadCAR(http.DefaultClient, base, cid, "/piece/"+cid, "", "", t.TempDir(), int64(len(body)), noopProgress{}, false, []string{"tok-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDownloadCARUsesProbeTotalWhenResponseHasNoLength(t *testing.T) {
 	const cid = "bafyProbeTotal"
 	body := []byte("car-chunk-data")
@@ -87,7 +155,7 @@ func TestDownloadCARUsesProbeTotalWhenResponseHasNoLength(t *testing.T) {
 	}
 	cli := &http.Client{Transport: roundTripNoContentLength(body)}
 	prog := &captureDownloadProgress{}
-	err = downloadCAR(cli, base, cid, "/piece/"+cid, "", "", t.TempDir(), probeTotal, prog, false)
+	err = downloadCAR(cli, base, cid, "/piece/"+cid, "", "", t.TempDir(), probeTotal, prog, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +197,7 @@ func TestDownloadCARReportsContentLengthHeader(t *testing.T) {
 		t.Fatal(err)
 	}
 	prog := &captureDownloadProgress{}
-	err = downloadCAR(http.DefaultClient, base, cid, "/piece/"+cid, "", "", t.TempDir(), 99, prog, false)
+	err = downloadCAR(http.DefaultClient, base, cid, "/piece/"+cid, "", "", t.TempDir(), 99, prog, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +267,7 @@ func TestDownloadCARRetriesWhenGETShortOfProbeHEAD(t *testing.T) {
 	}
 	cli := &http.Client{Transport: roundTripNoContentLength(body)}
 	outDir := t.TempDir()
-	err = downloadCAR(cli, base, cid, "/piece/"+cid, "", "", outDir, probeTotal, noopProgress{}, false)
+	err = downloadCAR(cli, base, cid, "/piece/"+cid, "", "", outDir, probeTotal, noopProgress{}, false, nil)
 	if err == nil || !strings.Contains(err.Error(), "incomplete") {
 		t.Fatalf("got %v, want incomplete error", err)
 	}
@@ -234,7 +302,7 @@ func TestDownloadCARRetriesIncompleteThenSucceeds(t *testing.T) {
 		t.Fatal(err)
 	}
 	outDir := t.TempDir()
-	if err := downloadCAR(http.DefaultClient, base, cid, "/piece/"+cid, "", "", outDir, int64(len(full)), noopProgress{}, false); err != nil {
+	if err := downloadCAR(http.DefaultClient, base, cid, "/piece/"+cid, "", "", outDir, int64(len(full)), noopProgress{}, false, nil); err != nil {
 		t.Fatalf("download failed: %v", err)
 	}
 	if got := atomic.LoadInt32(&hits); got != 3 {
@@ -278,7 +346,7 @@ func TestDownloadCARRetriesWithRangeResume(t *testing.T) {
 		t.Fatal(err)
 	}
 	outDir := t.TempDir()
-	if err := downloadCAR(http.DefaultClient, base, cid, "/piece/"+cid, "", "", outDir, int64(len(full)), noopProgress{}, false); err != nil {
+	if err := downloadCAR(http.DefaultClient, base, cid, "/piece/"+cid, "", "", outDir, int64(len(full)), noopProgress{}, false, nil); err != nil {
 		t.Fatalf("download failed: %v", err)
 	}
 	if got := atomic.LoadInt32(&hits); got != 2 {
@@ -333,7 +401,7 @@ func TestDownloadCARContentRangeMismatchRestartsFromZero(t *testing.T) {
 		t.Fatal(err)
 	}
 	outDir := t.TempDir()
-	if err := downloadCAR(http.DefaultClient, base, cid, "/piece/"+cid, "", "", outDir, int64(len(full)), noopProgress{}, false); err != nil {
+	if err := downloadCAR(http.DefaultClient, base, cid, "/piece/"+cid, "", "", outDir, int64(len(full)), noopProgress{}, false, nil); err != nil {
 		t.Fatalf("download failed: %v", err)
 	}
 	if got := atomic.LoadInt32(&hits); got != 3 {
@@ -392,7 +460,7 @@ func TestDownloadCARPartialFileSizeMismatchRestartsFromZero(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := downloadCAR(http.DefaultClient, base, cid, "/piece/"+cid, "", "", outDir, int64(len(full)), noopProgress{}, false); err != nil {
+	if err := downloadCAR(http.DefaultClient, base, cid, "/piece/"+cid, "", "", outDir, int64(len(full)), noopProgress{}, false, nil); err != nil {
 		t.Fatalf("download failed: %v", err)
 	}
 	if got := atomic.LoadInt32(&hits); got != 3 {
@@ -428,7 +496,7 @@ func TestDownloadCARExhaustsMaxAttemptsWithConstantDelay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = downloadCAR(cli, base, cid, "/piece/"+cid, "", "", t.TempDir(), probeTotal, noopProgress{}, false)
+	err = downloadCAR(cli, base, cid, "/piece/"+cid, "", "", t.TempDir(), probeTotal, noopProgress{}, false, nil)
 	if err == nil || !strings.Contains(err.Error(), "incomplete") {
 		t.Fatalf("got %v, want incomplete error", err)
 	}
@@ -444,7 +512,7 @@ func TestDownloadCARPlainErrorBody(t *testing.T) {
 	}))
 	defer ts.Close()
 	base, _ := url.Parse(ts.URL)
-	err := downloadCAR(http.DefaultClient, base, "bafy1", "/piece/bafy1", "", "", t.TempDir(), -1, noopProgress{}, false)
+	err := downloadCAR(http.DefaultClient, base, "bafy1", "/piece/bafy1", "", "", t.TempDir(), -1, noopProgress{}, false, nil)
 	if err == nil || !strings.Contains(err.Error(), "403") || !strings.Contains(err.Error(), "forbidden") {
 		t.Fatalf("got %v", err)
 	}

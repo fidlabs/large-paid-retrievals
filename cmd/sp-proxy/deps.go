@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"math/big"
 	"net/http"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -15,6 +16,7 @@ type proxyFilpay interface {
 	piecepayment.FilecoinPaySettler
 	payeeWithdrawer
 	PaymentsAddress() common.Address
+	ChainID() *big.Int
 	Close()
 }
 

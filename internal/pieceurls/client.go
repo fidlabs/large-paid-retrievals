@@ -21,6 +21,12 @@ type Client struct {
 	// after an anonymous GET returns 403 (private deal).
 	ProbeClient string
 
+	// ProbeVouchers are base64url EIP-712 retrieval voucher tokens. Each is sent as
+	// Authorization: Bearer <token> on probe GETs that include ?client=ProbeClient
+	// (anonymous probes omit vouchers). Callers should attach the same tokens on
+	// downloads that include a client identity. Empty entries are ignored.
+	ProbeVouchers []string
+
 	FilecoinToolsAPI    string
 	CIDContactBaseURL   string
 	SearchPageLimit     int

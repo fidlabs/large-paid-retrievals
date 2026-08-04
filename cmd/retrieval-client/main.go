@@ -110,7 +110,6 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 		spBaseURL          string
 		outDir             string
 		cids               []string
-		cidFile            string
 		manifest           string
 		yes                bool
 		dryRun             bool
@@ -122,6 +121,7 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 		payRPCURL          string
 		payPaymentsAddress string
 		payTokenAddress    string
+		vouchers           []string
 	)
 	c := &cobra.Command{
 		Use:   "fetch",
@@ -132,8 +132,12 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 				return fmt.Errorf("load client private key (--filpay-private-key* / %s): %w", keyOpts.privateKeyEnv, err)
 			}
 			client := crypto.PubkeyToAddress(evmPK.PublicKey).Hex()
+			vouchers = normalizeVoucherFlags(vouchers)
 			if verbose {
 				fmt.Printf("Client 0x address (from private key): %s\n", client)
+				if len(vouchers) > 0 {
+					fmt.Printf("Access vouchers: %d\n", len(vouchers))
+				}
 			}
 			if payDebug {
 				payClientLog("client 0x=%s (derived from private key)", client)
@@ -141,8 +145,8 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 
 			var allCIDs []string
 			if strings.TrimSpace(manifest) != "" {
-				if len(cids) > 0 || strings.TrimSpace(cidFile) != "" || len(args) > 0 {
-					return errors.New("--manifest is mutually exclusive with positional CIDs, --cid, and --cid-file")
+				if len(cids) > 0 || len(args) > 0 {
+					return errors.New("--manifest is mutually exclusive with positional CIDs and --cid")
 				}
 				var err error
 				allCIDs, err = extractPieceCIDsFromManifest(manifest)
@@ -154,12 +158,12 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 				}
 			} else {
 				var err error
-				allCIDs, err = collectCIDs(cids, cidFile, args)
+				allCIDs, err = collectCIDs(cids, args)
 				if err != nil {
 					return err
 				}
 				if len(allCIDs) == 0 {
-					return errors.New("provide at least one CID via args, --cid, or --cid-file (or use --manifest)")
+					return errors.New("provide at least one CID via args or --cid (or use --manifest)")
 				}
 			}
 			if err := os.MkdirAll(outDir, 0o755); err != nil {
@@ -172,6 +176,7 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 			discovery := newPieceDiscoveryClient(discoverCli, payRPCURL)
 			pieceProber := pieceurls.NewClient(probeCli)
 			pieceProber.ProbeClient = client
+			pieceProber.ProbeVouchers = vouchers
 			ctx := cmd.Context()
 			if ctx == nil {
 				ctx = context.Background()
@@ -380,7 +385,7 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 					if verbose {
 						fmt.Printf("  - downloading free CAR for CID %s from %s\n", it.CID, it.Base.String())
 					}
-					return downloadFreeCAR(cli, it.Base, it.CID, outDir, it.TotalBytes, pieceUI, verbose)
+					return downloadFreeCAR(cli, it.Base, it.CID, outDir, it.TotalBytes, pieceUI, verbose, vouchers)
 				}
 				piecePath := "/piece/" + it.CID
 				if verbose {
@@ -419,7 +424,7 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				return downloadCAR(cli, it.Base, it.CID, piecePath, client, authz, outDir, it.TotalBytes, pieceUI, verbose)
+				return downloadCAR(cli, it.Base, it.CID, piecePath, client, authz, outDir, it.TotalBytes, pieceUI, verbose, vouchers)
 			}
 
 			type dlResult struct {
@@ -493,7 +498,6 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 	c.Flags().StringVar(&spBaseURL, "sp-base-url", "", "If set, skip using discovered endpoints and probe only this SP HTTP base (e.g. http://127.0.0.1:8787)")
 	c.Flags().StringVar(&outDir, "out-dir", ".", "Output directory")
 	c.Flags().StringArrayVar(&cids, "cid", nil, "CID to fetch (repeatable)")
-	c.Flags().StringVar(&cidFile, "cid-file", "", "File with CIDs (newline or comma separated)")
 	c.Flags().StringVar(&manifest, "manifest", "", "Path to data-prep-standard super-manifest JSON (extract pieces[].piece_cid)")
 	c.Flags().BoolVar(&yes, "yes", false, "Skip interactive confirmation")
 	c.Flags().BoolVar(&dryRun, "dry-run", false, "Probe and print quote only; no chain transactions or downloads")
@@ -505,6 +509,7 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 	c.Flags().StringVar(&payRPCURL, "pay-rpc-url", getenv("SP_PROXY_PAY_RPC_URL", "https://api.node.glif.io/rpc/v1"), "Filecoin JSON-RPC URL: FVM payments + Lotus StateMinerInfo for discovery")
 	c.Flags().StringVar(&payPaymentsAddress, "pay-payments-address", getenv("SP_PROXY_PAY_PAYMENTS_ADDRESS", ""), "Filecoin Pay payments contract (0x); empty uses chain default")
 	c.Flags().StringVar(&payTokenAddress, "pay-token-address", getenv("SP_PROXY_PAY_TOKEN_ADDRESS", ""), "USDFC token (0x); empty uses chain default (required override on Curio/FOC localnet)")
+	c.Flags().StringArrayVar(&vouchers, "voucher", nil, "EIP-712 access voucher token (base64url); repeat for multiple deals. Sent as Authorization: Bearer with ?client= on probe retry and download (not on anonymous probes)")
 	return c
 }
 
@@ -512,13 +517,13 @@ func cmdRailCheck(keyOpts *filpayKeyOpts) *cobra.Command {
 	var (
 		spBaseURL          string
 		cids               []string
-		cidFile            string
 		payees             []string
 		requiredUSDFC      string
 		payDebug           bool
 		payRPCURL          string
 		payPaymentsAddress string
 		payTokenAddress    string
+		vouchers           []string
 	)
 	c := &cobra.Command{
 		Use:   "rail-check",
@@ -529,6 +534,7 @@ func cmdRailCheck(keyOpts *filpayKeyOpts) *cobra.Command {
 				return fmt.Errorf("load client private key (--filpay-private-key* / %s): %w", keyOpts.privateKeyEnv, err)
 			}
 			client := crypto.PubkeyToAddress(evmPK.PublicKey).Hex()
+			vouchers = normalizeVoucherFlags(vouchers)
 			fmt.Printf("Client (payer): %s\n", client)
 
 			var filpayOpts []filpay.Option
@@ -562,8 +568,8 @@ func cmdRailCheck(keyOpts *filpayKeyOpts) *cobra.Command {
 
 			// Gather payees from manual flags and optional live MPP challenges (discovery or --sp-base-url).
 			challenges := make([]challengeItem, 0)
-			if len(cids) > 0 || strings.TrimSpace(cidFile) != "" || len(args) > 0 {
-				allCIDs, err := collectCIDs(cids, cidFile, args)
+			if len(cids) > 0 || len(args) > 0 {
+				allCIDs, err := collectCIDs(cids, args)
 				if err != nil {
 					return err
 				}
@@ -572,6 +578,7 @@ func cmdRailCheck(keyOpts *filpayKeyOpts) *cobra.Command {
 				discovery := newPieceDiscoveryClient(discoverCli, payRPCURL)
 				pieceProber := pieceurls.NewClient(cli)
 				pieceProber.ProbeClient = client
+				pieceProber.ProbeVouchers = vouchers
 				ctx := cmd.Context()
 				if ctx == nil {
 					ctx = context.Background()
@@ -661,7 +668,7 @@ func cmdRailCheck(keyOpts *filpayKeyOpts) *cobra.Command {
 				}
 			}
 			if len(byPayeeRequired) == 0 {
-				return errors.New("no payees discovered. Provide --payee or paid MPP sources for CIDs (--cid/--cid-file/args, with discovery or --sp-base-url)")
+				return errors.New("no payees discovered. Provide --payee or paid MPP sources for CIDs (--cid/args, with discovery or --sp-base-url)")
 			}
 
 			if len(challenges) > 0 {
@@ -738,13 +745,13 @@ func cmdRailCheck(keyOpts *filpayKeyOpts) *cobra.Command {
 	}
 	c.Flags().StringVar(&spBaseURL, "sp-base-url", "", "If set, probe only this SP HTTP base for MPP challenges; empty uses piece URL discovery")
 	c.Flags().StringArrayVar(&cids, "cid", nil, "CID to probe for payee discovery (repeatable)")
-	c.Flags().StringVar(&cidFile, "cid-file", "", "File with CIDs for payee discovery via MPP (newline/comma separated)")
 	c.Flags().StringArrayVar(&payees, "payee", nil, "Explicit payee 0x address to check (repeatable)")
 	c.Flags().StringVar(&requiredUSDFC, "required-usdfc", "", "Optional required USDFC amount per --payee when no challenges are used")
 	c.Flags().BoolVar(&payDebug, "pay-debug", false, "Log Filecoin Pay operation details to stderr ([filpay-client])")
 	c.Flags().StringVar(&payRPCURL, "pay-rpc-url", getenv("SP_PROXY_PAY_RPC_URL", "https://api.node.glif.io/rpc/v1"), "Filecoin JSON-RPC URL: FVM payments + Lotus StateMinerInfo for discovery")
 	c.Flags().StringVar(&payPaymentsAddress, "pay-payments-address", getenv("SP_PROXY_PAY_PAYMENTS_ADDRESS", ""), "Filecoin Pay payments contract (0x); empty uses chain default")
 	c.Flags().StringVar(&payTokenAddress, "pay-token-address", getenv("SP_PROXY_PAY_TOKEN_ADDRESS", ""), "USDFC token (0x); empty uses chain default (required override on Curio/FOC localnet)")
+	c.Flags().StringArrayVar(&vouchers, "voucher", nil, "EIP-712 access voucher token (base64url); repeat for multiple deals. Sent as Authorization: Bearer with ?client= when probing CIDs for payees (not on anonymous probes)")
 	return c
 }
 
@@ -754,6 +761,33 @@ func payClientLog(format string, args ...any) {
 
 func retrievalLog(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "[retrieval-client] "+format+"\n", args...)
+}
+
+// normalizeVoucherFlags trims empty entries and strips a leading "Bearer " prefix.
+func normalizeVoucherFlags(raw []string) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	seen := make(map[string]struct{}, len(raw))
+	for _, v := range raw {
+		tok := strings.TrimSpace(v)
+		if tok == "" {
+			continue
+		}
+		if scheme, rest, ok := strings.Cut(tok, " "); ok && strings.EqualFold(scheme, "Bearer") {
+			tok = strings.TrimSpace(rest)
+		}
+		if tok == "" {
+			continue
+		}
+		if _, ok := seen[tok]; ok {
+			continue
+		}
+		seen[tok] = struct{}{}
+		out = append(out, tok)
+	}
+	return out
 }
 
 func truncateForLog(s string, max int) string {
@@ -881,7 +915,7 @@ func chargeRailsForChallenges(ctx context.Context, fc filpayOperations, client s
 	return chargeTxByPayee, nil
 }
 
-func collectCIDs(flagCIDs []string, cidFile string, args []string) ([]string, error) {
+func collectCIDs(flagCIDs []string, args []string) ([]string, error) {
 	seen := map[string]struct{}{}
 	var out []string
 	appendCID := func(v string) error {
@@ -907,19 +941,6 @@ func collectCIDs(flagCIDs []string, cidFile string, args []string) ([]string, er
 		for _, p := range strings.Split(c, ",") {
 			if err := appendCID(p); err != nil {
 				return nil, err
-			}
-		}
-	}
-	if cidFile != "" {
-		b, err := os.ReadFile(cidFile)
-		if err != nil {
-			return nil, err
-		}
-		for _, line := range strings.Split(string(b), "\n") {
-			for _, p := range strings.Split(line, ",") {
-				if err := appendCID(p); err != nil {
-					return nil, err
-				}
 			}
 		}
 	}
