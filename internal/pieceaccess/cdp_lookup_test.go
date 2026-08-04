@@ -406,6 +406,19 @@ func TestCDPLookupHTTPErrors(t *testing.T) {
 			t.Fatalf("got %v", err)
 		}
 	})
+	t.Run("transport", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+		base := srv.URL
+		srv.Close() // force connection error on Do
+		lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: base, ProviderID: 1, HTTPClient: http.DefaultClient})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = lookup.LookupByPieceCID(context.Background(), "baga6ea4seaqaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", common.Address{})
+		if err == nil || !strings.Contains(err.Error(), "CDP GET") {
+			t.Fatalf("got %v", err)
+		}
+	})
 }
 
 func TestCDPLookupDealIDFormsAndBadProvider(t *testing.T) {

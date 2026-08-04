@@ -33,11 +33,12 @@ type Selection struct {
 }
 
 // SelectBestPieceSource probes each base with HEAD (size) and GET {base}/piece/{cid}
-// (concurrently). The first GET is anonymous; on 403 (private deal) it retries with
-// ?client=ProbeClient when set. Any GET 200 marks the piece as free (response body
-// is not downloaded during probe). Among 402 responses with a valid MPP
-// WWW-Authenticate challenge, the lowest price_usdfc (parsed as base units) wins.
-// Other status codes and failures are ignored.
+// (concurrently). The first GET is anonymous (no vouchers). On 403 (private deal)
+// it retries with ?client=ProbeClient when set, attaching ProbeVouchers as Bearer
+// headers. Any GET 200 marks the piece as free (response body is not downloaded
+// during probe). Among 402 responses with a valid MPP WWW-Authenticate challenge,
+// the lowest price_usdfc (parsed as base units) wins. Other status codes and
+// failures are ignored.
 func (c *Client) SelectBestPieceSource(ctx context.Context, pieceCID string, bases []*url.URL, log func(string, ...any), probe ProbeCallback) (*Selection, error) {
 	if c == nil || c.HTTP == nil {
 		return nil, fmt.Errorf("pieceurls: client or HTTP client is nil")
@@ -190,6 +191,10 @@ func (c *Client) probeGET(ctx context.Context, base *url.URL, cid, client0x stri
 	if err != nil {
 		return nil, false, err
 	}
+	// Vouchers are only meaningful with a requester identity; skip on anonymous probes.
+	if strings.TrimSpace(client0x) != "" {
+		AddBearerVoucherHeaders(req.Header, c.ProbeVouchers)
+	}
 	res, err := c.HTTP.Do(req)
 	if err != nil {
 		if log != nil {
@@ -298,6 +303,28 @@ func truncateForLog(s string, max int) string {
 		return s
 	}
 	return s[:max] + "…"
+}
+
+// AddBearerVoucherHeaders appends Authorization: Bearer <token> for each voucher.
+// Tokens may be raw base64url or already prefixed with "Bearer ". Callers should
+// only invoke this when a client identity is present (not on anonymous probes).
+func AddBearerVoucherHeaders(h http.Header, vouchers []string) {
+	if h == nil {
+		return
+	}
+	for _, raw := range vouchers {
+		tok := strings.TrimSpace(raw)
+		if tok == "" {
+			continue
+		}
+		if scheme, rest, ok := strings.Cut(tok, " "); ok && strings.EqualFold(scheme, "Bearer") {
+			tok = strings.TrimSpace(rest)
+		}
+		if tok == "" {
+			continue
+		}
+		h.Add("Authorization", "Bearer "+tok)
+	}
 }
 
 func sanitizeFilename(v string) string {

@@ -30,6 +30,7 @@ const testQuotePayee0x = "0x2222222222222222222222222222222222222222"
 type stubFilpay struct {
 	signer   common.Address
 	payments common.Address
+	chainID  *big.Int
 	credit   func(ctx context.Context, payer, payee common.Address) (string, *big.Int, error)
 	closed   bool
 }
@@ -50,7 +51,13 @@ func (s *stubFilpay) WithdrawPayeeProceeds(context.Context, common.Address) (str
 
 func (s *stubFilpay) SignerAddress() common.Address   { return s.signer }
 func (s *stubFilpay) PaymentsAddress() common.Address { return s.payments }
-func (s *stubFilpay) Close()                          { s.closed = true }
+func (s *stubFilpay) ChainID() *big.Int {
+	if s.chainID != nil {
+		return new(big.Int).Set(s.chainID)
+	}
+	return big.NewInt(314159)
+}
+func (s *stubFilpay) Close() { s.closed = true }
 
 func stubFilpayFactory() newFilpayClientFunc {
 	return func(context.Context, string, string, string, string, string, ...filpay.Option) (proxyFilpay, error) {
@@ -68,6 +75,13 @@ func defaultStubFilpay() *stubFilpay {
 
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// publicDealLookup always returns a public deal so payment/routing tests are not blocked by privacy.
+type publicDealLookup struct{}
+
+func (publicDealLookup) LookupByPieceCID(context.Context, string, common.Address) ([]*pieceaccess.Deal, error) {
+	return []*pieceaccess.Deal{{DealID: "1", DealType: pieceaccess.DealTypePublic}}, nil
 }
 
 func openTestStore(t *testing.T) *sqlitestore.Store {
@@ -276,7 +290,7 @@ func TestBuildProxyHandlerAccessBeforePayment(t *testing.T) {
 		Store:           store,
 	}
 	svc := piecepayment.NewRetrievalService(config)
-	handler := buildPieceHandler(pieceaccess.NewAuthorizer(), svc, upstream)
+	handler := buildPieceHandler(pieceaccess.NewAuthorizer(pieceaccess.WithDealLookup(publicDealLookup{})), svc, upstream)
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/piece/") {
@@ -333,7 +347,10 @@ func TestBuildProxyHandlerRoutes(t *testing.T) {
 		ClientHeader:    "X-Client-Address",
 		MaxSkewSec:      30,
 	}
-	h := buildProxyHandler(upURL, host, port, store, stub, testQuotePayee0x, settings, testLogger(), nil)
+	h, err := buildProxyHandler(upURL, host, port, store, stub, testQuotePayee0x, settings, testLogger(), publicDealLookup{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	ts := httptest.NewServer(h)
 	defer ts.Close()
 
@@ -499,9 +516,11 @@ func TestNewPorepDealLookupRequiresProviderID(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 
-	lookup, closeFn, err := newPorepDealLookup(context.Background(), proxyAppSettings{}, testLogger())
-	if err != nil || lookup != nil {
-		t.Fatalf("empty CDP URL should disable lookup: lookup=%v err=%v", lookup, err)
+	lookup, closeFn, err := newPorepDealLookup(context.Background(), proxyAppSettings{
+		PorepProviderID: 1004,
+	}, testLogger())
+	if err != nil || lookup == nil {
+		t.Fatalf("empty CDP URL should default to mainnet: lookup=%v err=%v", lookup, err)
 	}
 	closeFn()
 
@@ -513,6 +532,73 @@ func TestNewPorepDealLookupRequiresProviderID(t *testing.T) {
 		t.Fatalf("got lookup=%v err=%v", lookup, err)
 	}
 	closeFn()
+}
+
+func TestRequireVoucherDomainPin(t *testing.T) {
+	t.Parallel()
+	stub := defaultStubFilpay()
+	_, market, err := requireVoucherDomainPin(proxyAppSettings{}, stub)
+	if err != nil || market == (common.Address{}) {
+		t.Fatalf("calib default: market=%s err=%v", market.Hex(), err)
+	}
+
+	stub.chainID = big.NewInt(31415926) // devnet — no built-in default
+	_, _, err = requireVoucherDomainPin(proxyAppSettings{}, stub)
+	if err == nil || !strings.Contains(err.Error(), "PoRep market address required") {
+		t.Fatalf("expected missing market error, got %v", err)
+	}
+
+	override := "0x1234567890abcdef1234567890abcdef12345678"
+	_, market, err = requireVoucherDomainPin(proxyAppSettings{PorepMarketAddress: override}, stub)
+	if err != nil || !strings.EqualFold(market.Hex(), override) {
+		t.Fatalf("override: market=%s err=%v", market.Hex(), err)
+	}
+
+	stub.chainID = big.NewInt(0)
+	_, _, err = requireVoucherDomainPin(proxyAppSettings{PorepMarketAddress: override}, stub)
+	if err == nil || !strings.Contains(err.Error(), "chain id") {
+		t.Fatalf("expected chain id error, got %v", err)
+	}
+}
+
+func TestBuildProxyHandlerRequiresDealLookup(t *testing.T) {
+	t.Parallel()
+	upURL, _ := url.Parse("http://127.0.0.1:9")
+	store := openTestStore(t)
+	stub := defaultStubFilpay()
+	_, err := buildProxyHandler(upURL, "127.0.0.1", 9, store, stub, testQuotePayee0x, proxyAppSettings{
+		PriceUSDFCPerGB: "0.01",
+		ClientQuery:     "client",
+		ClientHeader:    "X-Client-Address",
+	}, testLogger(), nil)
+	if err == nil || !strings.Contains(err.Error(), "deal lookup is required") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestBuildProxyHandlerRequiresMarketWhenCDPEnabled(t *testing.T) {
+	t.Parallel()
+	upURL, _ := url.Parse("http://127.0.0.1:9")
+	store := openTestStore(t)
+	stub := defaultStubFilpay()
+	stub.chainID = big.NewInt(31415926)
+	lookup, closeFn, err := newPorepDealLookup(context.Background(), proxyAppSettings{
+		PorepCDPURL:     "http://127.0.0.1:23300",
+		PorepProviderID: 1004,
+	}, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeFn()
+
+	_, err = buildProxyHandler(upURL, "127.0.0.1", 9, store, stub, testQuotePayee0x, proxyAppSettings{
+		PriceUSDFCPerGB: "0.01",
+		ClientQuery:     "client",
+		ClientHeader:    "X-Client-Address",
+	}, testLogger(), lookup)
+	if err == nil || !strings.Contains(err.Error(), "voucher domain pin") {
+		t.Fatalf("got %v", err)
+	}
 }
 
 func TestRunProxyAppCDPRequiresProviderID(t *testing.T) {
@@ -565,8 +651,8 @@ func TestRunProxyAppInvalidPayee(t *testing.T) {
 func TestCobraExecuteStartsProxy(t *testing.T) {
 	defer restoreProxyHooks(t)()
 
-	// Flag defaults read SP_PROXY_POREP_* at registration; clear so ambient
-	// devnet env cannot enable CDP without a provider ID.
+	// Flag defaults read SP_PROXY_POREP_* at registration; clear ambient values
+	// then pass explicit CDP + provider so startup does not depend on host env.
 	t.Setenv("SP_PROXY_POREP_CDP_URL", "")
 	t.Setenv("SP_PROXY_POREP_PROVIDER_ID", "0")
 
@@ -591,7 +677,8 @@ func TestCobraExecuteStartsProxy(t *testing.T) {
 		"--upstream-host", host,
 		"--upstream-port", strconv.Itoa(port),
 		"--pay-payee-address", testQuotePayee0x,
-		"--porep-cdp-url", "", // disable CDP for this routing smoke test
+		"--porep-cdp-url", "http://127.0.0.1:23300",
+		"--porep-provider-id", "1004",
 	})
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)

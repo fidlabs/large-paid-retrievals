@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/fidlabs/paid-retrievals/internal/mpp"
@@ -48,7 +49,8 @@ func TestMiddlewarePassthrough(t *testing.T) {
 		_, _ = w.Write([]byte("ok"))
 	})
 
-	handler := pieceaccess.NewAuthorizer().Middleware(next)
+	lookup := &stubLookup{deal: &pieceaccess.Deal{DealID: "1", DealType: pieceaccess.DealTypePublic}}
+	handler := pieceaccess.NewAuthorizer(pieceaccess.WithDealLookup(lookup)).Middleware(next)
 
 	req := httptest.NewRequest(http.MethodGet, "/piece/baga6ea4seaqabc", nil)
 	rec := httptest.NewRecorder()
@@ -79,7 +81,8 @@ func TestMiddlewareSetsAccessContext(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	handler := pieceaccess.NewAuthorizer().Middleware(next)
+	lookup := &stubLookup{deal: &pieceaccess.Deal{DealID: "1", DealType: pieceaccess.DealTypePublic}}
+	handler := pieceaccess.NewAuthorizer(pieceaccess.WithDealLookup(lookup)).Middleware(next)
 	req := httptest.NewRequest(http.MethodGet, "/piece/baga6ea4seaqabc", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -109,7 +112,8 @@ func TestMiddlewareRunsBeforePayment(t *testing.T) {
 		upstream.ServeHTTP(w, r)
 	})
 
-	handler := pieceaccess.NewAuthorizer().Middleware(payment)
+	lookup := &stubLookup{deal: &pieceaccess.Deal{DealID: "1", DealType: pieceaccess.DealTypePublic}}
+	handler := pieceaccess.NewAuthorizer(pieceaccess.WithDealLookup(lookup)).Middleware(payment)
 
 	req := httptest.NewRequest(http.MethodGet, "/piece/baga6ea4seaqabc", nil)
 	rec := httptest.NewRecorder()
@@ -129,7 +133,8 @@ func TestMiddlewareRunsBeforePayment(t *testing.T) {
 func TestPaymentBeforeAccessLeavesContextUnset(t *testing.T) {
 	t.Parallel()
 
-	access := pieceaccess.NewAuthorizer()
+	lookup := &stubLookup{deal: &pieceaccess.Deal{DealID: "1", DealType: pieceaccess.DealTypePublic}}
+	access := pieceaccess.NewAuthorizer(pieceaccess.WithDealLookup(lookup))
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -437,6 +442,58 @@ func TestMiddlewarePrivateDealHEADAllowedWithoutClient(t *testing.T) {
 	if !called || rec.Code != http.StatusOK {
 		t.Fatalf("called=%v code=%d", called, rec.Code)
 	}
+}
+
+func TestMiddlewarePrivateDealHEADAllowedWithBearerOrPayment(t *testing.T) {
+	t.Parallel()
+	ownerKey, owner := mustVoucherKey(t)
+	grantee := common.HexToAddress("0x0553e4ed281E5a0A0654F6E46a0F80b7153ad506")
+	lookup := &stubLookup{deal: &pieceaccess.Deal{
+		DealID:   "1001",
+		Client:   owner,
+		DealType: pieceaccess.DealTypePrivate,
+	}}
+	token := mustBearerVoucher(t, ownerKey, grantee, 1001, time.Now().Add(time.Hour).Unix())
+	handler := testVoucherAuthorizer(lookup).Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	t.Run("payment", func(t *testing.T) {
+		t.Parallel()
+		authz, err := paymentAuth(grantee.Hex())
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodHead, "/piece/baga6ea4seaqabc", nil)
+		req.Header.Set("Authorization", authz)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("HEAD with Payment must stay unrestricted; code=%d body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("bearer_and_client", func(t *testing.T) {
+		t.Parallel()
+		req := httptest.NewRequest(http.MethodHead, "/piece/baga6ea4seaqabc?client="+grantee.Hex(), nil)
+		req.Header.Add("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("HEAD with Bearer+?client= must stay unrestricted; code=%d body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("bearer_without_client", func(t *testing.T) {
+		t.Parallel()
+		req := httptest.NewRequest(http.MethodHead, "/piece/baga6ea4seaqabc", nil)
+		req.Header.Add("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("HEAD with Bearer and no requester must stay unrestricted; code=%d body=%s", rec.Code, rec.Body.String())
+		}
+	})
 }
 
 func TestMiddlewarePrivateDealAnonymousGETDenied(t *testing.T) {
@@ -779,7 +836,15 @@ func TestMiddlewareNilPanics(t *testing.T) {
 				t.Fatal("expected nil next panic")
 			}
 		}()
-		_ = pieceaccess.NewAuthorizer().Middleware(nil)
+		_ = pieceaccess.NewAuthorizer(pieceaccess.WithDealLookup(&stubLookup{})).Middleware(nil)
+	}()
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("expected missing DealLookup panic")
+			}
+		}()
+		_ = pieceaccess.NewAuthorizer().Middleware(next)
 	}()
 }
 

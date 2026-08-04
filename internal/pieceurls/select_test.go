@@ -257,6 +257,59 @@ func TestSelectBestPieceSource_RetryClientOnForbidden(t *testing.T) {
 	}
 }
 
+func TestSelectBestPieceSource_SendsBearerVouchersOnlyWithClient(t *testing.T) {
+	t.Parallel()
+	const cid = "bafkreidcbkgxoddug6vawnjrzb4aaublfn46sd2rvxnykbxkkarke7y76e"
+	const voucher = "v.payload.sig"
+	const client = "0x1111111111111111111111111111111111111111"
+	const payee = "0x2222222222222222222222222222222222222222"
+
+	type probeHit struct {
+		query string
+		auth  []string
+	}
+	hitsCh := make(chan probeHit, 2)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		hitsCh <- probeHit{query: r.URL.RawQuery, auth: r.Header.Values("Authorization")}
+		if r.URL.Query().Get("client") == "" {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		mpp402Handler(cid, "11111111-1111-1111-1111-111111111111", "0.01", payee)(w, r)
+	}))
+	t.Cleanup(srv.Close)
+
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := NewClient(srv.Client())
+	c.ProbeClient = client
+	c.ProbeVouchers = []string{voucher, " second "}
+	sel, err := c.SelectBestPieceSource(context.Background(), cid, []*url.URL{u}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sel == nil || sel.PriceUSDFC != "0.01" {
+		t.Fatalf("selection: %+v", sel)
+	}
+
+	anon := <-hitsCh
+	if anon.query != "" || len(anon.auth) != 0 {
+		t.Fatalf("anonymous probe: query=%q auth=%v, want bare path and no Bearer", anon.query, anon.auth)
+	}
+	withClient := <-hitsCh
+	wantAuth := []string{"Bearer " + voucher, "Bearer second"}
+	if withClient.query != "client="+client || len(withClient.auth) != len(wantAuth) ||
+		withClient.auth[0] != wantAuth[0] || withClient.auth[1] != wantAuth[1] {
+		t.Fatalf("client probe: query=%q auth=%v, want client=%s auth=%v", withClient.query, withClient.auth, client, wantAuth)
+	}
+}
+
 func TestSelectBestPieceSource_NilClient(t *testing.T) {
 	var c *Client
 	_, err := c.SelectBestPieceSource(context.Background(), "bafy", []*url.URL{{Scheme: "http", Host: "h"}}, nil, nil)
