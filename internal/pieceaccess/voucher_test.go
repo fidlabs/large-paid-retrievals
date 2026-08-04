@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -46,6 +47,23 @@ func TestVerifyBearerVoucherRoundTrip(t *testing.T) {
 	}
 	if got.Deadline != deadline {
 		t.Fatalf("deadline: got %d want %d", got.Deadline, deadline)
+	}
+}
+
+func TestVerifyBearerVoucherLargeDealID(t *testing.T) {
+	t.Parallel()
+	ownerKey, owner := mustKey(t)
+	grantee := common.HexToAddress("0xabc0000000000000000000000000000000000123")
+	deadline := time.Now().Add(time.Hour).Unix()
+	dealID := new(big.Int).Lsh(big.NewInt(1), 80) // beyond float64 exact-int range
+
+	token := mustSignVoucherRaw(t, ownerKey, grantee, dealID, deadline, 1)
+	got, err := verifyBearerVoucher(token, time.Now().Unix(), voucherTestPin(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameAddress(got.Owner, owner) || got.DealID.Cmp(dealID) != 0 {
+		t.Fatalf("got owner=%s dealId=%s", got.Owner.Hex(), got.DealID)
 	}
 }
 
@@ -287,11 +305,20 @@ func mustKey(t *testing.T) (*ecdsa.PrivateKey, common.Address) {
 
 func mustSignVoucher(t *testing.T, key *ecdsa.PrivateKey, f voucherFields) string {
 	t.Helper()
+	return mustSignVoucherRaw(t, key, f.grantee, big.NewInt(f.dealID), f.deadline, f.chainID)
+}
+
+// mustSignVoucherRaw signs a voucher with an arbitrary uint256 dealId (decimal string in JSON).
+func mustSignVoucherRaw(t *testing.T, key *ecdsa.PrivateKey, grantee common.Address, dealID *big.Int, deadline, chainID int64) string {
+	t.Helper()
+	if dealID == nil {
+		t.Fatal("nil dealID")
+	}
 	payload := map[string]any{
 		"domain": map[string]any{
 			"name":              voucherDomainName,
 			"version":           voucherDomainVer,
-			"chainId":           f.chainID,
+			"chainId":           chainID,
 			"verifyingContract": voucherTestContract,
 		},
 		"types": map[string]any{
@@ -303,9 +330,9 @@ func mustSignVoucher(t *testing.T, key *ecdsa.PrivateKey, f voucherFields) strin
 		},
 		"primaryType": voucherPrimaryType,
 		"message": map[string]any{
-			voucherTypeGrantee:  f.grantee.Hex(),
-			voucherTypeDealID:   f.dealID,
-			voucherTypeDeadline: f.deadline,
+			voucherTypeGrantee:  grantee.Hex(),
+			voucherTypeDealID:   dealID.String(),
+			voucherTypeDeadline: fmt.Sprintf("%d", deadline),
 		},
 		"signature": "0x00",
 	}
@@ -313,11 +340,21 @@ func mustSignVoucher(t *testing.T, key *ecdsa.PrivateKey, f voucherFields) strin
 	if err != nil {
 		t.Fatal(err)
 	}
-	var tok voucherToken
-	if err := json.Unmarshal(raw, &tok); err != nil {
+	tok, err := decodeVoucherToken(raw)
+	if err != nil {
 		t.Fatal(err)
 	}
-	ensureEIP712DomainTypes(&tok)
+	parsedDeal, err := parseVoucherUint256(tok.Message[voucherTypeDealID])
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadlineBig, err := parseVoucherUint256(tok.Message[voucherTypeDeadline])
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok.Message[voucherTypeDealID] = parsedDeal.String()
+	tok.Message[voucherTypeDeadline] = deadlineBig.String()
+	ensureEIP712DomainTypes(tok)
 	typed := apitypes.TypedData{
 		Types:       tok.Types,
 		PrimaryType: tok.PrimaryType,
@@ -335,7 +372,7 @@ func mustSignVoucher(t *testing.T, key *ecdsa.PrivateKey, f voucherFields) strin
 	sig[64] += 27
 	tok.Signature = "0x" + common.Bytes2Hex(sig)
 	delete(tok.Types, "EIP712Domain")
-	token, err := encodeBearerVoucherToken(tok)
+	token, err := encodeBearerVoucherToken(*tok)
 	if err != nil {
 		t.Fatal(err)
 	}

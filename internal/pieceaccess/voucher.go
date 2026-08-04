@@ -1,10 +1,12 @@
 package pieceaccess
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"net/http"
 	"strings"
@@ -175,22 +177,26 @@ func verifyBearerVoucher(token string, nowUnix int64, pin *voucherDomainPin) (*V
 	if err != nil {
 		return nil, fmt.Errorf("%w: bearer token base64url decode: %v", ErrInvalidVoucher, err)
 	}
-	var tok voucherToken
-	if err := json.Unmarshal(raw, &tok); err != nil {
+	tok, err := decodeVoucherToken(raw)
+	if err != nil {
 		return nil, fmt.Errorf("%w: voucher json: %v", ErrInvalidVoucher, err)
 	}
-	if err := validateVoucherShape(&tok); err != nil {
+	if err := validateVoucherShape(tok); err != nil {
 		return nil, err
 	}
 
-	deadline, err := parseVoucherUint(tok.Message[voucherTypeDeadline])
+	deadlineBig, err := parseVoucherUint256(tok.Message[voucherTypeDeadline])
+	if err != nil {
+		return nil, fmt.Errorf("%w: deadline: %v", ErrInvalidVoucher, err)
+	}
+	deadline, err := unixDeadline(deadlineBig)
 	if err != nil {
 		return nil, fmt.Errorf("%w: deadline: %v", ErrInvalidVoucher, err)
 	}
 	if deadline <= nowUnix {
 		return nil, fmt.Errorf("%w: voucher expired (deadline=%d now=%d)", ErrInvalidVoucher, deadline, nowUnix)
 	}
-	dealID, err := parseVoucherUint(tok.Message[voucherTypeDealID])
+	dealID, err := parseVoucherUint256(tok.Message[voucherTypeDealID])
 	if err != nil {
 		return nil, fmt.Errorf("%w: dealId: %v", ErrInvalidVoucher, err)
 	}
@@ -200,11 +206,16 @@ func verifyBearerVoucher(token string, nowUnix int64, pin *voucherDomainPin) (*V
 	}
 	grantee := common.HexToAddress(granteeRaw)
 
-	if err := checkVoucherDomain(&tok, pin); err != nil {
+	if err := checkVoucherDomain(tok, pin); err != nil {
 		return nil, err
 	}
 
-	ensureEIP712DomainTypes(&tok)
+	// Normalize uint256 message fields to decimal strings so EIP-712 hashing
+	// sees exact values (json.Number / float64 are awkward for go-ethereum).
+	tok.Message[voucherTypeDealID] = dealID.String()
+	tok.Message[voucherTypeDeadline] = deadlineBig.String()
+
+	ensureEIP712DomainTypes(tok)
 	typed := apitypes.TypedData{
 		Types:       tok.Types,
 		PrimaryType: tok.PrimaryType,
@@ -222,9 +233,21 @@ func verifyBearerVoucher(token string, nowUnix int64, pin *voucherDomainPin) (*V
 	return &VerifiedVoucher{
 		Owner:    owner,
 		Grantee:  grantee,
-		DealID:   big.NewInt(dealID),
+		DealID:   dealID,
 		Deadline: deadline,
 	}, nil
+}
+
+// decodeVoucherToken unmarshals a voucher payload with UseNumber so uint256
+// fields keep full decimal precision instead of float64.
+func decodeVoucherToken(raw []byte) (*voucherToken, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var tok voucherToken
+	if err := dec.Decode(&tok); err != nil {
+		return nil, err
+	}
+	return &tok, nil
 }
 
 func checkVoucherDomain(tok *voucherToken, pin *voucherDomainPin) error {
@@ -349,27 +372,53 @@ func recoverVoucherSigner(digest []byte, signatureHex string) (common.Address, e
 	return crypto.PubkeyToAddress(*pub), nil
 }
 
-// parseVoucherUint parses dealId/deadline from JSON-unmarshaled map[string]any.
-// encoding/json yields float64 for numbers; quoted values arrive as string.
-func parseVoucherUint(v any) (int64, error) {
+// maxSafeJSONFloatInt is the largest integer exactly representable in IEEE-754
+// float64 (2^53 - 1). Bare JSON numbers decoded without UseNumber cannot safely
+// carry values above this.
+const maxSafeJSONFloatInt = (1 << 53) - 1
+
+// parseVoucherUint256 parses dealId/deadline from a JSON message map into a
+// full uint256. Prefer json.Number (UseNumber) or decimal strings; float64 is
+// accepted only for exact integers within the float64 safe-integer range.
+func parseVoucherUint256(v any) (*big.Int, error) {
 	switch x := v.(type) {
-	case float64:
-		if x < 0 || x != float64(int64(x)) {
-			return 0, fmt.Errorf("not an integer")
-		}
-		return int64(x), nil
+	case json.Number:
+		return parseUint256String(string(x))
 	case string:
-		n, ok := new(big.Int).SetString(strings.TrimSpace(x), 10)
-		if !ok {
-			return 0, fmt.Errorf("not an integer string")
+		return parseUint256String(x)
+	case float64:
+		if math.IsNaN(x) || math.IsInf(x, 0) || x < 0 || x != math.Trunc(x) {
+			return nil, fmt.Errorf("not an integer")
 		}
-		if !n.IsInt64() {
-			return 0, fmt.Errorf("out of range")
+		if x > float64(maxSafeJSONFloatInt) {
+			return nil, fmt.Errorf("float64 loses precision above 2^53; use a decimal string or json.Number")
 		}
-		return n.Int64(), nil
+		return big.NewInt(int64(x)), nil
 	default:
-		return 0, fmt.Errorf("unsupported type %T", v)
+		return nil, fmt.Errorf("unsupported type %T", v)
 	}
+}
+
+func parseUint256String(s string) (*big.Int, error) {
+	n, ok := new(big.Int).SetString(strings.TrimSpace(s), 10)
+	if !ok {
+		return nil, fmt.Errorf("not an integer string")
+	}
+	if n.Sign() < 0 {
+		return nil, fmt.Errorf("negative")
+	}
+	if n.BitLen() > 256 {
+		return nil, fmt.Errorf("out of uint256 range")
+	}
+	return n, nil
+}
+
+// unixDeadline converts a uint256 deadline to unix seconds for expiry checks.
+func unixDeadline(n *big.Int) (int64, error) {
+	if n == nil || !n.IsInt64() {
+		return 0, fmt.Errorf("out of int64 range")
+	}
+	return n.Int64(), nil
 }
 
 func voucherAuthorizesDeal(v VerifiedVoucher, d *Deal) bool {
