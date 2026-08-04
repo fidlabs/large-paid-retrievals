@@ -273,10 +273,20 @@ func validateVoucherShape(tok *voucherToken) error {
 	if len(fields) != len(want) {
 		return fmt.Errorf("%w: unexpected %s field count", ErrInvalidVoucher, voucherPrimaryType)
 	}
+	seen := make(map[string]struct{}, len(want))
 	for _, f := range fields {
 		t, ok := want[f.Name]
 		if !ok || f.Type != t {
 			return fmt.Errorf("%w: unexpected type field %s %s", ErrInvalidVoucher, f.Name, f.Type)
+		}
+		if _, dup := seen[f.Name]; dup {
+			return fmt.Errorf("%w: duplicate type field %s", ErrInvalidVoucher, f.Name)
+		}
+		seen[f.Name] = struct{}{}
+	}
+	for name := range want {
+		if _, ok := seen[name]; !ok {
+			return fmt.Errorf("%w: missing type field %s", ErrInvalidVoucher, name)
 		}
 	}
 	if tok.Message == nil {
