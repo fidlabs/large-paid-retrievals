@@ -26,36 +26,43 @@ import (
 	"github.com/ethereum/go-ethereum/signer/core/apitypes"
 )
 
-func TestParseVoucherUint(t *testing.T) {
+func TestParseVoucherUint256(t *testing.T) {
 	t.Parallel()
+	largeOK := new(big.Int).Lsh(big.NewInt(1), 80)
+	tooBig := new(big.Int).Lsh(big.NewInt(1), 256) // 2^256, BitLen 257
 	cases := []struct {
 		name    string
 		in      any
-		want    int64
+		want    *big.Int
 		wantErr string
 	}{
-		{name: "float64", in: float64(42), want: 42},
-		{name: "string", in: "99", want: 99},
-		{name: "string whitespace", in: "  7  ", want: 7},
+		{name: "json.Number", in: json.Number("42"), want: big.NewInt(42)},
+		{name: "float64", in: float64(42), want: big.NewInt(42)},
+		{name: "string", in: "99", want: big.NewInt(99)},
+		{name: "string whitespace", in: "  7  ", want: big.NewInt(7)},
+		{name: "large string", in: largeOK.String(), want: largeOK},
+		{name: "large json.Number", in: json.Number(largeOK.String()), want: largeOK},
 		{name: "negative float", in: float64(-1), wantErr: "not an integer"},
 		{name: "non-integer float", in: 1.5, wantErr: "not an integer"},
+		{name: "float above safe int", in: float64(1 << 53), wantErr: "float64 loses precision"},
 		{name: "bad string", in: "nope", wantErr: "not an integer string"},
-		{name: "out of range string", in: new(big.Int).Lsh(big.NewInt(1), 80).String(), wantErr: "out of range"},
+		{name: "negative string", in: "-1", wantErr: "negative"},
+		{name: "out of uint256 range", in: tooBig.String(), wantErr: "out of uint256 range"},
 		{name: "unsupported bool", in: true, wantErr: "unsupported type"},
 		{name: "nil", in: nil, wantErr: "unsupported type"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := parseVoucherUint(tc.in)
+			got, err := parseVoucherUint256(tc.in)
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("err=%v want substring %q", err, tc.wantErr)
 				}
 				return
 			}
-			if err != nil || got != tc.want {
-				t.Fatalf("got %d err=%v want %d", got, err, tc.want)
+			if err != nil || got.Cmp(tc.want) != 0 {
+				t.Fatalf("got %v err=%v want %s", got, err, tc.want)
 			}
 		})
 	}
@@ -182,7 +189,7 @@ func TestVerifyBearerVoucherMalformed(t *testing.T) {
 		tok.Message[voucherTypeDealID] = "55"
 		tok.Message[voucherTypeDeadline] = fmt.Sprintf("%d", deadline)
 		// Signature was over numeric fields; string message changes EIP-712 hash → recovery
-		// still "succeeds" as some address, but we only care parseVoucherUint accepts strings.
+		// still "succeeds" as some address, but we only care parseVoucherUint256 accepts strings.
 		// Re-sign with string fields so verification succeeds end-to-end.
 		ensureEIP712DomainTypes(&tok)
 		typed := apitypes.TypedData{Types: tok.Types, PrimaryType: tok.PrimaryType, Domain: tok.Domain, Message: tok.Message}

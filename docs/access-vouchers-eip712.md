@@ -41,13 +41,14 @@ Deal owners can create vouchers suitable for authorizing third-party access with
   "primaryType": "RetrievalVoucher",
   "message": {
     "grantee": "0xabc0000000000000000000000000000000000123",
-    "dealId": 1001,
-    "deadline": 1767225600
+    "dealId": "1001",
+    "deadline": "1767225600"
   },
   "signature": "0x..."
 }
 ```
 
+`dealId` and `deadline` may also be bare JSON numbers. Prefer quoted decimal strings for values above `2^53 - 1` so JSON cannot lose precision; the verifier accepts either form via `json.Number` / string parsing into `uint256`.
 ## Transport
 
 Transport is `Authorization: Bearer <token>`, where `<token>` is base64url-without-padding of compact JSON (`domain`, `types`, `primaryType`, `message`, `signature`). For retrievals that may map to several private dataset-piece deals, pass all vouchers to `retrieval-client fetch` by repeating `--voucher`.
