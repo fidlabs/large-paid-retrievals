@@ -102,6 +102,15 @@ func TestValidateVoucherShape(t *testing.T) {
 	mutate("unknown field name", func(tok *voucherToken) {
 		tok.Types[voucherPrimaryType][0].Name = "spender"
 	}, "unexpected type field")
+	mutate("duplicate type field omits required", func(tok *voucherToken) {
+		// Same length as want, but two grantee entries and no deadline — must reject
+		// so EIP-712 hashing cannot drop a required field from the signed digest.
+		tok.Types[voucherPrimaryType] = []apitypes.Type{
+			{Name: voucherTypeGrantee, Type: "address"},
+			{Name: voucherTypeGrantee, Type: "address"},
+			{Name: voucherTypeDealID, Type: "uint256"},
+		}
+	}, "duplicate type field")
 	mutate("nil message", func(tok *voucherToken) { tok.Message = nil }, "missing message")
 	mutate("missing message field", func(tok *voucherToken) { delete(tok.Message, voucherTypeDealID) }, "missing message.dealId")
 	mutate("empty signature", func(tok *voucherToken) { tok.Signature = "  " }, "missing signature")

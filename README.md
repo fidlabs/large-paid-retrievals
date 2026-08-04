@@ -289,7 +289,7 @@ Piece access resolves PoRep deals via [CDP](https://cdp.allocator.tech) (`GET /p
 
 ### Piece access (public vs private)
 
-Deal metadata and piece CIDs are on the public chain (and in CDP), so **existence and size are not secrets**. `pieceaccess` only restricts who may obtain a quote or download CAR bytes. For private dataset pieces, allowed requesters are the deal owner and any wallet that presents a valid owner-signed voucher for that deal (`dealId` must match; when `?client=` / Payment identity is present it must equal the signed `grantee`). A Bearer voucher alone (no client identity) is accepted for probing/quoting when the voucher otherwise verifies.
+Deal metadata and piece CIDs are on the public chain (and in CDP), so **existence and size are not secrets**. `pieceaccess` only restricts who may obtain a quote or download CAR bytes. For private dataset pieces, allowed requesters are the deal owner and any wallet that presents a valid owner-signed voucher for that deal (`dealId` must match; requester identity from Payment `ClientAddress` or `?client=` must equal the signed `grantee`). Bearer vouchers are ignored when no requester identity is present.
 
 | Request | Public deal | Private dataset piece |
 |---------|-------------|--------------|
