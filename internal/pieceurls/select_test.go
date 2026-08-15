@@ -2,6 +2,7 @@ package pieceurls
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -257,7 +258,7 @@ func TestSelectBestPieceSource_RetryClientOnForbidden(t *testing.T) {
 	}
 }
 
-func TestSelectBestPieceSource_SendsBearerVouchersOnlyWithClient(t *testing.T) {
+func TestSelectBestPieceSource_SendsRetrievalVouchersOnlyWithClient(t *testing.T) {
 	t.Parallel()
 	const cid = "bafkreidcbkgxoddug6vawnjrzb4aaublfn46sd2rvxnykbxkkarke7y76e"
 	const voucher = "v.payload.sig"
@@ -300,13 +301,66 @@ func TestSelectBestPieceSource_SendsBearerVouchersOnlyWithClient(t *testing.T) {
 
 	anon := <-hitsCh
 	if anon.query != "" || len(anon.auth) != 0 {
-		t.Fatalf("anonymous probe: query=%q auth=%v, want bare path and no Bearer", anon.query, anon.auth)
+		t.Fatalf("anonymous probe: query=%q auth=%v, want bare path and no Retrieval", anon.query, anon.auth)
 	}
 	withClient := <-hitsCh
-	wantAuth := []string{"Bearer " + voucher, "Bearer second"}
+	wantAuth := []string{"RetrievalVoucher " + voucher, "RetrievalVoucher second"}
 	if withClient.query != "client="+client || len(withClient.auth) != len(wantAuth) ||
 		withClient.auth[0] != wantAuth[0] || withClient.auth[1] != wantAuth[1] {
 		t.Fatalf("client probe: query=%q auth=%v, want client=%s auth=%v", withClient.query, withClient.auth, client, wantAuth)
+	}
+}
+
+func TestSelectBestPieceSource_AuthHeadersForPiece(t *testing.T) {
+	t.Parallel()
+	const cid = "bafkreidcbkgxoddug6vawnjrzb4aaublfn46sd2rvxnykbxkkarke7y76e"
+	const client = "0x1111111111111111111111111111111111111111"
+	const payee = "0x2222222222222222222222222222222222222222"
+	const minted = "RetrievalProof minted-for-piece"
+
+	type probeHit struct {
+		query string
+		auth  []string
+	}
+	hitsCh := make(chan probeHit, 2)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		hitsCh <- probeHit{query: r.URL.RawQuery, auth: r.Header.Values("Authorization")}
+		if r.URL.Query().Get("client") == "" {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		mpp402Handler(cid, "11111111-1111-1111-1111-111111111111", "0.01", payee)(w, r)
+	}))
+	t.Cleanup(srv.Close)
+
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := NewClient(srv.Client())
+	c.ProbeClient = client
+	c.ProbeVouchers = []string{"ignored-static"}
+	c.AuthHeadersForPiece = func(pieceCID string) ([]string, error) {
+		if pieceCID != cid {
+			return nil, fmt.Errorf("unexpected pieceCID %q", pieceCID)
+		}
+		return []string{minted}, nil
+	}
+	sel, err := c.SelectBestPieceSource(context.Background(), cid, []*url.URL{u}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sel == nil || sel.PriceUSDFC != "0.01" {
+		t.Fatalf("selection: %+v", sel)
+	}
+	<-hitsCh // anon
+	withClient := <-hitsCh
+	if len(withClient.auth) != 1 || withClient.auth[0] != minted {
+		t.Fatalf("auth=%v, want minted token", withClient.auth)
 	}
 }
 

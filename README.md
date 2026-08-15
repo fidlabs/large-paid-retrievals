@@ -47,7 +47,7 @@ When the window expires, paid retries stop: request a **new** `402` quote (new `
 
 ### What you need
 
-1. **Go 1.26.5+** or a pre-built `retrieval-client` binary.
+1. **Go 1.26.6+** or a pre-built `retrieval-client` binary.
 2. A **client private key** (`client.key`) — secp256k1 hex; see [Generate keys](#generate-keys).
 3. **FIL** on your network (mainnet by default) for Filecoin Pay transaction gas.
 4. **USDFC** in the client wallet for paid retrievals (amount depends on piece sizes and SP rates).
@@ -98,7 +98,7 @@ Use `--yes` to skip the funding confirmation prompt (scripts/CI).
   --voucher "<base64url-voucher-for-deal-1003>"
 ```
 
-`retrieval-client` includes all provided vouchers when probing/fetching so each SP can validate the voucher matching a private dataset piece's deal.
+`retrieval-client` forwards all provided vouchers verbatim as repeated `Authorization: RetrievalVoucher` headers and mints one `Authorization: RetrievalProof` (proof of possession) per piece, so each SP can validate the voucher matching a private dataset piece's deal.
 
 Deal owners can create vouchers for third-party wallets with the [filecoin-porep-market-tooling](https://github.com/fidlabs/filecoin-porep-market-tooling) CLI (`sign-retrieval-voucher`). Format details: [docs/access-vouchers-eip712.md](docs/access-vouchers-eip712.md).
 
@@ -146,7 +146,7 @@ Paid SPs bill in **USDFC per GiB** (binary `2^30` bytes), **rounded up** to whol
 | `--out-dir` | Output directory for `.car` files |
 | `--pay-rpc-url` / `--rpc-url` | FVM RPC for payments and discovery |
 | `--filpay-private-key-file` | Client identity + MPP signing |
-| `--voucher` | EIP-712 access voucher (repeatable); sent as `Authorization: Bearer` with `?client=` on probe retry and download (not on anonymous probes) |
+| `--voucher` | EIP-712 access voucher (repeatable); forwarded as `Authorization: RetrievalVoucher` headers alongside a minted `Authorization: RetrievalProof` on probe retry and download (not on anonymous probes) |
 | `--yes` | Skip confirm prompt |
 | `--dry-run` | Quote only |
 | `--expires-in-sec` | MPP proof expiry |
@@ -289,7 +289,7 @@ Piece access resolves PoRep deals via [CDP](https://cdp.allocator.tech) (`GET /p
 
 ### Piece access (public vs private)
 
-Deal metadata and piece CIDs are on the public chain (and in CDP), so **existence and size are not secrets**. `pieceaccess` only restricts who may obtain a quote or download CAR bytes. For private dataset pieces, allowed requesters are the deal owner and any wallet that presents a valid owner-signed voucher for that deal (`dealId` must match; requester identity from Payment `ClientAddress` or `?client=` must equal the signed `grantee`). Bearer vouchers are ignored when no requester identity is present.
+Deal metadata and piece CIDs are on the public chain (and in CDP), so **existence and size are not secrets**. `pieceaccess` only restricts who may obtain a quote or download CAR bytes. For private dataset pieces, the requester identity is the signer of the `Authorization: RetrievalProof` (proof of possession) token, which binds the exact piece CID. Allowed requesters are the deal owner (owner-direct proof) and any wallet presenting a valid owner-signed `Authorization: RetrievalVoucher` for that deal (voucher `scope` must match the deal id and its `grantee` must equal the proof signer). For paid GETs the Payment `ClientAddress` must also equal the proof signer. A private piece with no valid proof is denied.
 
 | Request | Public deal | Private dataset piece |
 |---------|-------------|--------------|
@@ -303,7 +303,7 @@ Deal metadata and piece CIDs are on the public chain (and in CDP), so **existenc
 
 1. `HEAD` — always anonymous; learns `Content-Length` when the SP allows it.
 2. Anonymous `GET` — succeeds for public pieces (`200`/`402`).
-3. On **403**, retry the same `GET` with `?client=<wallet>` (the fetch wallet) and any available vouchers (`Authorization: Bearer`). Anonymous probes never send vouchers. The deal owner, or a voucher-delegated wallet, gets a quote; unauthorized wallets stay denied and that endpoint is skipped.
+3. On **403**, retry the same `GET` with `?client=<wallet>` (the fetch wallet), a minted `Authorization: RetrievalProof`, and any available vouchers as repeated `Authorization: RetrievalVoucher` headers. Anonymous probes never send credentials. The deal owner, or a voucher-delegated wallet, gets a quote; unauthorized wallets stay denied and that endpoint is skipped.
 
 See [docs/access-vouchers-eip712.md](docs/access-vouchers-eip712.md) for voucher format and client usage.
 

@@ -47,7 +47,7 @@ func (svc *RetrievalService) PiecePaymentMiddleware(MaxHeaderSize int) func(http
 				return
 			}
 
-			// Only Payment-scheme credentials trigger settle. Bearer access vouchers
+			// Only Payment-scheme credentials trigger settle. Retrieval access vouchers
 			// (and any other Authorization schemes) must not block quoting.
 			rawHdr := paymentAuthorizationHeader(r)
 			if svc.cfg.PayDebug {
@@ -164,7 +164,7 @@ func parsePiecePath(path string) (string, bool) {
 }
 
 // paymentAuthorizationHeader returns the first Authorization: Payment … value, if any.
-// Bearer (and other) schemes are ignored so access vouchers do not look like settle attempts.
+// Retrieval (and other) schemes are ignored so access vouchers do not look like settle attempts.
 func paymentAuthorizationHeader(r *http.Request) string {
 	if r == nil {
 		return ""

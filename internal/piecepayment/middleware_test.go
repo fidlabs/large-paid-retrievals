@@ -346,7 +346,7 @@ func TestQuoteThenPaidSuccess(t *testing.T) {
 	}
 }
 
-func TestQuoteIgnoresBearerVoucherAuthorization(t *testing.T) {
+func TestQuoteIgnoresRetrievalVoucherAuthorization(t *testing.T) {
 	s := newTestStore(t)
 	defer s.Close()
 
@@ -362,8 +362,8 @@ func TestQuoteIgnoresBearerVoucherAuthorization(t *testing.T) {
 
 	cid := "bafkreidde4sfyosf2pm6u4vxb65wogjg464a6y6tcg75opo6q5wv34bley"
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/piece/"+cid+"?client="+client, nil)
-	req.Header.Add("Authorization", "Bearer voucher-for-deal-1")
-	req.Header.Add("Authorization", "Bearer voucher-for-deal-2")
+	req.Header.Add("Authorization", "Retrieval voucher-for-deal-1")
+	req.Header.Add("Authorization", "Retrieval voucher-for-deal-2")
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -377,7 +377,7 @@ func TestQuoteIgnoresBearerVoucherAuthorization(t *testing.T) {
 	}
 	body, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 	if strings.Contains(string(body), "malformed-credential") {
-		t.Fatalf("Bearer vouchers must not be treated as Payment credentials, body=%s", body)
+		t.Fatalf("Retrieval vouchers must not be treated as Payment credentials, body=%s", body)
 	}
 }
 

@@ -105,8 +105,8 @@ func TestCollectCIDsRejectsDuplicate(t *testing.T) {
 }
 
 func TestNormalizeVoucherFlags(t *testing.T) {
-	got := normalizeVoucherFlags([]string{"  tok-a  ", "Bearer tok-b", "bearer tok-a", "", "  "})
-	want := []string{"tok-a", "tok-b"}
+	got := normalizeVoucherFlags([]string{"  tok-a  ", "Retrieval tok-b", "retrieval tok-a", "Bearer tok-c", "", "  "})
+	want := []string{"tok-a", "tok-b", "tok-c"}
 	if len(got) != len(want) {
 		t.Fatalf("got %v want %v", got, want)
 	}

@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -122,6 +123,9 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 		payPaymentsAddress string
 		payTokenAddress    string
 		vouchers           []string
+		porepCDPURL        string
+		porepProviderID    uint64
+		porepMarketAddress string
 	)
 	c := &cobra.Command{
 		Use:   "fetch",
@@ -176,10 +180,16 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 			discovery := newPieceDiscoveryClient(discoverCli, payRPCURL)
 			pieceProber := pieceurls.NewClient(probeCli)
 			pieceProber.ProbeClient = client
-			pieceProber.ProbeVouchers = vouchers
 			ctx := cmd.Context()
 			if ctx == nil {
 				ctx = context.Background()
+			}
+			authCfg, err := buildRetrievalAuth(ctx, evmPK, vouchers, payRPCURL, porepCDPURL, porepMarketAddress, porepProviderID)
+			if err != nil {
+				return fmt.Errorf("retrieval auth: %w", err)
+			}
+			pieceProber.AuthHeadersForPiece = func(pieceCID string) ([]string, error) {
+				return authCfg.authHeadersForPiece(ctx, pieceCID)
 			}
 
 			probeLog := makeProbeLog(cmd.OutOrStdout(), verbose)
@@ -381,11 +391,15 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 				if it.Base == nil {
 					return fmt.Errorf("internal: missing base URL for CID %s", it.CID)
 				}
+				tokens, terr := authCfg.authHeadersForPiece(ctx, it.CID)
+				if terr != nil {
+					return fmt.Errorf("retrieval auth for CID %s: %w", it.CID, terr)
+				}
 				if it.Free {
 					if verbose {
 						fmt.Printf("  - downloading free CAR for CID %s from %s\n", it.CID, it.Base.String())
 					}
-					return downloadFreeCAR(cli, it.Base, it.CID, outDir, it.TotalBytes, pieceUI, verbose, vouchers)
+					return downloadFreeCAR(cli, it.Base, it.CID, outDir, it.TotalBytes, pieceUI, verbose, tokens)
 				}
 				piecePath := "/piece/" + it.CID
 				if verbose {
@@ -424,7 +438,7 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				return downloadCAR(cli, it.Base, it.CID, piecePath, client, authz, outDir, it.TotalBytes, pieceUI, verbose, vouchers)
+				return downloadCAR(cli, it.Base, it.CID, piecePath, client, authz, outDir, it.TotalBytes, pieceUI, verbose, tokens)
 			}
 
 			type dlResult struct {
@@ -509,7 +523,10 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 	c.Flags().StringVar(&payRPCURL, "pay-rpc-url", getenv("SP_PROXY_PAY_RPC_URL", "https://api.node.glif.io/rpc/v1"), "Filecoin JSON-RPC URL: FVM payments + Lotus StateMinerInfo for discovery")
 	c.Flags().StringVar(&payPaymentsAddress, "pay-payments-address", getenv("SP_PROXY_PAY_PAYMENTS_ADDRESS", ""), "Filecoin Pay payments contract (0x); empty uses chain default")
 	c.Flags().StringVar(&payTokenAddress, "pay-token-address", getenv("SP_PROXY_PAY_TOKEN_ADDRESS", ""), "USDFC token (0x); empty uses chain default (required override on Curio/FOC localnet)")
-	c.Flags().StringArrayVar(&vouchers, "voucher", nil, "EIP-712 access voucher token (base64url); repeat for multiple deals. Sent as Authorization: Bearer with ?client= on probe retry and download (not on anonymous probes)")
+	c.Flags().StringArrayVar(&vouchers, "voucher", nil, "EIP-712 RetrievalVoucher capability (base64url); repeat for multiple deals. Each token is checked for format, expiry, and signature at startup, then forwarded as Authorization: RetrievalVoucher with a minted per-CID Authorization: RetrievalProof")
+	c.Flags().StringVar(&porepCDPURL, "porep-cdp-url", firstEnv("SP_PROXY_POREP_CDP_URL", "POREP_CDP_URL"), "CDP base URL for owner-direct proof minting when --voucher is omitted (e.g. http://127.0.0.1:23300)")
+	c.Flags().Uint64Var(&porepProviderID, "porep-provider-id", mustParseUint64Env("0", "SP_PROXY_POREP_PROVIDER_ID", "POREP_PROVIDER_ID"), "Miner actor ID for CDP owner-proof minting; 0 disables owner CDP lookup")
+	c.Flags().StringVar(&porepMarketAddress, "porep-market-address", firstEnv("SP_PROXY_POREP_MARKET_ADDRESS", "POREP_MARKET"), "PoRep Market (0x) for owner-direct EIP-712 domain; required on chains without a built-in default")
 	return c
 }
 
@@ -524,6 +541,9 @@ func cmdRailCheck(keyOpts *filpayKeyOpts) *cobra.Command {
 		payPaymentsAddress string
 		payTokenAddress    string
 		vouchers           []string
+		porepCDPURL        string
+		porepProviderID    uint64
+		porepMarketAddress string
 	)
 	c := &cobra.Command{
 		Use:   "rail-check",
@@ -578,10 +598,16 @@ func cmdRailCheck(keyOpts *filpayKeyOpts) *cobra.Command {
 				discovery := newPieceDiscoveryClient(discoverCli, payRPCURL)
 				pieceProber := pieceurls.NewClient(cli)
 				pieceProber.ProbeClient = client
-				pieceProber.ProbeVouchers = vouchers
 				ctx := cmd.Context()
 				if ctx == nil {
 					ctx = context.Background()
+				}
+				authCfg, err := buildRetrievalAuth(ctx, evmPK, vouchers, payRPCURL, porepCDPURL, porepMarketAddress, porepProviderID)
+				if err != nil {
+					return fmt.Errorf("retrieval auth: %w", err)
+				}
+				pieceProber.AuthHeadersForPiece = func(pieceCID string) ([]string, error) {
+					return authCfg.authHeadersForPiece(ctx, pieceCID)
 				}
 				probeLog := func(format string, args ...any) {
 					if payDebug {
@@ -751,7 +777,10 @@ func cmdRailCheck(keyOpts *filpayKeyOpts) *cobra.Command {
 	c.Flags().StringVar(&payRPCURL, "pay-rpc-url", getenv("SP_PROXY_PAY_RPC_URL", "https://api.node.glif.io/rpc/v1"), "Filecoin JSON-RPC URL: FVM payments + Lotus StateMinerInfo for discovery")
 	c.Flags().StringVar(&payPaymentsAddress, "pay-payments-address", getenv("SP_PROXY_PAY_PAYMENTS_ADDRESS", ""), "Filecoin Pay payments contract (0x); empty uses chain default")
 	c.Flags().StringVar(&payTokenAddress, "pay-token-address", getenv("SP_PROXY_PAY_TOKEN_ADDRESS", ""), "USDFC token (0x); empty uses chain default (required override on Curio/FOC localnet)")
-	c.Flags().StringArrayVar(&vouchers, "voucher", nil, "EIP-712 access voucher token (base64url); repeat for multiple deals. Sent as Authorization: Bearer with ?client= when probing CIDs for payees (not on anonymous probes)")
+	c.Flags().StringArrayVar(&vouchers, "voucher", nil, "EIP-712 RetrievalVoucher capability (base64url); repeat for multiple deals. Each token is checked for format, expiry, and signature at startup, then forwarded as Authorization: RetrievalVoucher with a minted per-CID Authorization: RetrievalProof when probing CIDs for payees")
+	c.Flags().StringVar(&porepCDPURL, "porep-cdp-url", firstEnv("SP_PROXY_POREP_CDP_URL", "POREP_CDP_URL"), "CDP base URL for owner-direct proof minting when --voucher is omitted")
+	c.Flags().Uint64Var(&porepProviderID, "porep-provider-id", mustParseUint64Env("0", "SP_PROXY_POREP_PROVIDER_ID", "POREP_PROVIDER_ID"), "Miner actor ID for CDP owner-proof minting; 0 disables owner CDP lookup")
+	c.Flags().StringVar(&porepMarketAddress, "porep-market-address", firstEnv("SP_PROXY_POREP_MARKET_ADDRESS", "POREP_MARKET"), "PoRep Market (0x) for owner-direct EIP-712 domain")
 	return c
 }
 
@@ -763,7 +792,7 @@ func retrievalLog(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "[retrieval-client] "+format+"\n", args...)
 }
 
-// normalizeVoucherFlags trims empty entries and strips a leading "Bearer " prefix.
+// normalizeVoucherFlags trims empty entries and strips a leading "Retrieval " or legacy "Bearer " prefix.
 func normalizeVoucherFlags(raw []string) []string {
 	if len(raw) == 0 {
 		return nil
@@ -771,13 +800,7 @@ func normalizeVoucherFlags(raw []string) []string {
 	out := make([]string, 0, len(raw))
 	seen := make(map[string]struct{}, len(raw))
 	for _, v := range raw {
-		tok := strings.TrimSpace(v)
-		if tok == "" {
-			continue
-		}
-		if scheme, rest, ok := strings.Cut(tok, " "); ok && strings.EqualFold(scheme, "Bearer") {
-			tok = strings.TrimSpace(rest)
-		}
+		tok := pieceurls.StripVoucherAuthScheme(strings.TrimSpace(v))
 		if tok == "" {
 			continue
 		}
@@ -993,6 +1016,28 @@ func getenv(key, fallback string) string {
 	v := strings.TrimSpace(os.Getenv(key))
 	if v == "" {
 		return fallback
+	}
+	return v
+}
+
+// firstEnv returns the first non-empty env value among keys, or "".
+func firstEnv(keys ...string) string {
+	for _, key := range keys {
+		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func mustParseUint64Env(fallback string, keys ...string) uint64 {
+	raw := firstEnv(keys...)
+	if raw == "" {
+		raw = fallback
+	}
+	v, err := strconv.ParseUint(strings.TrimSpace(raw), 10, 64)
+	if err != nil {
+		return 0
 	}
 	return v
 }

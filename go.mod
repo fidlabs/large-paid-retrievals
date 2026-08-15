@@ -1,6 +1,6 @@
 module github.com/fidlabs/paid-retrievals
 
-go 1.26.5
+go 1.26.6
 
 require (
 	github.com/data-preservation-programs/go-synapse v0.0.0-20260503115913-40ae25e74ba1
