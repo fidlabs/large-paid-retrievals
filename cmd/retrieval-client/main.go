@@ -13,7 +13,6 @@ import (
 	"net/url"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -123,8 +122,6 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 		payPaymentsAddress string
 		payTokenAddress    string
 		vouchers           []string
-		porepCDPURL        string
-		porepProviderID    uint64
 		porepMarketAddress string
 	)
 	c := &cobra.Command{
@@ -184,7 +181,7 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 			if ctx == nil {
 				ctx = context.Background()
 			}
-			authCfg, err := buildRetrievalAuth(ctx, evmPK, vouchers, payRPCURL, porepCDPURL, porepMarketAddress, porepProviderID)
+			authCfg, err := buildRetrievalAuth(ctx, evmPK, vouchers, payRPCURL, porepMarketAddress)
 			if err != nil {
 				return fmt.Errorf("retrieval auth: %w", err)
 			}
@@ -524,8 +521,6 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 	c.Flags().StringVar(&payPaymentsAddress, "pay-payments-address", getenv("SP_PROXY_PAY_PAYMENTS_ADDRESS", ""), "Filecoin Pay payments contract (0x); empty uses chain default")
 	c.Flags().StringVar(&payTokenAddress, "pay-token-address", getenv("SP_PROXY_PAY_TOKEN_ADDRESS", ""), "USDFC token (0x); empty uses chain default (required override on Curio/FOC localnet)")
 	c.Flags().StringArrayVar(&vouchers, "voucher", nil, "EIP-712 RetrievalVoucher capability (base64url); repeat for multiple deals. Each token is checked for format, expiry, and signature at startup, then forwarded as Authorization: RetrievalVoucher with a minted per-CID Authorization: RetrievalProof")
-	c.Flags().StringVar(&porepCDPURL, "porep-cdp-url", firstEnv("SP_PROXY_POREP_CDP_URL", "POREP_CDP_URL"), "Unused (accepted for CLI compatibility); client no longer looks up deals in CDP when minting proofs")
-	c.Flags().Uint64Var(&porepProviderID, "porep-provider-id", mustParseUint64Env("0", "SP_PROXY_POREP_PROVIDER_ID", "POREP_PROVIDER_ID"), "Unused (accepted for CLI compatibility); client no longer looks up deals in CDP when minting proofs")
 	c.Flags().StringVar(&porepMarketAddress, "porep-market-address", firstEnv("SP_PROXY_POREP_MARKET_ADDRESS", "POREP_MARKET"), "PoRep Market (0x) for owner-direct EIP-712 domain; required on chains without a built-in default")
 	return c
 }
@@ -541,8 +536,6 @@ func cmdRailCheck(keyOpts *filpayKeyOpts) *cobra.Command {
 		payPaymentsAddress string
 		payTokenAddress    string
 		vouchers           []string
-		porepCDPURL        string
-		porepProviderID    uint64
 		porepMarketAddress string
 	)
 	c := &cobra.Command{
@@ -602,7 +595,7 @@ func cmdRailCheck(keyOpts *filpayKeyOpts) *cobra.Command {
 				if ctx == nil {
 					ctx = context.Background()
 				}
-				authCfg, err := buildRetrievalAuth(ctx, evmPK, vouchers, payRPCURL, porepCDPURL, porepMarketAddress, porepProviderID)
+				authCfg, err := buildRetrievalAuth(ctx, evmPK, vouchers, payRPCURL, porepMarketAddress)
 				if err != nil {
 					return fmt.Errorf("retrieval auth: %w", err)
 				}
@@ -778,8 +771,6 @@ func cmdRailCheck(keyOpts *filpayKeyOpts) *cobra.Command {
 	c.Flags().StringVar(&payPaymentsAddress, "pay-payments-address", getenv("SP_PROXY_PAY_PAYMENTS_ADDRESS", ""), "Filecoin Pay payments contract (0x); empty uses chain default")
 	c.Flags().StringVar(&payTokenAddress, "pay-token-address", getenv("SP_PROXY_PAY_TOKEN_ADDRESS", ""), "USDFC token (0x); empty uses chain default (required override on Curio/FOC localnet)")
 	c.Flags().StringArrayVar(&vouchers, "voucher", nil, "EIP-712 RetrievalVoucher capability (base64url); repeat for multiple deals. Each token is checked for format, expiry, and signature at startup, then forwarded as Authorization: RetrievalVoucher with a minted per-CID Authorization: RetrievalProof when probing CIDs for payees")
-	c.Flags().StringVar(&porepCDPURL, "porep-cdp-url", firstEnv("SP_PROXY_POREP_CDP_URL", "POREP_CDP_URL"), "Unused (accepted for CLI compatibility); client no longer looks up deals in CDP when minting proofs")
-	c.Flags().Uint64Var(&porepProviderID, "porep-provider-id", mustParseUint64Env("0", "SP_PROXY_POREP_PROVIDER_ID", "POREP_PROVIDER_ID"), "Unused (accepted for CLI compatibility); client no longer looks up deals in CDP when minting proofs")
 	c.Flags().StringVar(&porepMarketAddress, "porep-market-address", firstEnv("SP_PROXY_POREP_MARKET_ADDRESS", "POREP_MARKET"), "PoRep Market (0x) for owner-direct EIP-712 domain; required on chains without a built-in default")
 	return c
 }
@@ -1028,18 +1019,6 @@ func firstEnv(keys ...string) string {
 		}
 	}
 	return ""
-}
-
-func mustParseUint64Env(fallback string, keys ...string) uint64 {
-	raw := firstEnv(keys...)
-	if raw == "" {
-		raw = fallback
-	}
-	v, err := strconv.ParseUint(strings.TrimSpace(raw), 10, 64)
-	if err != nil {
-		return 0
-	}
-	return v
 }
 
 func sumTokenValues(prices []string) (string, error) {
