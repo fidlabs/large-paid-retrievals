@@ -95,7 +95,7 @@ tasks:
         echo "*** all pieces fetched and verified ***"
 
   test:e2e:fcss-devnet:
-    desc: Alias for fcss-devnet:e2e (local paid fetch + CDP deal lookup)
+    desc: FCSS-devnet e2e access matrix (local paid fetch + CDP deal lookup + vouchers)
     cmds:
       - task: fcss-devnet:e2e
 

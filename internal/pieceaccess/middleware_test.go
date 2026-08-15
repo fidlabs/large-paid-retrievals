@@ -3,6 +3,7 @@ package pieceaccess_test
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"encoding/json"
 	"errors"
 	"io"
@@ -11,8 +12,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/fidlabs/paid-retrievals/internal/mpp"
 	"github.com/fidlabs/paid-retrievals/internal/pieceaccess"
 )
@@ -48,7 +51,8 @@ func TestMiddlewarePassthrough(t *testing.T) {
 		_, _ = w.Write([]byte("ok"))
 	})
 
-	handler := pieceaccess.NewAuthorizer().Middleware(next)
+	lookup := &stubLookup{deal: &pieceaccess.Deal{DealID: "1", DealType: pieceaccess.DealTypePublic}}
+	handler := pieceaccess.NewAuthorizer(pieceaccess.WithDealLookup(lookup)).Middleware(next)
 
 	req := httptest.NewRequest(http.MethodGet, "/piece/baga6ea4seaqabc", nil)
 	rec := httptest.NewRecorder()
@@ -79,7 +83,8 @@ func TestMiddlewareSetsAccessContext(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	handler := pieceaccess.NewAuthorizer().Middleware(next)
+	lookup := &stubLookup{deal: &pieceaccess.Deal{DealID: "1", DealType: pieceaccess.DealTypePublic}}
+	handler := pieceaccess.NewAuthorizer(pieceaccess.WithDealLookup(lookup)).Middleware(next)
 	req := httptest.NewRequest(http.MethodGet, "/piece/baga6ea4seaqabc", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -109,7 +114,8 @@ func TestMiddlewareRunsBeforePayment(t *testing.T) {
 		upstream.ServeHTTP(w, r)
 	})
 
-	handler := pieceaccess.NewAuthorizer().Middleware(payment)
+	lookup := &stubLookup{deal: &pieceaccess.Deal{DealID: "1", DealType: pieceaccess.DealTypePublic}}
+	handler := pieceaccess.NewAuthorizer(pieceaccess.WithDealLookup(lookup)).Middleware(payment)
 
 	req := httptest.NewRequest(http.MethodGet, "/piece/baga6ea4seaqabc", nil)
 	rec := httptest.NewRecorder()
@@ -129,7 +135,8 @@ func TestMiddlewareRunsBeforePayment(t *testing.T) {
 func TestPaymentBeforeAccessLeavesContextUnset(t *testing.T) {
 	t.Parallel()
 
-	access := pieceaccess.NewAuthorizer()
+	lookup := &stubLookup{deal: &pieceaccess.Deal{DealID: "1", DealType: pieceaccess.DealTypePublic}}
+	access := pieceaccess.NewAuthorizer(pieceaccess.WithDealLookup(lookup))
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -153,9 +160,14 @@ func TestPaymentBeforeAccessLeavesContextUnset(t *testing.T) {
 func TestMiddlewareLookupLogsDeal(t *testing.T) {
 	t.Parallel()
 
+	ownerKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := crypto.PubkeyToAddress(ownerKey.PublicKey)
 	deal := &pieceaccess.Deal{
 		DealID:     "7",
-		Client:     common.HexToAddress("0x1111111111111111111111111111111111111111"),
+		Client:     owner,
 		ProviderID: 1000,
 		DealType:   pieceaccess.DealTypePrivate,
 		State:      "COMPLETED",
@@ -175,12 +187,11 @@ func TestMiddlewareLookupLogsDeal(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	handler := pieceaccess.NewAuthorizer(
-		pieceaccess.WithDealLookup(lookup),
-		pieceaccess.WithLogger(logger),
-	).Middleware(next)
+	handler := testCredentialAuthorizer(lookup, pieceaccess.WithLogger(logger)).Middleware(next)
 
-	req := httptest.NewRequest(http.MethodGet, "/piece/baga6ea4seaqabc?client="+deal.Client.Hex(), nil)
+	token := mustOwnerCredential(t, ownerKey, 7, "baga6ea4seaqabc", time.Now().Add(time.Hour).Unix(), 314159)
+	req := httptest.NewRequest(http.MethodGet, "/piece/baga6ea4seaqabc", nil)
+	addRetrievalProof(req, token)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -311,7 +322,7 @@ func TestDealJSON(t *testing.T) {
 
 func TestMiddlewarePrivateDealOwnerAllowed(t *testing.T) {
 	t.Parallel()
-	owner := common.HexToAddress("0xAF6C83b9D33DdEAD8810011abb5cA1Cfc2d8754a")
+	ownerKey, owner := mustMiddlewareOwnerKey(t)
 	lookup := &stubLookup{deal: &pieceaccess.Deal{
 		DealID:   "1",
 		Client:   owner,
@@ -323,19 +334,21 @@ func TestMiddlewarePrivateDealOwnerAllowed(t *testing.T) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	})
-	handler := pieceaccess.NewAuthorizer(pieceaccess.WithDealLookup(lookup)).Middleware(next)
-	req := httptest.NewRequest(http.MethodGet, "/piece/baga6ea4seaqabc?client="+owner.Hex(), nil)
+	handler := testCredentialAuthorizer(lookup).Middleware(next)
+	token := mustOwnerCredential(t, ownerKey, 1, "baga6ea4seaqabc", time.Now().Add(time.Hour).Unix(), 314159)
+	req := httptest.NewRequest(http.MethodGet, "/piece/baga6ea4seaqabc", nil)
+	addRetrievalProof(req, token)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if !called || rec.Code != http.StatusOK {
-		t.Fatalf("called=%v code=%d", called, rec.Code)
+		t.Fatalf("called=%v code=%d body=%s", called, rec.Code, rec.Body.String())
 	}
 }
 
 func TestMiddlewareMultiplePrivateDealsMatchingOwnerAllowed(t *testing.T) {
 	t.Parallel()
-	ownerA := common.HexToAddress("0xAF6C83b9D33DdEAD8810011abb5cA1Cfc2d8754a")
-	ownerB := common.HexToAddress("0x0553e4ed281E5a0A0654F6E46a0F80b7153ad506")
+	_, ownerA := mustMiddlewareOwnerKey(t)
+	ownerBKey, ownerB := mustMiddlewareOwnerKey(t)
 	lookup := &stubLookup{deals: []*pieceaccess.Deal{
 		{DealID: "1", Client: ownerA, DealType: pieceaccess.DealTypePrivate},
 		{DealID: "2", Client: ownerB, DealType: pieceaccess.DealTypePrivate},
@@ -349,14 +362,16 @@ func TestMiddlewareMultiplePrivateDealsMatchingOwnerAllowed(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusOK)
 	})
-	handler := pieceaccess.NewAuthorizer(pieceaccess.WithDealLookup(lookup)).Middleware(next)
+	handler := testCredentialAuthorizer(lookup).Middleware(next)
 
 	// Owner B must be allowed even when listed second (not the "picked" first deal).
-	req := httptest.NewRequest(http.MethodGet, "/piece/baga6ea4seaqabc?client="+ownerB.Hex(), nil)
+	token := mustOwnerCredential(t, ownerBKey, 2, "baga6ea4seaqabc", time.Now().Add(time.Hour).Unix(), 314159)
+	req := httptest.NewRequest(http.MethodGet, "/piece/baga6ea4seaqabc", nil)
+	addRetrievalProof(req, token)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if !called || rec.Code != http.StatusOK {
-		t.Fatalf("called=%v code=%d", called, rec.Code)
+		t.Fatalf("called=%v code=%d body=%s", called, rec.Code, rec.Body.String())
 	}
 	if gotDealID != "2" {
 		t.Fatalf("representative deal: got %q want 2", gotDealID)
@@ -439,6 +454,61 @@ func TestMiddlewarePrivateDealHEADAllowedWithoutClient(t *testing.T) {
 	}
 }
 
+func TestMiddlewarePrivateDealHEADAllowedWithRetrievalOrPayment(t *testing.T) {
+	t.Parallel()
+	ownerKey, owner := mustCredKey(t)
+	granteeKey, grantee := mustCredKey(t)
+	lookup := &stubLookup{deal: &pieceaccess.Deal{
+		DealID:   "1001",
+		Client:   owner,
+		DealType: pieceaccess.DealTypePrivate,
+	}}
+	now := time.Now().Unix()
+	proof, voucher := mustDelegatedCredential(t, ownerKey, granteeKey, 1001, "baga6ea4seaqabc", now, now+3600, now+86400, 314159)
+	handler := testCredentialAuthorizer(lookup).Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	t.Run("payment", func(t *testing.T) {
+		t.Parallel()
+		authz, err := paymentAuth(grantee.Hex())
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodHead, "/piece/baga6ea4seaqabc", nil)
+		req.Header.Set("Authorization", authz)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("HEAD with Payment must stay unrestricted; code=%d body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("retrieval_and_client", func(t *testing.T) {
+		t.Parallel()
+		req := httptest.NewRequest(http.MethodHead, "/piece/baga6ea4seaqabc?client="+grantee.Hex(), nil)
+		addRetrievalProof(req, proof)
+		addRetrievalVoucher(req, voucher)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("HEAD with Retrieval+?client= must stay unrestricted; code=%d body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("retrieval_without_client", func(t *testing.T) {
+		t.Parallel()
+		req := httptest.NewRequest(http.MethodHead, "/piece/baga6ea4seaqabc", nil)
+		addRetrievalProof(req, proof)
+		addRetrievalVoucher(req, voucher)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("HEAD with Retrieval and no requester must stay unrestricted; code=%d body=%s", rec.Code, rec.Body.String())
+		}
+	})
+}
+
 func TestMiddlewarePrivateDealAnonymousGETDenied(t *testing.T) {
 	t.Parallel()
 	owner := common.HexToAddress("0xAF6C83b9D33DdEAD8810011abb5cA1Cfc2d8754a")
@@ -465,7 +535,7 @@ func TestMiddlewarePrivateDealAnonymousGETDenied(t *testing.T) {
 	}
 }
 
-func TestMiddlewarePrivateDealOwnerQueryAllowed(t *testing.T) {
+func TestMiddlewarePrivateDealOwnerQueryAloneDenied(t *testing.T) {
 	t.Parallel()
 	owner := common.HexToAddress("0xAF6C83b9D33DdEAD8810011abb5cA1Cfc2d8754a")
 	lookup := &stubLookup{deal: &pieceaccess.Deal{
@@ -483,8 +553,11 @@ func TestMiddlewarePrivateDealOwnerQueryAllowed(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/piece/baga6ea4seaqabc?client="+owner.Hex(), nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
-	if !called || rec.Code != http.StatusPaymentRequired {
-		t.Fatalf("called=%v code=%d", called, rec.Code)
+	if called {
+		t.Fatal("?client= alone must not authorize private deals")
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("code=%d", rec.Code)
 	}
 }
 
@@ -539,7 +612,7 @@ func TestMiddlewarePaidGETPublicAllowed(t *testing.T) {
 
 func TestMiddlewarePaidGETPrivateOwnerAllowed(t *testing.T) {
 	t.Parallel()
-	owner := common.HexToAddress("0xAF6C83b9D33DdEAD8810011abb5cA1Cfc2d8754a")
+	ownerKey, owner := mustMiddlewareOwnerKey(t)
 	lookup := &stubLookup{deal: &pieceaccess.Deal{
 		DealID:   "1",
 		Client:   owner,
@@ -551,13 +624,19 @@ func TestMiddlewarePaidGETPrivateOwnerAllowed(t *testing.T) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	})
-	handler := pieceaccess.NewAuthorizer(pieceaccess.WithDealLookup(lookup)).Middleware(next)
-	req := httptest.NewRequest(http.MethodGet, "/piece/baga6ea4seaqabc?client="+owner.Hex(), nil)
-	req.Header.Set("Authorization", "Payment unused")
+	handler := testCredentialAuthorizer(lookup).Middleware(next)
+	token := mustOwnerCredential(t, ownerKey, 1, "baga6ea4seaqabc", time.Now().Add(time.Hour).Unix(), 314159)
+	authz, err := paymentAuth(owner.Hex())
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/piece/baga6ea4seaqabc", nil)
+	addRetrievalProof(req, token)
+	req.Header.Add("Authorization", authz)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if !called || rec.Code != http.StatusOK {
-		t.Fatalf("called=%v code=%d", called, rec.Code)
+		t.Fatalf("called=%v code=%d body=%s", called, rec.Code, rec.Body.String())
 	}
 }
 
@@ -655,7 +734,7 @@ func TestMiddlewareUnknownDealType(t *testing.T) {
 	}
 }
 
-func TestMiddlewareWithClientIdentityHeader(t *testing.T) {
+func TestMiddlewareWithClientIdentityHeaderAloneDenied(t *testing.T) {
 	t.Parallel()
 	owner := common.HexToAddress("0xAF6C83b9D33DdEAD8810011abb5cA1Cfc2d8754a")
 	lookup := &stubLookup{deal: &pieceaccess.Deal{
@@ -677,12 +756,15 @@ func TestMiddlewareWithClientIdentityHeader(t *testing.T) {
 	req.Header.Set("X-Wallet", owner.Hex())
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
-	if !called || rec.Code != http.StatusOK {
-		t.Fatalf("called=%v code=%d", called, rec.Code)
+	if called {
+		t.Fatal("header identity alone must not authorize private deals")
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("code=%d", rec.Code)
 	}
 }
 
-func TestMiddlewareRequesterFromAuthorization(t *testing.T) {
+func TestMiddlewareRequesterFromAuthorizationAloneDenied(t *testing.T) {
 	t.Parallel()
 	owner := common.HexToAddress("0xAF6C83b9D33DdEAD8810011abb5cA1Cfc2d8754a")
 	lookup := &stubLookup{deal: &pieceaccess.Deal{
@@ -705,9 +787,21 @@ func TestMiddlewareRequesterFromAuthorization(t *testing.T) {
 	req.Header.Set("Authorization", authz)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
-	if !called || rec.Code != http.StatusOK {
-		t.Fatalf("called=%v code=%d body=%s", called, rec.Code, rec.Body.String())
+	if called {
+		t.Fatal("Payment alone must not authorize private deals without proof")
 	}
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func mustMiddlewareOwnerKey(t *testing.T) (*ecdsa.PrivateKey, common.Address) {
+	t.Helper()
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key, crypto.PubkeyToAddress(key.PublicKey)
 }
 
 func TestMiddlewareAuthorizationDecodeFailures(t *testing.T) {
@@ -779,7 +873,15 @@ func TestMiddlewareNilPanics(t *testing.T) {
 				t.Fatal("expected nil next panic")
 			}
 		}()
-		_ = pieceaccess.NewAuthorizer().Middleware(nil)
+		_ = pieceaccess.NewAuthorizer(pieceaccess.WithDealLookup(&stubLookup{})).Middleware(nil)
+	}()
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("expected missing DealLookup panic")
+			}
+		}()
+		_ = pieceaccess.NewAuthorizer().Middleware(next)
 	}()
 }
 

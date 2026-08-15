@@ -33,11 +33,12 @@ type Selection struct {
 }
 
 // SelectBestPieceSource probes each base with HEAD (size) and GET {base}/piece/{cid}
-// (concurrently). The first GET is anonymous; on 403 (private deal) it retries with
-// ?client=ProbeClient when set. Any GET 200 marks the piece as free (response body
-// is not downloaded during probe). Among 402 responses with a valid MPP
-// WWW-Authenticate challenge, the lowest price_usdfc (parsed as base units) wins.
-// Other status codes and failures are ignored.
+// (concurrently). The first GET is anonymous (no vouchers). On 403 (private deal)
+// it retries with ?client=ProbeClient when set, attaching Retrieval headers from
+// AuthHeadersForPiece (or ProbeVouchers). Any GET 200 marks the piece as free
+// (response body is not downloaded during probe). Among 402 responses with a
+// valid MPP WWW-Authenticate challenge, the lowest price_usdfc (parsed as base
+// units) wins. Other status codes and failures are ignored.
 func (c *Client) SelectBestPieceSource(ctx context.Context, pieceCID string, bases []*url.URL, log func(string, ...any), probe ProbeCallback) (*Selection, error) {
 	if c == nil || c.HTTP == nil {
 		return nil, fmt.Errorf("pieceurls: client or HTTP client is nil")
@@ -190,6 +191,17 @@ func (c *Client) probeGET(ctx context.Context, base *url.URL, cid, client0x stri
 	if err != nil {
 		return nil, false, err
 	}
+	// Credentials are only attached with a requester identity; skip on anonymous probes.
+	if strings.TrimSpace(client0x) != "" {
+		headers, terr := c.retrievalHeadersForPiece(cid)
+		if terr != nil {
+			if log != nil {
+				log("probe auth headers cid=%s: %v", cid, terr)
+			}
+			return nil, false, terr
+		}
+		AddAuthorizationHeaders(req.Header, headers)
+	}
 	res, err := c.HTTP.Do(req)
 	if err != nil {
 		if log != nil {
@@ -298,6 +310,58 @@ func truncateForLog(s string, max int) string {
 		return s
 	}
 	return s[:max] + "…"
+}
+
+// retrievalHeadersForPiece returns full Authorization header values (with
+// scheme) to attach for a piece. AuthHeadersForPiece wins when set; otherwise
+// static ProbeVouchers are sent as RetrievalVoucher headers.
+func (c *Client) retrievalHeadersForPiece(pieceCID string) ([]string, error) {
+	if c != nil && c.AuthHeadersForPiece != nil {
+		return c.AuthHeadersForPiece(pieceCID)
+	}
+	if c == nil {
+		return nil, nil
+	}
+	var out []string
+	for _, raw := range c.ProbeVouchers {
+		tok := StripVoucherAuthScheme(strings.TrimSpace(raw))
+		if tok == "" {
+			continue
+		}
+		out = append(out, "RetrievalVoucher "+tok)
+	}
+	return out, nil
+}
+
+// AddAuthorizationHeaders appends each value as a distinct Authorization header.
+// Values must already include their scheme (e.g. "RetrievalProof <b64>"). Callers
+// should only invoke this when a client identity is present (not anonymous probes).
+func AddAuthorizationHeaders(h http.Header, values []string) {
+	if h == nil {
+		return
+	}
+	for _, v := range values {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			continue
+		}
+		h.Add("Authorization", v)
+	}
+}
+
+// StripVoucherAuthScheme removes a leading RetrievalVoucher / RetrievalProof /
+// Retrieval or legacy Bearer scheme prefix, returning the bare base64url token.
+func StripVoucherAuthScheme(tok string) string {
+	if scheme, rest, ok := strings.Cut(tok, " "); ok {
+		switch {
+		case strings.EqualFold(scheme, "RetrievalVoucher"),
+			strings.EqualFold(scheme, "RetrievalProof"),
+			strings.EqualFold(scheme, "Retrieval"),
+			strings.EqualFold(scheme, "Bearer"):
+			return strings.TrimSpace(rest)
+		}
+	}
+	return tok
 }
 
 func sanitizeFilename(v string) string {

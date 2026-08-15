@@ -1,0 +1,704 @@
+version: "3"
+
+# FCSS-devnet e2e access matrix (local Curio + CDP + seed-deals).
+#
+# Prerequisite: sibling ../FCSS-devnet is up (`just up` + `just seed-deals`) with
+# .runtime/seed-deals/summary.json present. Helpers live in fcss-devnet.yml
+# (env/keys/fund/check/bytecut); this file owns the e2e task only.
+#
+# Path: retrieval-client → sp-proxy (:8787) → bytecut-proxy (:22311, RST after 0.5 MiB) → Curio (:22310).
+#
+# From repo root:
+#   task test:e2e:fcss-devnet
+#
+# The e2e task below is internal (hidden from `task --list`); invoke it only via
+# test:e2e:fcss-devnet.
+#
+# =============================================================================
+# TEST MATRIX
+# =============================================================================
+# Legend: H = HTTP probe via curl to sp-proxy; F = retrieval-client fetch (+ CAR
+# inspect/verify on allow). Clients c1/c2/c3 come from seed-deals summary.json.
+# Pieces under test are c1-private, c1-private-2, c1-public.
+#
+# HTTP — piece existence / public vs private (no credentials)
+# -----------------------------------------------------------------------------
+# H  http HEAD private (anon)              size/existence public; HEAD always 200
+# H  http HEAD private-2 (anon)            same for second private deal
+# H  http GET private (anon)               private deny without identity → 403
+# H  http GET private-2 (anon)             same for private-2
+# H  http GET public (anon)                public may quote without client → 402/200
+# H  http GET private (paid, non-owner)    Payment + ?client=c2 non-owner → 403
+#
+# HTTP — EIP-712 Retrieval credentials (RetrievalProof + RetrievalVoucher headers)
+# -----------------------------------------------------------------------------
+# H  http GET private (capability-only)          RetrievalVoucher, no proof → 403 JSON
+# H  http GET private (credential)               proof+voucher headers, no ?client= → 402/200
+# H  http GET private (credential+client)        same with ?client=grantee → 402/200
+# H  http GET private-2 (credential)             proof+voucher for deal-2 → 402/200
+# H  http GET private (owner proof)              owner-direct RetrievalProof only → 402/200
+# H  http GET private (cross-scope credential)   deal-2 voucher on deal-1 piece → 403
+# H  http GET private-2 (cross-scope credential) deal-1 voucher on deal-2 piece → 403
+# H  http GET private (voucher wrong grantee)    c2 proof + other-grantee voucher → 403
+# H  http GET private (c3 binds c2 voucher)      c3 proof key + c2 voucher → 403
+# H  http GET private (expired voucher)          past voucher deadline → 403 JSON
+# H  http GET private (expired proof)            past proof deadline → 403 JSON
+# H  http GET private (proof TTL too far)        deadline > 12h → 403 JSON
+# H  http GET private (wrong resource proof)     proof.resource ≠ path CID → 403 JSON
+# H  http GET private (malformed proof)          garbage RetrievalProof → 403 JSON
+# H  http GET private (wrong-signer voucher)     voucher signed by non-owner → 403
+#
+# Fetch — paid retrieval + CAR verify (bytecut Range resume)
+# -----------------------------------------------------------------------------
+# F  fetch private as owner                      c1 owner proof (CDP) + car verify
+# F  fetch private as non-owner                  c2 no voucher → deny at probe
+# F  fetch public as owner                       c1 public allow
+# F  fetch public as non-owner                   c2 public allow
+# F  fetch private with voucher (single-CID)     c2 + capability → client mints proof
+# F  rail-check private without voucher          c2 probe private → no usable source
+# F  rail-check private with voucher             c2 + capability → Challenge details
+# F  rail-check private as c3 with c2 voucher    c3 binds c2 capability → deny
+# F  fetch both private with matching vouchers   c2 + both capabilities → both CARs
+# F  fetch both private with voucher for deal-1 only  incomplete set → deny
+# F  fetch both private with voucher for deal-2 only  incomplete set → deny
+# F  fetch both private as c3 with c2 vouchers   c3≠grantee → deny
+#
+# =============================================================================
+# COVERAGE GAPS (e2e + unit together still thin / missing)
+# =============================================================================
+# Covered well by unit tests (no e2e needed unless regressions): domain pin
+# mismatch (chainId/contract), CDP HTTP errors / pagination / provider filter,
+# voucher crypto (expire, bad sig, multi-header), Payment vs Retrieval quoting,
+# private owner/other/HEAD, public paid GET, ignore Retrieval without requester,
+# Payment ClientAddress preferred over spoofed ?client= for access,
+# HEAD unrestricted with Retrieval/Payment present.
+#
+# Still untested or only partially covered:
+# - Manifest multi-CID entry point (CLI `--cid` / args only in e2e)
+# - Live CDP outage while e2e stack is up (fail-closed is unit-only)
+# - Long-running sp-proxy withdraw / sqlite prune workers under load
+# - Voucher signing parity with porep-market-tooling CLI (e2e uses cast + our script)
+#
+# Included from fcss-devnet.yml with flatten: true; public entry is test:e2e:fcss-devnet.
+
+tasks:
+  e2e:
+    internal: true
+    desc: Seed-deals access matrix via sp-proxy; bytecut-proxy RST after 0.5 MiB
+    deps:
+      - :build
+      - :tools
+      - keys
+      - bytecut
+    cmds:
+      - |
+        set -euo pipefail
+        command -v lsof >/dev/null 2>&1 || { echo "lsof required" >&2; exit 1; }
+        command -v jq >/dev/null 2>&1 || { echo "jq required" >&2; exit 1; }
+        command -v cast >/dev/null 2>&1 || { echo "cast required" >&2; exit 1; }
+        car_bin="{{.ROOT_DIR}}/.task/bin/car"
+        [[ -x "${car_bin}" ]] || { echo "missing ${car_bin} (task tools)" >&2; exit 1; }
+
+        unset DEVNET_ROOT CONTRACTS_DIR POREP_ENV_FILE PAY_RPC_URL \
+          SP_PROXY_POREP_CDP_URL SP_PROXY_UPSTREAM_PORT SP_PROXY_UPSTREAM_HOST || true
+        # shellcheck disable=SC1091
+        source ./scripts/devnet-env.sh
+
+        summary="{{.SEED_SUMMARY}}"
+        [[ -f "${summary}" ]] || { echo "missing ${summary} (run just seed-deals in FCSS-devnet)" >&2; exit 1; }
+
+        mkdir -p .task "{{.OUT_DIR}}"
+        sp_proxy_port="{{.SP_PROXY_PORT}}"
+        bytecut_port="{{.BYTECUT_LISTEN_PORT}}"
+        log="{{.SP_PROXY_LOG}}"
+        db="{{.SP_PROXY_DB}}"
+        rm -f "${log}"
+
+        # Materialize c1/c2/c3 wallets from summary (data piece CIDs only).
+        c1_key=".task/c1.key"
+        c2_key=".task/c2.key"
+        c3_key=".task/c3.key"
+        jq -r '.[] | select(.client=="c1") | .private_key' "${summary}" | head -n1 | sed 's/^0x//' > "${c1_key}"
+        jq -r '.[] | select(.client=="c2") | .private_key' "${summary}" | head -n1 | sed 's/^0x//' > "${c2_key}"
+        jq -r '.[] | select(.client=="c3") | .private_key' "${summary}" | head -n1 | sed 's/^0x//' > "${c3_key}"
+        chmod 600 "${c1_key}" "${c2_key}" "${c3_key}"
+        c1_addr="$(cast wallet address --private-key "0x$(tr -d '\n' <"${c1_key}")")"
+        c2_addr="$(cast wallet address --private-key "0x$(tr -d '\n' <"${c2_key}")")"
+        c3_addr="$(cast wallet address --private-key "0x$(tr -d '\n' <"${c3_key}")")"
+        [[ -n "${c3_addr}" && "${c3_addr}" != "null" ]] || { echo "c3 wallet missing in ${summary}" >&2; exit 1; }
+
+        c1_private_cid="$(jq -r '.[] | select(.slot=="c1-private") | .pieces[] | select(.pieceType=="data") | .pieceCid' "${summary}")"
+        c1_private_2_cid="$(jq -r '.[] | select(.slot=="c1-private-2") | .pieces[] | select(.pieceType=="data") | .pieceCid' "${summary}")"
+        c1_public_cid="$(jq -r '.[] | select(.slot=="c1-public") | .pieces[] | select(.pieceType=="data") | .pieceCid' "${summary}")"
+        [[ -n "${c1_private_cid}" && "${c1_private_cid}" != "null" ]] || { echo "c1-private data CID missing" >&2; exit 1; }
+        [[ -n "${c1_private_2_cid}" && "${c1_private_2_cid}" != "null" ]] || { echo "c1-private-2 data CID missing" >&2; exit 1; }
+        [[ -n "${c1_public_cid}" && "${c1_public_cid}" != "null" ]] || { echo "c1-public data CID missing" >&2; exit 1; }
+
+        echo "** ensuring c1=${c1_addr} c2=${c2_addr} c3=${c3_addr} funded"
+        deployer_key="$(tr -d '\n\r' <"${CONTRACTS_DIR}/deployer.private-key")"
+        # Thresholds: enough gas + a few 0.01 USDFC retrievals (skip slow lotus send / wait-msg when already funded).
+        min_fil_eth="1"
+        min_usdfc_wei="$(cast to-wei 10 ether)"
+        fund_fil_amount="50"
+        fund_usdfc_wei="$(cast to-wei 1000 ether)"
+        wei_ge() { python3 -c "import sys; a=int(sys.argv[1].split()[0],0); b=int(sys.argv[2].split()[0],0); raise SystemExit(0 if a>=b else 1)" "$1" "$2"; }
+        for addr in "${c1_addr}" "${c2_addr}" "${c3_addr}"; do
+          fil_eth="$(cast balance --ether --rpc-url "${PAY_RPC_URL}" "${addr}")"
+          if awk -v b="${fil_eth}" -v m="${min_fil_eth}" 'BEGIN{exit !(b+0 >= m)}'; then
+            echo "    ${addr} FIL ok (${fil_eth})"
+          else
+            echo "    ${addr} FIL low (${fil_eth}); sending ${fund_fil_amount}"
+            cid="$(docker exec lotus lotus send "${addr}" "${fund_fil_amount}" | awk '/^bafy|^bafk/{print $1; exit}')"
+            docker exec lotus lotus state wait-msg "${cid}" >/dev/null
+          fi
+          usdfc_wei="$(cast call "${USDFC}" "balanceOf(address)(uint256)" "${addr}" --rpc-url "${PAY_RPC_URL}")"
+          if wei_ge "${usdfc_wei}" "${min_usdfc_wei}"; then
+            echo "    ${addr} USDFC ok"
+          else
+            echo "    ${addr} USDFC low; transferring 1000"
+            cast send "${USDFC}" "transfer(address,uint256)" "${addr}" "${fund_usdfc_wei}" \
+              --rpc-url "${PAY_RPC_URL}" --private-key "${deployer_key}" >/dev/null
+          fi
+        done
+
+        echo "** HEAD Curio pieces (direct)"
+        for cid in "${c1_private_cid}" "${c1_private_2_cid}" "${c1_public_cid}"; do
+          curl -fsS --head "http://${SP_PROXY_UPSTREAM_HOST}:${SP_PROXY_UPSTREAM_PORT}/piece/${cid}" >/dev/null
+        done
+        echo "** HEAD via bytecut-proxy :${bytecut_port}"
+        for cid in "${c1_private_cid}" "${c1_private_2_cid}" "${c1_public_cid}"; do
+          curl -fsS --head "http://127.0.0.1:${bytecut_port}/piece/${cid}" >/dev/null
+        done
+
+        # sp-proxy → bytecut-proxy → Curio (RST after 0.5 MiB on GET bodies).
+        ./bin/sp-proxy \
+          --listen "127.0.0.1:${sp_proxy_port}" \
+          --db "${db}" \
+          --price-usdfc-per-gb "{{.SP_PROXY_PRICE}}" \
+          --upstream-host "127.0.0.1" \
+          --upstream-port "${bytecut_port}" \
+          --pay-rpc-url "${PAY_RPC_URL}" \
+          --pay-payments-address "${PAYMENTS}" \
+          --pay-token-address "${USDFC}" \
+          --pay-private-key-file "{{.SP_KEY}}" \
+          --porep-cdp-url "${SP_PROXY_POREP_CDP_URL:-http://127.0.0.1:23300}" \
+          --porep-provider-id "${POREP_PROVIDER_ID}" \
+          --porep-market-address "${POREP_MARKET}" \
+          > "${log}" 2>&1 &
+
+        cleanup() {
+          pids=$(lsof -tiTCP:"${sp_proxy_port}" -sTCP:LISTEN 2>/dev/null || true)
+          echo "${pids}" | while read -r pid; do
+            [ -n "${pid}" ] && /bin/kill "${pid}" 2>/dev/null || true
+          done
+          pids=$(lsof -tiTCP:"${bytecut_port}" -sTCP:LISTEN 2>/dev/null || true)
+          echo "${pids}" | while read -r pid; do
+            [ -n "${pid}" ] && /bin/kill "${pid}" 2>/dev/null || true
+          done
+        }
+        trap cleanup EXIT
+
+        for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+          grep -q 'sp-proxy listening' "${log}" 2>/dev/null && break
+          sleep 0.5
+        done
+        grep -q 'porep CDP lookup enabled' "${log}" || {
+          echo "CDP lookup not enabled; log:" >&2
+          cat "${log}" >&2
+          exit 1
+        }
+
+        results=""
+        record() {
+          # record "case" "client" "deal" "expected" "result"
+          results="${results}$1|$2|$3|$4|$5"$'\n'
+        }
+        print_results() {
+          echo ""
+          echo "FCSS-devnet e2e access matrix"
+          printf '%s\n' "-------------------------"
+          printf '%-48s %-8s %-14s %-10s %-6s\n' "CASE" "CLIENT" "DEAL" "EXPECTED" "RESULT"
+          printf '%-48s %-8s %-14s %-10s %-6s\n' "----" "------" "----" "--------" "------"
+          printf '%s' "${results}" | while IFS='|' read -r case client deal expected result; do
+            [ -n "${case}" ] || continue
+            printf '%-48s %-8s %-14s %-10s %-6s\n' "${case}" "${client}" "${deal}" "${expected}" "${result}"
+          done
+          echo ""
+        }
+
+        # HTTP probes: access-middleware status codes only (no payment / no CAR).
+        # Complementary to fetch_* below — do not re-assert owner quote or non-owner
+        # ?client= 403; those are covered by fetch allow/deny.
+        # Use curl --head (not -X HEAD): -X HEAD still waits for a Content-Length body.
+        proxy_base="http://127.0.0.1:${sp_proxy_port}"
+        http_code() {
+          # http_code METHOD URL [extra curl args...]
+          local method="$1" url="$2"
+          shift 2
+          if [ "${method}" = "HEAD" ]; then
+            curl -sS --max-time 10 -o /dev/null -w '%{http_code}' --head "$@" "${url}"
+          else
+            curl -sS --max-time 10 -o /dev/null -w '%{http_code}' -X "${method}" "$@" "${url}"
+          fi
+        }
+        expect_codes() {
+          # expect_codes "case" "client" "deal" "expected_label" "got" "code1" ["code2"...]
+          local case="$1" client="$2" deal="$3" expected="$4" got="$5"
+          shift 5
+          local ok=0 c
+          for c in "$@"; do
+            if [ "${got}" = "${c}" ]; then ok=1; break; fi
+          done
+          if [ "${ok}" -eq 1 ]; then
+            record "${case}" "${client}" "${deal}" "${expected}" "PASS"
+            echo "    ${case}: HTTP ${got} (ok)"
+          else
+            record "${case}" "${client}" "${deal}" "${expected}" "FAIL"
+            echo "expected HTTP $* for ${case}, got ${got}" >&2
+            print_results
+            exit 1
+          fi
+        }
+
+        echo "** HTTP access probes (middleware status codes) via sp-proxy :${sp_proxy_port}"
+        code="$(http_code HEAD "${proxy_base}/piece/${c1_private_cid}")"
+        expect_codes "http HEAD private (anon)" "-" "c1-private" "200" "${code}" 200
+
+        code="$(http_code HEAD "${proxy_base}/piece/${c1_private_2_cid}")"
+        expect_codes "http HEAD private-2 (anon)" "-" "c1-private-2" "200" "${code}" 200
+
+        code="$(http_code GET "${proxy_base}/piece/${c1_private_cid}")"
+        expect_codes "http GET private (anon)" "-" "c1-private" "403" "${code}" 403
+
+        code="$(http_code GET "${proxy_base}/piece/${c1_private_2_cid}")"
+        expect_codes "http GET private-2 (anon)" "-" "c1-private-2" "403" "${code}" 403
+
+        code="$(http_code GET "${proxy_base}/piece/${c1_public_cid}")"
+        expect_codes "http GET public (anon)" "-" "c1-public" "402/200" "${code}" 402 200
+
+        code="$(http_code GET "${proxy_base}/piece/${c1_private_cid}?client=${c2_addr}" -H 'Authorization: Payment dummy')"
+        expect_codes "http GET private (paid, non-owner)" "c2" "c1-private" "403" "${code}" 403
+
+        # --- Access credentials (EIP-712 Retrieval: proof + optional voucher) ---
+        # c1 has two private deals (c1-private + c1-private-2) so we can assert scope binding.
+        c1_private_deal_id="$(jq -r '.[] | select(.slot=="c1-private") | .deal_id' "${summary}")"
+        c1_private_2_deal_id="$(jq -r '.[] | select(.slot=="c1-private-2") | .deal_id' "${summary}")"
+        [[ -n "${c1_private_deal_id}" && "${c1_private_deal_id}" != "null" ]] || {
+          echo "c1-private deal_id missing in ${summary}" >&2
+          exit 1
+        }
+        [[ -n "${c1_private_2_deal_id}" && "${c1_private_2_deal_id}" != "null" ]] || {
+          echo "c1-private-2 deal_id missing in ${summary}" >&2
+          exit 1
+        }
+        [[ "${c1_private_deal_id}" != "${c1_private_2_deal_id}" ]] || {
+          echo "c1-private and c1-private-2 must have distinct deal_ids" >&2
+          exit 1
+        }
+        sign_voucher() {
+          # sign_voucher KEY_FILE GRANTEE SCOPE [extra args...]
+          local key_file="$1" grantee_addr="$2" deal="$3"
+          shift 3
+          ./scripts/sign-retrieval-voucher.sh \
+            --private-key-file "${key_file}" \
+            --grantee "${grantee_addr}" \
+            --scope "${deal}" \
+            --rpc-url "${PAY_RPC_URL}" \
+            --verifying-contract "${POREP_MARKET}" \
+            "$@"
+        }
+        sign_cred() {
+          # sign_cred PROOF_KEY_FILE VOUCHER_TOKEN RESOURCE [extra args...]
+          # Mints a standalone RetrievalProof token (proof of possession) bound to
+          # RESOURCE; it reuses VOUCHER_TOKEN only for its EIP-712 domain/scope.
+          local key_file="$1" voucher_tok="$2" resource="$3"
+          shift 3
+          ./scripts/sign-retrieval-credential.sh \
+            --private-key-file "${key_file}" \
+            --voucher "${voucher_tok}" \
+            --resource "${resource}" \
+            --rpc-url "${PAY_RPC_URL}" \
+            --verifying-contract "${POREP_MARKET}" \
+            "$@"
+        }
+        sign_owner_cred() {
+          # sign_owner_cred OWNER_KEY_FILE SCOPE RESOURCE [extra args...]
+          local key_file="$1" deal="$2" resource="$3"
+          shift 3
+          ./scripts/sign-retrieval-credential.sh \
+            --private-key-file "${key_file}" \
+            --owner-direct \
+            --scope "${deal}" \
+            --resource "${resource}" \
+            --rpc-url "${PAY_RPC_URL}" \
+            --verifying-contract "${POREP_MARKET}" \
+            "$@"
+        }
+        http_body_code() {
+          # http_body_code METHOD URL [extra curl args...] → prints "BODY\nCODE" on stdout via vars
+          local method="$1" url="$2"
+          shift 2
+          local tmp
+          tmp="$(mktemp)"
+          if [ "${method}" = "HEAD" ]; then
+            http_got_code="$(curl -sS --max-time 10 -o "${tmp}" -w '%{http_code}' --head "$@" "${url}")"
+          else
+            http_got_code="$(curl -sS --max-time 10 -o "${tmp}" -w '%{http_code}' -X "${method}" "$@" "${url}")"
+          fi
+          http_got_body="$(cat "${tmp}")"
+          rm -f "${tmp}"
+        }
+        expect_voucher_json_error() {
+          # expect_voucher_json_error "case" "client" "deal" "code" "body"
+          local case="$1" client="$2" deal="$3" got_code="$4" body="$5"
+          if [ "${got_code}" != "403" ]; then
+            record "${case}" "${client}" "${deal}" "403+json" "FAIL"
+            echo "expected HTTP 403 for ${case}, got ${got_code}" >&2
+            print_results
+            exit 1
+          fi
+          if ! printf '%s' "${body}" | jq -e '.error == "invalid_voucher"' >/dev/null 2>&1; then
+            record "${case}" "${client}" "${deal}" "403+json" "FAIL"
+            echo "expected JSON error=invalid_voucher for ${case}, body=${body}" >&2
+            print_results
+            exit 1
+          fi
+          record "${case}" "${client}" "${deal}" "403+json" "PASS"
+          echo "    ${case}: HTTP 403 invalid_voucher (ok)"
+        }
+
+        echo "** HTTP credential probes via sp-proxy :${sp_proxy_port} (deal_ids=${c1_private_deal_id},${c1_private_2_deal_id})"
+        voucher_ok="$(sign_voucher "${c1_key}" "${c2_addr}" "${c1_private_deal_id}" --expires-in 3600)"
+        voucher_ok_2="$(sign_voucher "${c1_key}" "${c2_addr}" "${c1_private_2_deal_id}" --expires-in 3600)"
+        proof_ok="$(sign_cred "${c2_key}" "${voucher_ok}" "${c1_private_cid}")"
+        proof_ok_2="$(sign_cred "${c2_key}" "${voucher_ok_2}" "${c1_private_2_cid}")"
+
+        # Sad: capability voucher alone (no RetrievalProof) is not authorized (proof required).
+        http_body_code GET "${proxy_base}/piece/${c1_private_cid}?client=${c2_addr}" -H "Authorization: RetrievalVoucher ${voucher_ok}"
+        expect_voucher_json_error "http GET private (capability-only)" "c2" "c1-private" "${http_got_code}" "${http_got_body}"
+
+        # Happy: proof provides requester identity (no ?client= required); voucher delegates.
+        code="$(http_code GET "${proxy_base}/piece/${c1_private_cid}" -H "Authorization: RetrievalProof ${proof_ok}" -H "Authorization: RetrievalVoucher ${voucher_ok}")"
+        expect_codes "http GET private (credential)" "c2" "c1-private" "402/200" "${code}" 402 200
+
+        code="$(http_code GET "${proxy_base}/piece/${c1_private_cid}?client=${c2_addr}" -H "Authorization: RetrievalProof ${proof_ok}" -H "Authorization: RetrievalVoucher ${voucher_ok}")"
+        expect_codes "http GET private (credential+client)" "c2" "c1-private" "402/200" "${code}" 402 200
+
+        code="$(http_code GET "${proxy_base}/piece/${c1_private_2_cid}" -H "Authorization: RetrievalProof ${proof_ok_2}" -H "Authorization: RetrievalVoucher ${voucher_ok_2}")"
+        expect_codes "http GET private-2 (credential)" "c2" "c1-private-2" "402/200" "${code}" 402 200
+
+        # Happy: owner-direct RetrievalProof (no voucher).
+        owner_proof="$(sign_owner_cred "${c1_key}" "${c1_private_deal_id}" "${c1_private_cid}")"
+        code="$(http_code GET "${proxy_base}/piece/${c1_private_cid}" -H "Authorization: RetrievalProof ${owner_proof}")"
+        expect_codes "http GET private (owner proof)" "c1" "c1-private" "402/200" "${code}" 402 200
+
+        # Sad: cross-scope — a voucher scoped to private-2 must not open the private piece.
+        # The proof binds the requested piece CID (resource matches); the voucher scope fails.
+        code="$(http_code GET "${proxy_base}/piece/${c1_private_cid}" -H "Authorization: RetrievalProof $(sign_cred "${c2_key}" "${voucher_ok_2}" "${c1_private_cid}")" -H "Authorization: RetrievalVoucher ${voucher_ok_2}")"
+        expect_codes "http GET private (cross-scope credential)" "c2" "c1-private" "403" "${code}" 403
+
+        code="$(http_code GET "${proxy_base}/piece/${c1_private_2_cid}" -H "Authorization: RetrievalProof $(sign_cred "${c2_key}" "${voucher_ok}" "${c1_private_2_cid}")" -H "Authorization: RetrievalVoucher ${voucher_ok}")"
+        expect_codes "http GET private-2 (cross-scope credential)" "c2" "c1-private-2" "403" "${code}" 403
+
+        # Sad: voucher for a different grantee; proof signed by c2 → grantee≠proof signer → plain 403.
+        other_grantee="0x00000000000000000000000000000000000000bb"
+        voucher_other_grantee="$(sign_voucher "${c1_key}" "${other_grantee}" "${c1_private_deal_id}" --expires-in 3600)"
+        code="$(http_code GET "${proxy_base}/piece/${c1_private_cid}" -H "Authorization: RetrievalProof $(sign_cred "${c2_key}" "${voucher_other_grantee}" "${c1_private_cid}")" -H "Authorization: RetrievalVoucher ${voucher_other_grantee}")"
+        expect_codes "http GET private (voucher wrong grantee)" "c2" "c1-private" "403" "${code}" 403
+
+        # Sad: c3 binds a valid c2-grantee voucher (proof signer ≠ grantee) → plain 403.
+        code="$(http_code GET "${proxy_base}/piece/${c1_private_cid}" -H "Authorization: RetrievalProof $(sign_cred "${c3_key}" "${voucher_ok}" "${c1_private_cid}")" -H "Authorization: RetrievalVoucher ${voucher_ok}")"
+        expect_codes "http GET private (c3 binds c2 voucher)" "c3" "c1-private" "403" "${code}" 403
+
+        # Sad: expired voucher → 403 JSON (voucher diagnostic; proof itself is valid).
+        voucher_expired="$(sign_voucher "${c1_key}" "${c2_addr}" "${c1_private_deal_id}" \
+          --deadline "$(($(date +%s) - 60))" --allow-past-deadline)"
+        http_body_code GET "${proxy_base}/piece/${c1_private_cid}" -H "Authorization: RetrievalProof ${proof_ok}" -H "Authorization: RetrievalVoucher ${voucher_expired}"
+        expect_voucher_json_error "http GET private (expired voucher)" "c2" "c1-private" "${http_got_code}" "${http_got_body}"
+
+        # Sad: expired proof → 403 JSON (fatal proof).
+        http_body_code GET "${proxy_base}/piece/${c1_private_cid}" -H "Authorization: RetrievalProof $(sign_cred "${c2_key}" "${voucher_ok}" "${c1_private_cid}" \
+          --proof-deadline "$(($(date +%s) - 60))" --allow-past-deadline)" -H "Authorization: RetrievalVoucher ${voucher_ok}"
+        expect_voucher_json_error "http GET private (expired proof)" "c2" "c1-private" "${http_got_code}" "${http_got_body}"
+
+        # Sad: proof deadline beyond MAX_PROOF_TTL (12h) → 403 JSON (fatal proof).
+        http_body_code GET "${proxy_base}/piece/${c1_private_cid}" -H "Authorization: RetrievalProof $(sign_cred "${c2_key}" "${voucher_ok}" "${c1_private_cid}" \
+          --proof-expires-in $((12 * 3600 + 60)) --allow-far-deadline)" -H "Authorization: RetrievalVoucher ${voucher_ok}"
+        expect_voucher_json_error "http GET private (proof TTL too far)" "c2" "c1-private" "${http_got_code}" "${http_got_body}"
+
+        # Sad: proof.resource ≠ path CID → 403 JSON (fatal proof).
+        http_body_code GET "${proxy_base}/piece/${c1_private_cid}" -H "Authorization: RetrievalProof $(sign_cred "${c2_key}" "${voucher_ok}" "${c1_private_2_cid}")" -H "Authorization: RetrievalVoucher ${voucher_ok}"
+        expect_voucher_json_error "http GET private (wrong resource proof)" "c2" "c1-private" "${http_got_code}" "${http_got_body}"
+
+        # Sad: malformed RetrievalProof token → 403 JSON (fatal proof).
+        http_body_code GET "${proxy_base}/piece/${c1_private_cid}?client=${c2_addr}" -H 'Authorization: RetrievalProof not-a-valid-proof'
+        expect_voucher_json_error "http GET private (malformed proof)" "c2" "c1-private" "${http_got_code}" "${http_got_body}"
+
+        # Sad: voucher signed by non-owner (c2) — signature verifies but owner ≠ deal client → plain 403.
+        voucher_wrong="$(sign_voucher "${c2_key}" "${c2_addr}" "${c1_private_deal_id}" --expires-in 3600)"
+        code="$(http_code GET "${proxy_base}/piece/${c1_private_cid}" -H "Authorization: RetrievalProof $(sign_cred "${c2_key}" "${voucher_wrong}" "${c1_private_cid}")" -H "Authorization: RetrievalVoucher ${voucher_wrong}")"
+        expect_codes "http GET private (wrong-signer voucher)" "c2" "c1-private" "403" "${code}" 403
+
+        fetch_ok() {
+          local key="$1" piece="$2" client_label="$3" deal_label="$4" case_label="$5"
+          local car_path="{{.OUT_DIR}}/${piece}.car"
+          echo "** expect OK: ${case_label}"
+          rm -f "${car_path}" "${car_path}.partial"
+          if ./bin/retrieval-client fetch \
+            --filpay-private-key-file "${key}" \
+            --pay-rpc-url "${PAY_RPC_URL}" \
+            --pay-payments-address "${PAYMENTS}" \
+            --pay-token-address "${USDFC}" \
+            --sp-base-url "http://127.0.0.1:${sp_proxy_port}" \
+            --cid "${piece}" \
+            --out-dir "{{.OUT_DIR}}" \
+            --yes; then
+            echo "** verifying ${car_path}"
+            if [[ ! -f "${car_path}" ]]; then
+              record "${case_label}" "${client_label}" "${deal_label}" "allow" "FAIL"
+              echo "missing downloaded CAR ${car_path}" >&2
+              print_results
+              exit 1
+            fi
+            if ! "${car_bin}" inspect "${car_path}" || ! "${car_bin}" verify "${car_path}"; then
+              record "${case_label}" "${client_label}" "${deal_label}" "allow" "FAIL"
+              echo "CAR inspect/verify failed for ${car_path}" >&2
+              print_results
+              exit 1
+            fi
+            record "${case_label}" "${client_label}" "${deal_label}" "allow" "PASS"
+          else
+            record "${case_label}" "${client_label}" "${deal_label}" "allow" "FAIL"
+            echo "expected allow for ${case_label}" >&2
+            print_results
+            exit 1
+          fi
+        }
+
+        fetch_deny() {
+          local key="$1" piece="$2" client_label="$3" deal_label="$4" case_label="$5"
+          echo "** expect DENY: ${case_label}"
+          if ./bin/retrieval-client fetch \
+            --filpay-private-key-file "${key}" \
+            --pay-rpc-url "${PAY_RPC_URL}" \
+            --pay-payments-address "${PAYMENTS}" \
+            --pay-token-address "${USDFC}" \
+            --sp-base-url "http://127.0.0.1:${sp_proxy_port}" \
+            --cid "${piece}" \
+            --out-dir "{{.OUT_DIR}}" \
+            --yes; then
+            record "${case_label}" "${client_label}" "${deal_label}" "deny" "FAIL"
+            echo "expected denial for ${case_label}" >&2
+            print_results
+            exit 1
+          fi
+          record "${case_label}" "${client_label}" "${deal_label}" "deny" "PASS"
+          echo "    denied as expected"
+        }
+
+        verify_downloaded_car() {
+          local piece="$1" client_label="$2" deal_label="$3" case_label="$4"
+          local car_path="{{.OUT_DIR}}/${piece}.car"
+          echo "** verifying ${car_path}"
+          if [[ ! -f "${car_path}" ]]; then
+            record "${case_label}" "${client_label}" "${deal_label}" "allow" "FAIL"
+            echo "missing downloaded CAR ${car_path}" >&2
+            print_results
+            exit 1
+          fi
+          if ! "${car_bin}" inspect "${car_path}" || ! "${car_bin}" verify "${car_path}"; then
+            record "${case_label}" "${client_label}" "${deal_label}" "allow" "FAIL"
+            echo "CAR inspect/verify failed for ${car_path}" >&2
+            print_results
+            exit 1
+          fi
+        }
+
+        # Paid fetch + CAR verify (and Range resume via bytecut). Covers owner quote
+        # and non-owner ?client= denial that HTTP probes intentionally skip.
+        fetch_ok "${c1_key}" "${c1_private_cid}" "c1" "c1-private" "fetch private as owner"
+        fetch_deny "${c2_key}" "${c1_private_cid}" "c2" "c1-private" "fetch private as non-owner"
+        fetch_ok "${c1_key}" "${c1_public_cid}" "c1" "c1-public" "fetch public as owner"
+        fetch_ok "${c2_key}" "${c1_public_cid}" "c2" "c1-public" "fetch public as non-owner"
+
+        # Single-CID voucher → pay settle (before multi-CID matrix).
+        echo "** expect OK: fetch private with voucher (single-CID)"
+        rm -f "{{.OUT_DIR}}/${c1_private_cid}.car" "{{.OUT_DIR}}/${c1_private_cid}.car.partial"
+        if ./bin/retrieval-client fetch \
+          --filpay-private-key-file "${c2_key}" \
+          --pay-rpc-url "${PAY_RPC_URL}" \
+          --pay-payments-address "${PAYMENTS}" \
+          --pay-token-address "${USDFC}" \
+          --sp-base-url "http://127.0.0.1:${sp_proxy_port}" \
+          --cid "${c1_private_cid}" \
+          --voucher "${voucher_ok}" \
+          --out-dir "{{.OUT_DIR}}" \
+          --yes; then
+          verify_downloaded_car "${c1_private_cid}" "c2" "c1-private" "fetch private with voucher (single-CID)"
+          record "fetch private with voucher (single-CID)" "c2" "c1-private" "allow" "PASS"
+        else
+          record "fetch private with voucher (single-CID)" "c2" "c1-private" "allow" "FAIL"
+          echo "expected allow for fetch private with voucher (single-CID)" >&2
+          print_results
+          exit 1
+        fi
+
+        # rail-check --voucher: discover MPP payee on private piece (no settle/download).
+        echo "** expect DENY: rail-check private without voucher"
+        if out="$(./bin/retrieval-client rail-check \
+          --filpay-private-key-file "${c2_key}" \
+          --pay-rpc-url "${PAY_RPC_URL}" \
+          --pay-payments-address "${PAYMENTS}" \
+          --pay-token-address "${USDFC}" \
+          --sp-base-url "http://127.0.0.1:${sp_proxy_port}" \
+          --cid "${c1_private_cid}" 2>&1)"; then
+          record "rail-check private without voucher" "c2" "c1-private" "deny" "FAIL"
+          echo "expected rail-check failure without voucher; out=${out}" >&2
+          print_results
+          exit 1
+        fi
+        record "rail-check private without voucher" "c2" "c1-private" "deny" "PASS"
+        echo "    denied as expected"
+
+        echo "** expect OK: rail-check private with voucher"
+        if ! out="$(./bin/retrieval-client rail-check \
+          --filpay-private-key-file "${c2_key}" \
+          --pay-rpc-url "${PAY_RPC_URL}" \
+          --pay-payments-address "${PAYMENTS}" \
+          --pay-token-address "${USDFC}" \
+          --sp-base-url "http://127.0.0.1:${sp_proxy_port}" \
+          --cid "${c1_private_cid}" \
+          --voucher "${voucher_ok}" 2>&1)"; then
+          record "rail-check private with voucher" "c2" "c1-private" "allow" "FAIL"
+          echo "expected rail-check success with voucher; out=${out}" >&2
+          print_results
+          exit 1
+        fi
+        if ! printf '%s' "${out}" | grep -q 'Challenge details:'; then
+          record "rail-check private with voucher" "c2" "c1-private" "allow" "FAIL"
+          echo "rail-check missing Challenge details; out=${out}" >&2
+          print_results
+          exit 1
+        fi
+        if ! printf '%s' "${out}" | grep -Fq "cid=${c1_private_cid}"; then
+          record "rail-check private with voucher" "c2" "c1-private" "allow" "FAIL"
+          echo "rail-check missing cid=${c1_private_cid}; out=${out}" >&2
+          print_results
+          exit 1
+        fi
+        if ! printf '%s' "${out}" | grep -q 'rail-check complete'; then
+          record "rail-check private with voucher" "c2" "c1-private" "allow" "FAIL"
+          echo "rail-check missing completion line; out=${out}" >&2
+          print_results
+          exit 1
+        fi
+        record "rail-check private with voucher" "c2" "c1-private" "allow" "PASS"
+        echo "    challenge discovered as expected"
+
+        echo "** expect DENY: rail-check private as c3 with c2 voucher"
+        if out="$(./bin/retrieval-client rail-check \
+          --filpay-private-key-file "${c3_key}" \
+          --pay-rpc-url "${PAY_RPC_URL}" \
+          --pay-payments-address "${PAYMENTS}" \
+          --pay-token-address "${USDFC}" \
+          --sp-base-url "http://127.0.0.1:${sp_proxy_port}" \
+          --cid "${c1_private_cid}" \
+          --voucher "${voucher_ok}" 2>&1)"; then
+          record "rail-check private as c3 with c2 voucher" "c3" "c1-private" "deny" "FAIL"
+          echo "expected rail-check failure for c3≠grantee; out=${out}" >&2
+          print_results
+          exit 1
+        fi
+        record "rail-check private as c3 with c2 voucher" "c3" "c1-private" "deny" "PASS"
+        echo "    denied as expected"
+
+        # Multi-CID voucher fetch: two private pieces in different deals need different vouchers.
+        echo "** expect OK: fetch both private with matching vouchers"
+        rm -f "{{.OUT_DIR}}/${c1_private_cid}.car" "{{.OUT_DIR}}/${c1_private_cid}.car.partial" \
+          "{{.OUT_DIR}}/${c1_private_2_cid}.car" "{{.OUT_DIR}}/${c1_private_2_cid}.car.partial"
+        if ./bin/retrieval-client fetch \
+          --filpay-private-key-file "${c2_key}" \
+          --pay-rpc-url "${PAY_RPC_URL}" \
+          --pay-payments-address "${PAYMENTS}" \
+          --pay-token-address "${USDFC}" \
+          --sp-base-url "http://127.0.0.1:${sp_proxy_port}" \
+          --cid "${c1_private_cid}" \
+          --cid "${c1_private_2_cid}" \
+          --voucher "${voucher_ok}" \
+          --voucher "${voucher_ok_2}" \
+          --out-dir "{{.OUT_DIR}}" \
+          --yes; then
+          verify_downloaded_car "${c1_private_cid}" "c2" "c1-private+c1-private-2" "fetch both private with matching vouchers"
+          verify_downloaded_car "${c1_private_2_cid}" "c2" "c1-private+c1-private-2" "fetch both private with matching vouchers"
+          record "fetch both private with matching vouchers" "c2" "c1-private+c1-private-2" "allow" "PASS"
+        else
+          record "fetch both private with matching vouchers" "c2" "c1-private+c1-private-2" "allow" "FAIL"
+          echo "expected allow for fetch both private with matching vouchers" >&2
+          print_results
+          exit 1
+        fi
+
+        echo "** expect DENY: fetch both private with voucher for deal-1 only"
+        if ./bin/retrieval-client fetch \
+          --filpay-private-key-file "${c2_key}" \
+          --pay-rpc-url "${PAY_RPC_URL}" \
+          --pay-payments-address "${PAYMENTS}" \
+          --pay-token-address "${USDFC}" \
+          --sp-base-url "http://127.0.0.1:${sp_proxy_port}" \
+          --cid "${c1_private_cid}" \
+          --cid "${c1_private_2_cid}" \
+          --voucher "${voucher_ok}" \
+          --out-dir "{{.OUT_DIR}}" \
+          --yes; then
+          record "fetch both private with voucher for deal-1 only" "c2" "c1-private+c1-private-2" "deny" "FAIL"
+          echo "expected denial for fetch both private with voucher for deal-1 only" >&2
+          print_results
+          exit 1
+        fi
+        record "fetch both private with voucher for deal-1 only" "c2" "c1-private+c1-private-2" "deny" "PASS"
+        echo "    denied as expected"
+
+        echo "** expect DENY: fetch both private with voucher for deal-2 only"
+        if ./bin/retrieval-client fetch \
+          --filpay-private-key-file "${c2_key}" \
+          --pay-rpc-url "${PAY_RPC_URL}" \
+          --pay-payments-address "${PAYMENTS}" \
+          --pay-token-address "${USDFC}" \
+          --sp-base-url "http://127.0.0.1:${sp_proxy_port}" \
+          --cid "${c1_private_cid}" \
+          --cid "${c1_private_2_cid}" \
+          --voucher "${voucher_ok_2}" \
+          --out-dir "{{.OUT_DIR}}" \
+          --yes; then
+          record "fetch both private with voucher for deal-2 only" "c2" "c1-private+c1-private-2" "deny" "FAIL"
+          echo "expected denial for fetch both private with voucher for deal-2 only" >&2
+          print_results
+          exit 1
+        fi
+        record "fetch both private with voucher for deal-2 only" "c2" "c1-private+c1-private-2" "deny" "PASS"
+        echo "    denied as expected"
+
+        # Sad: c3 fetch with valid c2-grantee vouchers for c1 private pieces → deny (grantee ≠ c3).
+        echo "** expect DENY: fetch both private as c3 with c2 vouchers"
+        if ./bin/retrieval-client fetch \
+          --filpay-private-key-file "${c3_key}" \
+          --pay-rpc-url "${PAY_RPC_URL}" \
+          --pay-payments-address "${PAYMENTS}" \
+          --pay-token-address "${USDFC}" \
+          --sp-base-url "http://127.0.0.1:${sp_proxy_port}" \
+          --cid "${c1_private_cid}" \
+          --cid "${c1_private_2_cid}" \
+          --voucher "${voucher_ok}" \
+          --voucher "${voucher_ok_2}" \
+          --out-dir "{{.OUT_DIR}}" \
+          --yes; then
+          record "fetch both private as c3 with c2 vouchers" "c3" "c1-private+c1-private-2" "deny" "FAIL"
+          echo "expected denial for fetch both private as c3 with c2 vouchers" >&2
+          print_results
+          exit 1
+        fi
+        record "fetch both private as c3 with c2 vouchers" "c3" "c1-private+c1-private-2" "deny" "PASS"
+        echo "    denied as expected"
+
+        print_results
+        echo "*** fcss-devnet e2e ok: HTTP probes + voucher matrix + rail-check --voucher + single/multi-CID voucher fetch + paid fetch + CAR verify ***"
