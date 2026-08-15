@@ -117,7 +117,46 @@ func TestDownloadCARPaymentAndRetrievalVouchers(t *testing.T) {
 	}
 }
 
-func TestDownloadCAROmitsVouchersWithoutClient(t *testing.T) {
+func TestDownloadCARSendsAuthHeadersWithoutClient(t *testing.T) {
+	// Free private pieces may probe with credentials then download without Payment;
+	// RetrievalProof/Voucher headers must still be sent (proof is the identity).
+	const cid = "bafyFreePrivateAuth"
+	body := []byte("CAR-FREE-AUTH")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.RawQuery != "" {
+			http.Error(w, "expected no ?client=", http.StatusBadRequest)
+			return
+		}
+		auths := r.Header.Values("Authorization")
+		want := []string{"RetrievalProof tok-a", "RetrievalVoucher tok-b"}
+		if len(auths) != len(want) {
+			http.Error(w, fmt.Sprintf("Authorization=%v", auths), http.StatusUnauthorized)
+			return
+		}
+		for i := range want {
+			if auths[i] != want[i] {
+				http.Error(w, fmt.Sprintf("Authorization=%v", auths), http.StatusUnauthorized)
+				return
+			}
+		}
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	}))
+	defer ts.Close()
+
+	base, err := url.Parse(ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = downloadFreeCAR(http.DefaultClient, base, cid, "", t.TempDir(), int64(len(body)), noopProgress{}, false,
+		[]string{"RetrievalProof tok-a", "RetrievalVoucher tok-b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDownloadCARAnonymousOmitsAuthWhenNoHeaders(t *testing.T) {
 	const cid = "bafyNoClientVoucher"
 	body := []byte("CAR-ANON")
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -139,7 +178,7 @@ func TestDownloadCAROmitsVouchersWithoutClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = downloadCAR(http.DefaultClient, base, cid, "/piece/"+cid, "", "", t.TempDir(), int64(len(body)), noopProgress{}, false, []string{"tok-a"})
+	err = downloadCAR(http.DefaultClient, base, cid, "/piece/"+cid, "", "", t.TempDir(), int64(len(body)), noopProgress{}, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

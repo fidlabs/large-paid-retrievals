@@ -64,7 +64,7 @@ func (c *retrievalAuthConfig) authHeadersForPiece(_ context.Context, pieceCID st
 		return c.delegatedHeaders(pieceCID, deadline)
 	}
 	if !c.domain.ok() {
-		return nil, nil
+		return nil, fmt.Errorf("cannot mint owner-direct RetrievalProof: set --porep-market-address or POREP_MARKET (pay-rpc chain has no PoRep market default)")
 	}
 	proof, err := pieceaccess.MintProofForPiece(c.domain.typedDomain(), nil, pieceCID, c.key, deadline)
 	if err != nil {

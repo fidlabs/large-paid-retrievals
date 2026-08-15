@@ -71,6 +71,21 @@ func TestAuthHeadersForPieceOwnerDirect(t *testing.T) {
 	}
 }
 
+func TestAuthHeadersForPieceOwnerDirectRequiresDomain(t *testing.T) {
+	t.Parallel()
+	ownerKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = (&retrievalAuthConfig{key: ownerKey}).authHeadersForPiece(context.Background(), "baga6ea4seaqtest")
+	if err == nil {
+		t.Fatal("expected error when owner-direct domain is unset")
+	}
+	if !strings.Contains(err.Error(), "porep-market-address") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestValidateCapabilityFlags(t *testing.T) {
 	t.Parallel()
 	ownerKey, err := crypto.GenerateKey()
