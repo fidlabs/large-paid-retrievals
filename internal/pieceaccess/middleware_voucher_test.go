@@ -2,7 +2,6 @@ package pieceaccess_test
 
 import (
 	"crypto/ecdsa"
-	"encoding/base64"
 	"encoding/json"
 	"math/big"
 	"net/http"
@@ -13,29 +12,30 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/ethereum/go-ethereum/signer/core/apitypes"
 	"github.com/fidlabs/paid-retrievals/internal/pieceaccess"
 )
 
-func TestMiddlewarePrivateDealVoucherOwnerAllowed(t *testing.T) {
+const (
+	testPieceCID = "baga6ea4seaqabc"
+	testMarket   = "0x1234567890abcdef1234567890abcdef12345678"
+)
+
+func TestMiddlewarePrivateDealOwnerProofAllowed(t *testing.T) {
 	t.Parallel()
-	ownerKey, owner := mustVoucherKey(t)
-	grantee := common.HexToAddress("0x0553e4ed281E5a0A0654F6E46a0F80b7153ad506")
+	ownerKey, owner := mustCredKey(t)
 	lookup := &stubLookup{deal: &pieceaccess.Deal{
-		DealID:   "1001",
-		Client:   owner,
-		DealType: pieceaccess.DealTypePrivate,
+		DealID: "1001", Client: owner, DealType: pieceaccess.DealTypePrivate,
 	}}
 	called := false
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusPaymentRequired)
 	})
-	handler := testVoucherAuthorizer(lookup).Middleware(next)
+	handler := testCredentialAuthorizer(lookup).Middleware(next)
 
-	token := mustBearerVoucher(t, ownerKey, grantee, 1001, time.Now().Add(time.Hour).Unix())
-	req := httptest.NewRequest(http.MethodGet, "/piece/baga6ea4seaqabc?client="+grantee.Hex(), nil)
-	req.Header.Add("Authorization", "Bearer "+token)
+	proof := mustOwnerCredential(t, ownerKey, 1001, testPieceCID, time.Now().Add(time.Hour).Unix(), 314159)
+	req := httptest.NewRequest(http.MethodGet, "/piece/"+testPieceCID, nil)
+	addRetrievalProof(req, proof)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if !called || rec.Code != http.StatusPaymentRequired {
@@ -43,137 +43,104 @@ func TestMiddlewarePrivateDealVoucherOwnerAllowed(t *testing.T) {
 	}
 }
 
-func TestMiddlewarePrivateDealVoucherWrongOwnerDenied(t *testing.T) {
+func TestMiddlewarePrivateDealDelegatedCredentialAllowed(t *testing.T) {
 	t.Parallel()
-	_, owner := mustVoucherKey(t)
-	otherKey, _ := mustVoucherKey(t)
-	grantee := common.HexToAddress("0x0553e4ed281E5a0A0654F6E46a0F80b7153ad506")
+	ownerKey, owner := mustCredKey(t)
+	granteeKey, grantee := mustCredKey(t)
 	lookup := &stubLookup{deal: &pieceaccess.Deal{
-		DealID:   "1001",
-		Client:   owner,
-		DealType: pieceaccess.DealTypePrivate,
-	}}
-	called := false
-	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		called = true
-		w.WriteHeader(http.StatusOK)
-	})
-	handler := testVoucherAuthorizer(lookup).Middleware(next)
-
-	token := mustBearerVoucher(t, otherKey, grantee, 1001, time.Now().Add(time.Hour).Unix())
-	req := httptest.NewRequest(http.MethodGet, "/piece/baga6ea4seaqabc?client="+grantee.Hex(), nil)
-	req.Header.Add("Authorization", "Bearer "+token)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	if called {
-		t.Fatal("next must not run")
-	}
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestMiddlewarePrivateDealVoucherWrongDealIDDenied(t *testing.T) {
-	t.Parallel()
-	ownerKey, owner := mustVoucherKey(t)
-	grantee := common.HexToAddress("0x0553e4ed281E5a0A0654F6E46a0F80b7153ad506")
-	lookup := &stubLookup{deal: &pieceaccess.Deal{
-		DealID:   "1001",
-		Client:   owner,
-		DealType: pieceaccess.DealTypePrivate,
-	}}
-	called := false
-	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		called = true
-		w.WriteHeader(http.StatusOK)
-	})
-	handler := testVoucherAuthorizer(lookup).Middleware(next)
-
-	// Same owner signed for a different deal — must not authorize deal 1001.
-	token := mustBearerVoucher(t, ownerKey, grantee, 1002, time.Now().Add(time.Hour).Unix())
-	req := httptest.NewRequest(http.MethodGet, "/piece/baga6ea4seaqabc?client="+grantee.Hex(), nil)
-	req.Header.Add("Authorization", "Bearer "+token)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	if called {
-		t.Fatal("next must not run")
-	}
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestMiddlewarePrivateDealVoucherWrongGranteeDenied(t *testing.T) {
-	t.Parallel()
-	ownerKey, owner := mustVoucherKey(t)
-	grantee := common.HexToAddress("0x0553e4ed281E5a0A0654F6E46a0F80b7153ad506")
-	imposter := common.HexToAddress("0xAF6C83b9D33DdEAD8810011abb5cA1Cfc2d8754a")
-	lookup := &stubLookup{deal: &pieceaccess.Deal{
-		DealID:   "1001",
-		Client:   owner,
-		DealType: pieceaccess.DealTypePrivate,
-	}}
-	called := false
-	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		called = true
-		w.WriteHeader(http.StatusOK)
-	})
-	handler := testVoucherAuthorizer(lookup).Middleware(next)
-
-	token := mustBearerVoucher(t, ownerKey, grantee, 1001, time.Now().Add(time.Hour).Unix())
-	req := httptest.NewRequest(http.MethodGet, "/piece/baga6ea4seaqabc?client="+imposter.Hex(), nil)
-	req.Header.Add("Authorization", "Bearer "+token)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	if called {
-		t.Fatal("next must not run when ?client= ≠ grantee")
-	}
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestMiddlewarePrivateDealVoucherAnonymousBearerIgnored(t *testing.T) {
-	t.Parallel()
-	ownerKey, owner := mustVoucherKey(t)
-	grantee := common.HexToAddress("0x0553e4ed281E5a0A0654F6E46a0F80b7153ad506")
-	lookup := &stubLookup{deal: &pieceaccess.Deal{
-		DealID:   "1001",
-		Client:   owner,
-		DealType: pieceaccess.DealTypePrivate,
+		DealID: "1001", Client: owner, DealType: pieceaccess.DealTypePrivate,
 	}}
 	called := false
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusPaymentRequired)
 	})
-	handler := testVoucherAuthorizer(lookup).Middleware(next)
+	handler := testCredentialAuthorizer(lookup).Middleware(next)
 
-	token := mustBearerVoucher(t, ownerKey, grantee, 1001, time.Now().Add(time.Hour).Unix())
-	req := httptest.NewRequest(http.MethodGet, "/piece/baga6ea4seaqabc", nil)
-	req.Header.Add("Authorization", "Bearer "+token)
+	now := time.Now().Unix()
+	proof, voucher := mustDelegatedCredential(t, ownerKey, granteeKey, 1001, testPieceCID, now, now+3600, now+86400, 314159)
+	req := httptest.NewRequest(http.MethodGet, "/piece/"+testPieceCID+"?client="+grantee.Hex(), nil)
+	addRetrievalProof(req, proof)
+	addRetrievalVoucher(req, voucher)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if !called || rec.Code != http.StatusPaymentRequired {
+		t.Fatalf("called=%v code=%d body=%s", called, rec.Code, rec.Body.String())
+	}
+}
+
+func TestMiddlewarePrivateDealWrongVoucherOwnerDenied(t *testing.T) {
+	t.Parallel()
+	_, owner := mustCredKey(t)
+	otherKey, _ := mustCredKey(t)
+	granteeKey, grantee := mustCredKey(t)
+	lookup := &stubLookup{deal: &pieceaccess.Deal{
+		DealID: "1001", Client: owner, DealType: pieceaccess.DealTypePrivate,
+	}}
+	called := false
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := testCredentialAuthorizer(lookup).Middleware(next)
+
+	now := time.Now().Unix()
+	// Voucher signed by otherKey (not the deal owner).
+	proof, voucher := mustDelegatedCredential(t, otherKey, granteeKey, 1001, testPieceCID, now, now+3600, now+86400, 314159)
+	req := httptest.NewRequest(http.MethodGet, "/piece/"+testPieceCID+"?client="+grantee.Hex(), nil)
+	addRetrievalProof(req, proof)
+	addRetrievalVoucher(req, voucher)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if called {
-		t.Fatal("anonymous bearer must be ignored without requester")
+		t.Fatal("next must not run")
 	}
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestMiddlewarePaymentPreferredOverClientQuery_Voucher(t *testing.T) {
+func TestMiddlewarePrivateDealWrongScopeDenied(t *testing.T) {
 	t.Parallel()
-	ownerKey, owner := mustVoucherKey(t)
-	grantee := common.HexToAddress("0x0553e4ed281E5a0A0654F6E46a0F80b7153ad506")
+	ownerKey, owner := mustCredKey(t)
+	granteeKey, grantee := mustCredKey(t)
+	lookup := &stubLookup{deal: &pieceaccess.Deal{
+		DealID: "1001", Client: owner, DealType: pieceaccess.DealTypePrivate,
+	}}
+	called := false
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := testCredentialAuthorizer(lookup).Middleware(next)
+
+	now := time.Now().Unix()
+	// Voucher scope 1002 does not match deal 1001.
+	proof, voucher := mustDelegatedCredential(t, ownerKey, granteeKey, 1002, testPieceCID, now, now+3600, now+86400, 314159)
+	req := httptest.NewRequest(http.MethodGet, "/piece/"+testPieceCID+"?client="+grantee.Hex(), nil)
+	addRetrievalProof(req, proof)
+	addRetrievalVoucher(req, voucher)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if called {
+		t.Fatal("next must not run")
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestMiddlewarePaymentPreferredOverClientQuery_Credential(t *testing.T) {
+	t.Parallel()
+	ownerKey, owner := mustCredKey(t)
+	granteeKey, grantee := mustCredKey(t)
 	other := common.HexToAddress("0xAF6C83b9D33DdEAD8810011abb5cA1Cfc2d8754a")
 	lookup := &stubLookup{deal: &pieceaccess.Deal{
-		DealID:   "1001",
-		Client:   owner,
-		DealType: pieceaccess.DealTypePrivate,
+		DealID: "1001", Client: owner, DealType: pieceaccess.DealTypePrivate,
 	}}
-	token := mustBearerVoucher(t, ownerKey, grantee, 1001, time.Now().Add(time.Hour).Unix())
-	handler := testVoucherAuthorizer(lookup).Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	now := time.Now().Unix()
+	proof, voucher := mustDelegatedCredential(t, ownerKey, granteeKey, 1001, testPieceCID, now, now+3600, now+86400, 314159)
+	handler := testCredentialAuthorizer(lookup).Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -183,14 +150,14 @@ func TestMiddlewarePaymentPreferredOverClientQuery_Voucher(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// Prefer Payment over ?client=: spoofed query must not authorize via voucher.
-		req := httptest.NewRequest(http.MethodGet, "/piece/baga6ea4seaqabc?client="+grantee.Hex(), nil)
-		req.Header.Add("Authorization", "Bearer "+token)
+		req := httptest.NewRequest(http.MethodGet, "/piece/"+testPieceCID+"?client="+grantee.Hex(), nil)
+		addRetrievalProof(req, proof)
+		addRetrievalVoucher(req, voucher)
 		req.Header.Add("Authorization", authz)
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
 		if rec.Code != http.StatusForbidden {
-			t.Fatalf("Payment must beat spoofed ?client=grantee; code=%d body=%s", rec.Code, rec.Body.String())
+			t.Fatalf("Payment must match proof requester; code=%d body=%s", rec.Code, rec.Body.String())
 		}
 	})
 
@@ -200,52 +167,51 @@ func TestMiddlewarePaymentPreferredOverClientQuery_Voucher(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// Prefer Payment over ?client=: authenticated payer is the voucher grantee.
-		req := httptest.NewRequest(http.MethodGet, "/piece/baga6ea4seaqabc?client="+other.Hex(), nil)
-		req.Header.Add("Authorization", "Bearer "+token)
+		req := httptest.NewRequest(http.MethodGet, "/piece/"+testPieceCID+"?client="+other.Hex(), nil)
+		addRetrievalProof(req, proof)
+		addRetrievalVoucher(req, voucher)
 		req.Header.Add("Authorization", authz)
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {
-			t.Fatalf("Payment grantee must win over spoofed ?client=; code=%d body=%s", rec.Code, rec.Body.String())
+			t.Fatalf("Payment matching proof requester must allow; code=%d body=%s", rec.Code, rec.Body.String())
 		}
 	})
 }
 
-func TestMiddlewarePaymentPreferredOverClientQuery_Owner(t *testing.T) {
+func TestMiddlewarePaymentPreferredOverClientQuery_OwnerProof(t *testing.T) {
 	t.Parallel()
-	owner := common.HexToAddress("0xAF6C83b9D33DdEAD8810011abb5cA1Cfc2d8754a")
+	ownerKey, owner := mustCredKey(t)
 	imposter := common.HexToAddress("0x0553e4ed281E5a0A0654F6E46a0F80b7153ad506")
 	lookup := &stubLookup{deal: &pieceaccess.Deal{
-		DealID:   "1",
-		Client:   owner,
-		DealType: pieceaccess.DealTypePrivate,
+		DealID: "1", Client: owner, DealType: pieceaccess.DealTypePrivate,
 	}}
 	called := false
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	})
-	handler := pieceaccess.NewAuthorizer(pieceaccess.WithDealLookup(lookup)).Middleware(next)
+	handler := testCredentialAuthorizer(lookup).Middleware(next)
 
+	proof := mustOwnerCredential(t, ownerKey, 1, testPieceCID, time.Now().Add(time.Hour).Unix(), 314159)
 	authz, err := paymentAuth(owner.Hex())
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Prefer Payment over ?client=: owner pays; spoofed query must not block access.
-	req := httptest.NewRequest(http.MethodGet, "/piece/baga6ea4seaqabc?client="+imposter.Hex(), nil)
-	req.Header.Set("Authorization", authz)
+	req := httptest.NewRequest(http.MethodGet, "/piece/"+testPieceCID+"?client="+imposter.Hex(), nil)
+	addRetrievalProof(req, proof)
+	req.Header.Add("Authorization", authz)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if !called || rec.Code != http.StatusOK {
-		t.Fatalf("Payment owner must beat ?client=imposter; called=%v code=%d", called, rec.Code)
+		t.Fatalf("Payment owner + proof must beat ?client=imposter; called=%v code=%d", called, rec.Code)
 	}
 }
 
-func TestMiddlewarePrivateDealVoucherSelectsMatchingDealAmongMany(t *testing.T) {
+func TestMiddlewarePrivateDealCredentialSelectsMatchingDealAmongMany(t *testing.T) {
 	t.Parallel()
-	ownerKey, owner := mustVoucherKey(t)
-	grantee := common.HexToAddress("0x0553e4ed281E5a0A0654F6E46a0F80b7153ad506")
+	ownerKey, owner := mustCredKey(t)
+	granteeKey, grantee := mustCredKey(t)
 	lookup := &stubLookup{deals: []*pieceaccess.Deal{
 		{DealID: "1001", Client: owner, DealType: pieceaccess.DealTypePrivate},
 		{DealID: "1002", Client: owner, DealType: pieceaccess.DealTypePrivate},
@@ -258,11 +224,13 @@ func TestMiddlewarePrivateDealVoucherSelectsMatchingDealAmongMany(t *testing.T) 
 		}
 		w.WriteHeader(http.StatusPaymentRequired)
 	})
-	handler := testVoucherAuthorizer(lookup).Middleware(next)
+	handler := testCredentialAuthorizer(lookup).Middleware(next)
 
-	token := mustBearerVoucher(t, ownerKey, grantee, 1002, time.Now().Add(time.Hour).Unix())
-	req := httptest.NewRequest(http.MethodGet, "/piece/baga6ea4seaqabc?client="+grantee.Hex(), nil)
-	req.Header.Add("Authorization", "Bearer "+token)
+	now := time.Now().Unix()
+	proof, voucher := mustDelegatedCredential(t, ownerKey, granteeKey, 1002, testPieceCID, now, now+3600, now+86400, 314159)
+	req := httptest.NewRequest(http.MethodGet, "/piece/"+testPieceCID+"?client="+grantee.Hex(), nil)
+	addRetrievalProof(req, proof)
+	addRetrievalVoucher(req, voucher)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusPaymentRequired {
@@ -273,50 +241,47 @@ func TestMiddlewarePrivateDealVoucherSelectsMatchingDealAmongMany(t *testing.T) 
 	}
 }
 
-func TestMiddlewarePrivateDealVoucherPaidWrongGranteeDenied(t *testing.T) {
+func TestMiddlewarePrivateDealPaidWrongPaymentClientDenied(t *testing.T) {
 	t.Parallel()
-	ownerKey, owner := mustVoucherKey(t)
-	grantee := common.HexToAddress("0x0553e4ed281E5a0A0654F6E46a0F80b7153ad506")
+	ownerKey, owner := mustCredKey(t)
+	granteeKey, _ := mustCredKey(t)
 	payer := common.HexToAddress("0xAF6C83b9D33DdEAD8810011abb5cA1Cfc2d8754a")
 	lookup := &stubLookup{deal: &pieceaccess.Deal{
-		DealID:   "1001",
-		Client:   owner,
-		DealType: pieceaccess.DealTypePrivate,
+		DealID: "1001", Client: owner, DealType: pieceaccess.DealTypePrivate,
 	}}
 	called := false
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	})
-	handler := testVoucherAuthorizer(lookup).Middleware(next)
+	handler := testCredentialAuthorizer(lookup).Middleware(next)
 
-	token := mustBearerVoucher(t, ownerKey, grantee, 1001, time.Now().Add(time.Hour).Unix())
+	now := time.Now().Unix()
+	proof, voucher := mustDelegatedCredential(t, ownerKey, granteeKey, 1001, testPieceCID, now, now+3600, now+86400, 314159)
 	authz, err := paymentAuth(payer.Hex())
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/piece/baga6ea4seaqabc", nil)
-	req.Header.Add("Authorization", "Bearer "+token)
+	req := httptest.NewRequest(http.MethodGet, "/piece/"+testPieceCID, nil)
+	addRetrievalProof(req, proof)
+	addRetrievalVoucher(req, voucher)
 	req.Header.Add("Authorization", authz)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if called {
-		t.Fatal("next must not run when Payment client ≠ grantee")
+		t.Fatal("next must not run when Payment client ≠ proof requester")
 	}
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestMiddlewarePrivateDealVoucherDomainPinRejectsWrongChain(t *testing.T) {
+func TestMiddlewarePrivateDealDomainPinRejectsWrongChain(t *testing.T) {
 	t.Parallel()
-	ownerKey, owner := mustVoucherKey(t)
-	grantee := common.HexToAddress("0x0553e4ed281E5a0A0654F6E46a0F80b7153ad506")
-	market := common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678")
+	ownerKey, owner := mustCredKey(t)
+	market := common.HexToAddress(testMarket)
 	lookup := &stubLookup{deal: &pieceaccess.Deal{
-		DealID:   "1001",
-		Client:   owner,
-		DealType: pieceaccess.DealTypePrivate,
+		DealID: "1001", Client: owner, DealType: pieceaccess.DealTypePrivate,
 	}}
 	called := false
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -328,13 +293,9 @@ func TestMiddlewarePrivateDealVoucherDomainPinRejectsWrongChain(t *testing.T) {
 		pieceaccess.WithVoucherDomain(big.NewInt(314159), market),
 	).Middleware(next)
 
-	// Signed for a different chainId than the SP pin.
-	token := mustBearerVoucherOpts(t, ownerKey, voucherSignOpts{
-		grantee: grantee, dealID: 1001, deadline: time.Now().Add(time.Hour).Unix(),
-		chainID: 1, contract: market.Hex(),
-	})
-	req := httptest.NewRequest(http.MethodGet, "/piece/baga6ea4seaqabc?client="+grantee.Hex(), nil)
-	req.Header.Add("Authorization", "Bearer "+token)
+	proof := mustOwnerCredential(t, ownerKey, 1001, testPieceCID, time.Now().Add(time.Hour).Unix(), 1)
+	req := httptest.NewRequest(http.MethodGet, "/piece/"+testPieceCID, nil)
+	addRetrievalProof(req, proof)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if called {
@@ -348,16 +309,13 @@ func TestMiddlewarePrivateDealVoucherDomainPinRejectsWrongChain(t *testing.T) {
 	}
 }
 
-func TestMiddlewarePrivateDealVoucherDomainPinRejectsWrongContract(t *testing.T) {
+func TestMiddlewarePrivateDealDomainPinRejectsWrongContract(t *testing.T) {
 	t.Parallel()
-	ownerKey, owner := mustVoucherKey(t)
-	grantee := common.HexToAddress("0x0553e4ed281E5a0A0654F6E46a0F80b7153ad506")
-	market := common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678")
+	ownerKey, owner := mustCredKey(t)
+	market := common.HexToAddress(testMarket)
 	other := common.HexToAddress("0xabcdefabcdefabcdefabcdefabcdefabcdefabcd")
 	lookup := &stubLookup{deal: &pieceaccess.Deal{
-		DealID:   "1001",
-		Client:   owner,
-		DealType: pieceaccess.DealTypePrivate,
+		DealID: "1001", Client: owner, DealType: pieceaccess.DealTypePrivate,
 	}}
 	called := false
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -369,12 +327,11 @@ func TestMiddlewarePrivateDealVoucherDomainPinRejectsWrongContract(t *testing.T)
 		pieceaccess.WithVoucherDomain(big.NewInt(314159), market),
 	).Middleware(next)
 
-	token := mustBearerVoucherOpts(t, ownerKey, voucherSignOpts{
-		grantee: grantee, dealID: 1001, deadline: time.Now().Add(time.Hour).Unix(),
-		chainID: 314159, contract: other.Hex(),
-	})
-	req := httptest.NewRequest(http.MethodGet, "/piece/baga6ea4seaqabc?client="+grantee.Hex(), nil)
-	req.Header.Add("Authorization", "Bearer "+token)
+	domain := pieceaccess.NewDomain(big.NewInt(314159), other)
+	proofTD := pieceaccess.BuildProofTypedData(domain, big.NewInt(1001), testPieceCID, time.Now().Add(time.Hour).Unix())
+	proof := pieceaccess.MustEncodeSignedToken(proofTD, pieceaccess.MustSignEIP712(ownerKey, proofTD))
+	req := httptest.NewRequest(http.MethodGet, "/piece/"+testPieceCID, nil)
+	addRetrievalProof(req, proof)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if called {
@@ -388,15 +345,13 @@ func TestMiddlewarePrivateDealVoucherDomainPinRejectsWrongContract(t *testing.T)
 	}
 }
 
-func TestMiddlewarePrivateDealVoucherDomainPinAcceptsMatch(t *testing.T) {
+func TestMiddlewarePrivateDealDomainPinAcceptsMatch(t *testing.T) {
 	t.Parallel()
-	ownerKey, owner := mustVoucherKey(t)
-	grantee := common.HexToAddress("0x0553e4ed281E5a0A0654F6E46a0F80b7153ad506")
-	market := common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678")
+	ownerKey, owner := mustCredKey(t)
+	granteeKey, grantee := mustCredKey(t)
+	market := common.HexToAddress(testMarket)
 	lookup := &stubLookup{deal: &pieceaccess.Deal{
-		DealID:   "1001",
-		Client:   owner,
-		DealType: pieceaccess.DealTypePrivate,
+		DealID: "1001", Client: owner, DealType: pieceaccess.DealTypePrivate,
 	}}
 	called := false
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -408,9 +363,11 @@ func TestMiddlewarePrivateDealVoucherDomainPinAcceptsMatch(t *testing.T) {
 		pieceaccess.WithVoucherDomain(big.NewInt(314159), market),
 	).Middleware(next)
 
-	token := mustBearerVoucher(t, ownerKey, grantee, 1001, time.Now().Add(time.Hour).Unix())
-	req := httptest.NewRequest(http.MethodGet, "/piece/baga6ea4seaqabc?client="+grantee.Hex(), nil)
-	req.Header.Add("Authorization", "Bearer "+token)
+	now := time.Now().Unix()
+	proof, voucher := mustDelegatedCredential(t, ownerKey, granteeKey, 1001, testPieceCID, now, now+3600, now+86400, 314159)
+	req := httptest.NewRequest(http.MethodGet, "/piece/"+testPieceCID+"?client="+grantee.Hex(), nil)
+	addRetrievalProof(req, proof)
+	addRetrievalVoucher(req, voucher)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if !called || rec.Code != http.StatusPaymentRequired {
@@ -418,24 +375,22 @@ func TestMiddlewarePrivateDealVoucherDomainPinAcceptsMatch(t *testing.T) {
 	}
 }
 
-func TestMiddlewareInvalidVoucherJSONError(t *testing.T) {
+func TestMiddlewareInvalidCredentialJSONError(t *testing.T) {
 	t.Parallel()
-	ownerKey, owner := mustVoucherKey(t)
+	ownerKey, owner := mustCredKey(t)
 	lookup := &stubLookup{deal: &pieceaccess.Deal{
-		DealID:   "1",
-		Client:   owner,
-		DealType: pieceaccess.DealTypePrivate,
+		DealID: "1", Client: owner, DealType: pieceaccess.DealTypePrivate,
 	}}
 	called := false
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	})
-	handler := testVoucherAuthorizer(lookup).Middleware(next)
+	handler := testCredentialAuthorizer(lookup).Middleware(next)
 
-	expired := mustBearerVoucher(t, ownerKey, common.HexToAddress("0x1"), 1, time.Now().Add(-time.Hour).Unix())
-	req := httptest.NewRequest(http.MethodGet, "/piece/baga6ea4seaqabc?client=0x0000000000000000000000000000000000000001", nil)
-	req.Header.Add("Authorization", "Bearer "+expired)
+	expired := mustOwnerCredential(t, ownerKey, 1, testPieceCID, time.Now().Add(-time.Hour).Unix(), 314159)
+	req := httptest.NewRequest(http.MethodGet, "/piece/"+testPieceCID, nil)
+	addRetrievalProof(req, expired)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if called {
@@ -456,21 +411,20 @@ func TestMiddlewareInvalidVoucherJSONError(t *testing.T) {
 	}
 }
 
-func TestMiddlewareBearerDoesNotCountAsPaid(t *testing.T) {
+func TestMiddlewareRetrievalDoesNotCountAsPaid(t *testing.T) {
 	t.Parallel()
-	// Unknown deal + Bearer voucher must not be treated as paid (default-deny).
 	lookup := &stubLookup{err: pieceaccess.ErrDealNotFound}
 	called := false
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	})
-	handler := testVoucherAuthorizer(lookup).Middleware(next)
+	handler := testCredentialAuthorizer(lookup).Middleware(next)
 
-	ownerKey, _ := mustVoucherKey(t)
-	token := mustBearerVoucher(t, ownerKey, common.HexToAddress("0x1"), 1, time.Now().Add(time.Hour).Unix())
-	req := httptest.NewRequest(http.MethodGet, "/piece/baga6ea4seaqabc?client=0xAF6C83b9D33DdEAD8810011abb5cA1Cfc2d8754a", nil)
-	req.Header.Add("Authorization", "Bearer "+token)
+	ownerKey, _ := mustCredKey(t)
+	proof := mustOwnerCredential(t, ownerKey, 1, testPieceCID, time.Now().Add(time.Hour).Unix(), 314159)
+	req := httptest.NewRequest(http.MethodGet, "/piece/"+testPieceCID+"?client=0xAF6C83b9D33DdEAD8810011abb5cA1Cfc2d8754a", nil)
+	addRetrievalProof(req, proof)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if !called || rec.Code != http.StatusOK {
@@ -478,25 +432,22 @@ func TestMiddlewareBearerDoesNotCountAsPaid(t *testing.T) {
 	}
 }
 
-func TestMiddlewareVoucherHeaderCapitalization(t *testing.T) {
+func TestMiddlewareCredentialHeaderCapitalization(t *testing.T) {
 	t.Parallel()
-	ownerKey, owner := mustVoucherKey(t)
-	grantee := common.HexToAddress("0x0553e4ed281E5a0A0654F6E46a0F80b7153ad506")
+	ownerKey, owner := mustCredKey(t)
 	lookup := &stubLookup{deal: &pieceaccess.Deal{
-		DealID:   "1001",
-		Client:   owner,
-		DealType: pieceaccess.DealTypePrivate,
+		DealID: "1001", Client: owner, DealType: pieceaccess.DealTypePrivate,
 	}}
-	token := mustBearerVoucher(t, ownerKey, grantee, 1001, time.Now().Add(time.Hour).Unix())
+	proof := mustOwnerCredential(t, ownerKey, 1001, testPieceCID, time.Now().Add(time.Hour).Unix(), 314159)
 
 	cases := []struct {
 		headerName string
 		value      string
 	}{
-		{"Authorization", "Bearer " + token},
-		{"authorization", "bearer " + token},
-		{"AUTHORIZATION", "BEARER " + token},
-		{"AuThOrIzAtIoN", "BeArEr " + token},
+		{"Authorization", "RetrievalProof " + proof},
+		{"authorization", "retrievalproof " + proof},
+		{"AUTHORIZATION", "RETRIEVALPROOF " + proof},
+		{"AuThOrIzAtIoN", "ReTrIeVaLpRoOf " + proof},
 	}
 	for _, tc := range cases {
 		t.Run(tc.headerName+"/"+strings.Fields(tc.value)[0], func(t *testing.T) {
@@ -506,8 +457,8 @@ func TestMiddlewareVoucherHeaderCapitalization(t *testing.T) {
 				called = true
 				w.WriteHeader(http.StatusPaymentRequired)
 			})
-			handler := testVoucherAuthorizer(lookup).Middleware(next)
-			req := httptest.NewRequest(http.MethodGet, "/piece/baga6ea4seaqabc?client="+grantee.Hex(), nil)
+			handler := testCredentialAuthorizer(lookup).Middleware(next)
+			req := httptest.NewRequest(http.MethodGet, "/piece/"+testPieceCID, nil)
 			req.Header.Add(tc.headerName, tc.value)
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, req)
@@ -518,8 +469,8 @@ func TestMiddlewareVoucherHeaderCapitalization(t *testing.T) {
 	}
 }
 
-func testVoucherAuthorizer(lookup pieceaccess.DealLookup, extra ...pieceaccess.Option) *pieceaccess.Authorizer {
-	market := common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678")
+func testCredentialAuthorizer(lookup pieceaccess.DealLookup, extra ...pieceaccess.Option) *pieceaccess.Authorizer {
+	market := common.HexToAddress(testMarket)
 	opts := []pieceaccess.Option{
 		pieceaccess.WithDealLookup(lookup),
 		pieceaccess.WithVoucherDomain(big.NewInt(314159), market),
@@ -528,7 +479,7 @@ func testVoucherAuthorizer(lookup pieceaccess.DealLookup, extra ...pieceaccess.O
 	return pieceaccess.NewAuthorizer(opts...)
 }
 
-func mustVoucherKey(t *testing.T) (*ecdsa.PrivateKey, common.Address) {
+func mustCredKey(t *testing.T) (*ecdsa.PrivateKey, common.Address) {
 	t.Helper()
 	key, err := crypto.GenerateKey()
 	if err != nil {
@@ -537,91 +488,32 @@ func mustVoucherKey(t *testing.T) (*ecdsa.PrivateKey, common.Address) {
 	return key, crypto.PubkeyToAddress(key.PublicKey)
 }
 
-type voucherSignOpts struct {
-	grantee  common.Address
-	dealID   int64
-	deadline int64
-	chainID  int64
-	contract string
+// mustOwnerCredential returns a bare base64url RetrievalProof token signed by
+// ownerKey (owner-direct). Attach it with addRetrievalProof.
+func mustOwnerCredential(t *testing.T, ownerKey *ecdsa.PrivateKey, scope int64, resource string, proofDeadline, chainID int64) string {
+	t.Helper()
+	domain := pieceaccess.NewDomain(big.NewInt(chainID), common.HexToAddress(testMarket))
+	td := pieceaccess.BuildProofTypedData(domain, big.NewInt(scope), resource, proofDeadline)
+	return pieceaccess.MustEncodeSignedToken(td, pieceaccess.MustSignEIP712(ownerKey, td))
 }
 
-func mustBearerVoucher(t *testing.T, key *ecdsa.PrivateKey, grantee common.Address, dealID, deadline int64) string {
+// mustDelegatedCredential returns (proofToken, voucherToken): the proof is signed
+// by granteeKey (the requester), the voucher by ownerKey (the deal owner).
+func mustDelegatedCredential(t *testing.T, ownerKey, granteeKey *ecdsa.PrivateKey, scope int64, resource string, issuedAt, proofDeadline, voucherDeadline, chainID int64) (string, string) {
 	t.Helper()
-	return mustBearerVoucherOpts(t, key, voucherSignOpts{
-		grantee:  grantee,
-		dealID:   dealID,
-		deadline: deadline,
-		chainID:  314159,
-		contract: "0x1234567890abcdef1234567890abcdef12345678",
-	})
+	domain := pieceaccess.NewDomain(big.NewInt(chainID), common.HexToAddress(testMarket))
+	grantee := crypto.PubkeyToAddress(granteeKey.PublicKey)
+	proofTD := pieceaccess.BuildProofTypedData(domain, big.NewInt(scope), resource, proofDeadline)
+	voucherTD := pieceaccess.BuildVoucherTypedData(domain, grantee, big.NewInt(scope), issuedAt, voucherDeadline)
+	proof := pieceaccess.MustEncodeSignedToken(proofTD, pieceaccess.MustSignEIP712(granteeKey, proofTD))
+	voucher := pieceaccess.MustEncodeSignedToken(voucherTD, pieceaccess.MustSignEIP712(ownerKey, voucherTD))
+	return proof, voucher
 }
 
-func mustBearerVoucherOpts(t *testing.T, key *ecdsa.PrivateKey, opts voucherSignOpts) string {
-	t.Helper()
-	payload := map[string]any{
-		"domain": map[string]any{
-			"name":              "PoRepPieceAccess",
-			"version":           "1",
-			"chainId":           opts.chainID,
-			"verifyingContract": opts.contract,
-		},
-		"types": map[string]any{
-			"RetrievalVoucher": []map[string]string{
-				{"name": "grantee", "type": "address"},
-				{"name": "dealId", "type": "uint256"},
-				{"name": "deadline", "type": "uint256"},
-			},
-		},
-		"primaryType": "RetrievalVoucher",
-		"message": map[string]any{
-			"grantee":  opts.grantee.Hex(),
-			"dealId":   opts.dealID,
-			"deadline": opts.deadline,
-		},
-		"signature": "0x00",
-	}
-	raw, err := json.Marshal(payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var tok struct {
-		Domain      apitypes.TypedDataDomain `json:"domain"`
-		Types       apitypes.Types           `json:"types"`
-		PrimaryType string                   `json:"primaryType"`
-		Message     map[string]any           `json:"message"`
-		Signature   string                   `json:"signature"`
-	}
-	if err := json.Unmarshal(raw, &tok); err != nil {
-		t.Fatal(err)
-	}
-	if tok.Types == nil {
-		tok.Types = apitypes.Types{}
-	}
-	tok.Types["EIP712Domain"] = []apitypes.Type{
-		{Name: "name", Type: "string"},
-		{Name: "version", Type: "string"},
-		{Name: "chainId", Type: "uint256"},
-		{Name: "verifyingContract", Type: "address"},
-	}
-	typed := apitypes.TypedData{
-		Types:       tok.Types,
-		PrimaryType: tok.PrimaryType,
-		Domain:      tok.Domain,
-		Message:     tok.Message,
-	}
-	digest, _, err := apitypes.TypedDataAndHash(typed)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sig, err := crypto.Sign(digest, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sig[64] += 27
-	payload["signature"] = "0x" + common.Bytes2Hex(sig)
-	raw, err = json.Marshal(payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return base64.RawURLEncoding.EncodeToString(raw)
+func addRetrievalProof(req *http.Request, proofToken string) {
+	req.Header.Add("Authorization", "RetrievalProof "+proofToken)
+}
+
+func addRetrievalVoucher(req *http.Request, voucherToken string) {
+	req.Header.Add("Authorization", "RetrievalVoucher "+voucherToken)
 }

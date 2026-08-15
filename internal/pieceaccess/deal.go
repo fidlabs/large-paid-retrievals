@@ -19,8 +19,8 @@ type DealLookup interface {
 }
 
 // DealType mirrors PoRepMarket dealType (public=10, private=20).
-// Private means only the deal client (or a wallet with a valid owner-signed
-// voucher) may download the CAR; metadata remains public.
+// Private means only a wallet with a valid Retrieval credential (owner-signed
+// proof, or proof + owner-signed voucher) may download the CAR; metadata remains public.
 type DealType uint8
 
 const (

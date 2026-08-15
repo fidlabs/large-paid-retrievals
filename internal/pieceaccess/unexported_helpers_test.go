@@ -1,18 +1,11 @@
 // White-box tests for unexported pieceaccess helpers and edge paths
-// (voucher parsing/shape, deal authorization helpers, middleware utilities).
-//
-// This file uses package pieceaccess (not pieceaccess_test) so tests can call
-// unexported functions directly. Prefer pieceaccess_test + exported APIs for
-// behavior-level middleware/voucher coverage; keep this file for internal
-// helper contracts and fail-closed branches that are awkward to hit only
-// through the public Authorizer surface.
+// (credential parsing/shape, deal authorization helpers, middleware utilities).
 package pieceaccess
 
 import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -22,14 +15,13 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/math"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/signer/core/apitypes"
 )
 
-func TestParseVoucherUint256(t *testing.T) {
+func TestParseUint256Field(t *testing.T) {
 	t.Parallel()
 	largeOK := new(big.Int).Lsh(big.NewInt(1), 80)
-	tooBig := new(big.Int).Lsh(big.NewInt(1), 256) // 2^256, BitLen 257
+	tooBig := new(big.Int).Lsh(big.NewInt(1), 256)
 	cases := []struct {
 		name    string
 		in      any
@@ -54,7 +46,7 @@ func TestParseVoucherUint256(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := parseVoucherUint256(tc.in)
+			got, err := parseUint256Field(tc.in)
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("err=%v want substring %q", err, tc.wantErr)
@@ -68,75 +60,84 @@ func TestParseVoucherUint256(t *testing.T) {
 	}
 }
 
-func TestValidateVoucherShape(t *testing.T) {
+func TestValidateProofAndVoucherShape(t *testing.T) {
 	t.Parallel()
-	valid := validShapeToken()
-
-	t.Run("ok", func(t *testing.T) {
+	t.Run("proof ok", func(t *testing.T) {
 		t.Parallel()
-		if err := validateVoucherShape(valid); err != nil {
+		if err := validateProofShape(validProofShape()); err != nil {
 			t.Fatal(err)
 		}
 	})
-	t.Run("nil", func(t *testing.T) {
+	t.Run("voucher ok", func(t *testing.T) {
 		t.Parallel()
-		if err := validateVoucherShape(nil); err == nil || !strings.Contains(err.Error(), "nil") {
+		if err := validateVoucherShape(validVoucherShape()); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("nil proof", func(t *testing.T) {
+		t.Parallel()
+		if err := validateProofShape(nil); err == nil || !strings.Contains(err.Error(), "nil") {
 			t.Fatalf("got %v", err)
 		}
 	})
 
-	mutate := func(name string, edit func(*voucherToken), wantSub string) {
-		t.Run(name, func(t *testing.T) {
+	mutateProof := func(name string, edit func(*eip712TypedDataJSON), wantSub string) {
+		t.Run("proof/"+name, func(t *testing.T) {
 			t.Parallel()
-			tok := validShapeToken()
-			edit(tok)
-			err := validateVoucherShape(tok)
+			obj := validProofShape()
+			edit(obj)
+			err := validateProofShape(obj)
 			if err == nil || !strings.Contains(err.Error(), wantSub) {
 				t.Fatalf("got %v want substring %q", err, wantSub)
 			}
 		})
 	}
-	mutate("bad primaryType", func(tok *voucherToken) { tok.PrimaryType = "Other" }, "primaryType")
-	mutate("bad domain name", func(tok *voucherToken) { tok.Domain.Name = "Nope" }, "domain.name")
-	mutate("bad domain version", func(tok *voucherToken) { tok.Domain.Version = "9" }, "domain.version")
-	mutate("missing types", func(tok *voucherToken) { tok.Types = apitypes.Types{} }, "missing types")
-	mutate("wrong field count", func(tok *voucherToken) {
-		tok.Types[voucherPrimaryType] = tok.Types[voucherPrimaryType][:1]
+	mutateProof("bad primaryType", func(o *eip712TypedDataJSON) { o.PrimaryType = "Other" }, "primaryType")
+	mutateProof("bad domain name", func(o *eip712TypedDataJSON) { o.Domain.Name = "Nope" }, "domain.name")
+	mutateProof("missing types", func(o *eip712TypedDataJSON) { o.Types = apitypes.Types{} }, "missing types")
+	mutateProof("wrong field count", func(o *eip712TypedDataJSON) {
+		o.Types[primaryTypeProof] = o.Types[primaryTypeProof][:1]
 	}, "field count")
-	mutate("wrong field type", func(tok *voucherToken) {
-		tok.Types[voucherPrimaryType][0].Type = "bytes32"
-	}, "unexpected type field")
-	mutate("unknown field name", func(tok *voucherToken) {
-		tok.Types[voucherPrimaryType][0].Name = "spender"
-	}, "unexpected type field")
-	mutate("duplicate type field omits required", func(tok *voucherToken) {
-		// Same length as want, but two grantee entries and no deadline — must reject
-		// so EIP-712 hashing cannot drop a required field from the signed digest.
-		tok.Types[voucherPrimaryType] = []apitypes.Type{
-			{Name: voucherTypeGrantee, Type: "address"},
-			{Name: voucherTypeGrantee, Type: "address"},
-			{Name: voucherTypeDealID, Type: "uint256"},
+	mutateProof("nil message", func(o *eip712TypedDataJSON) { o.Message = nil }, "missing proof.message")
+	mutateProof("missing resource", func(o *eip712TypedDataJSON) { delete(o.Message, fieldResource) }, "missing proof.message.resource")
+
+	mutateVoucher := func(name string, edit func(*eip712TypedDataJSON), wantSub string) {
+		t.Run("voucher/"+name, func(t *testing.T) {
+			t.Parallel()
+			obj := validVoucherShape()
+			edit(obj)
+			err := validateVoucherShape(obj)
+			if err == nil || !strings.Contains(err.Error(), wantSub) {
+				t.Fatalf("got %v want substring %q", err, wantSub)
+			}
+		})
+	}
+	mutateVoucher("duplicate type field", func(o *eip712TypedDataJSON) {
+		o.Types[primaryTypeVoucher] = []apitypes.Type{
+			{Name: fieldGrantee, Type: "address"},
+			{Name: fieldGrantee, Type: "address"},
+			{Name: fieldScope, Type: "uint256"},
+			{Name: fieldIssuedAt, Type: "uint256"},
 		}
 	}, "duplicate type field")
-	mutate("nil message", func(tok *voucherToken) { tok.Message = nil }, "missing message")
-	mutate("missing message field", func(tok *voucherToken) { delete(tok.Message, voucherTypeDealID) }, "missing message.dealId")
-	mutate("empty signature", func(tok *voucherToken) { tok.Signature = "  " }, "missing signature")
+	mutateVoucher("missing issuedAt", func(o *eip712TypedDataJSON) { delete(o.Message, fieldIssuedAt) }, "missing voucher.message.issuedAt")
 }
 
-func TestVerifyBearerVoucherMalformed(t *testing.T) {
+func TestDecodeSignedTokenMalformed(t *testing.T) {
 	t.Parallel()
 	now := time.Now().Unix()
+	pin := credentialTestPin(1)
 
 	t.Run("empty", func(t *testing.T) {
 		t.Parallel()
-		_, err := verifyBearerVoucher("  ", now, nil)
+		_, _, err := decodeSignedToken("  ")
 		if !errors.Is(err, ErrInvalidVoucher) || !strings.Contains(err.Error(), "empty") {
 			t.Fatalf("got %v", err)
 		}
 	})
 	t.Run("bad base64", func(t *testing.T) {
 		t.Parallel()
-		_, err := verifyBearerVoucher("!!!", now, nil)
+		_, _, err := decodeSignedToken("!!!")
 		if !errors.Is(err, ErrInvalidVoucher) || !strings.Contains(err.Error(), "decode") {
 			t.Fatalf("got %v", err)
 		}
@@ -144,90 +145,27 @@ func TestVerifyBearerVoucherMalformed(t *testing.T) {
 	t.Run("bad json", func(t *testing.T) {
 		t.Parallel()
 		tok := base64.RawURLEncoding.EncodeToString([]byte("{"))
-		_, err := verifyBearerVoucher(tok, now, nil)
+		_, _, err := decodeSignedToken(tok)
 		if !errors.Is(err, ErrInvalidVoucher) || !strings.Contains(err.Error(), "json") {
 			t.Fatalf("got %v", err)
 		}
 	})
-	t.Run("shape rejected", func(t *testing.T) {
+	t.Run("missing signature", func(t *testing.T) {
 		t.Parallel()
-		tok := validShapeToken()
-		tok.PrimaryType = "Wrong"
-		raw, _ := encodeBearerVoucherToken(*tok)
-		_, err := verifyBearerVoucher(raw, now, nil)
-		if !errors.Is(err, ErrInvalidVoucher) || !strings.Contains(err.Error(), "primaryType") {
+		tok := encodeRawToken(t, map[string]any{"primaryType": "RetrievalProof", "message": map[string]any{}})
+		_, _, err := decodeSignedToken(tok)
+		if !errors.Is(err, ErrInvalidVoucher) || !strings.Contains(err.Error(), "missing signature") {
 			t.Fatalf("got %v", err)
-		}
-	})
-	t.Run("bad grantee", func(t *testing.T) {
-		t.Parallel()
-		ownerKey, _ := mustKey(t)
-		token := mustSignVoucher(t, ownerKey, voucherFields{
-			grantee: common.HexToAddress("0x1"), dealID: 1, deadline: now + 3600, chainID: 1,
-		})
-		raw, _ := base64.RawURLEncoding.DecodeString(token)
-		var tok voucherToken
-		_ = json.Unmarshal(raw, &tok)
-		tok.Message[voucherTypeGrantee] = "not-an-address"
-		bad, _ := encodeBearerVoucherToken(tok)
-		_, err := verifyBearerVoucher(bad, now, voucherTestPin(1))
-		if !errors.Is(err, ErrInvalidVoucher) || !strings.Contains(err.Error(), "grantee") {
-			t.Fatalf("got %v", err)
-		}
-	})
-	t.Run("quoted uint strings", func(t *testing.T) {
-		t.Parallel()
-		ownerKey, owner := mustKey(t)
-		deadline := now + 3600
-		token := mustSignVoucher(t, ownerKey, voucherFields{
-			grantee: common.HexToAddress("0x1"), dealID: 55, deadline: deadline, chainID: 1,
-		})
-		// Rebuild message with string-encoded ints (still valid JSON map values).
-		raw, _ := base64.RawURLEncoding.DecodeString(token)
-		var tok voucherToken
-		_ = json.Unmarshal(raw, &tok)
-		tok.Message[voucherTypeDealID] = "55"
-		tok.Message[voucherTypeDeadline] = fmt.Sprintf("%d", deadline)
-		// Signature was over numeric fields; string message changes EIP-712 hash → recovery
-		// still "succeeds" as some address, but we only care parseVoucherUint256 accepts strings.
-		// Re-sign with string fields so verification succeeds end-to-end.
-		ensureEIP712DomainTypes(&tok)
-		typed := apitypes.TypedData{Types: tok.Types, PrimaryType: tok.PrimaryType, Domain: tok.Domain, Message: tok.Message}
-		digest, _, err := apitypes.TypedDataAndHash(typed)
-		if err != nil {
-			t.Fatal(err)
-		}
-		sig, err := crypto.Sign(digest, ownerKey)
-		if err != nil {
-			t.Fatal(err)
-		}
-		sig[64] += 27
-		tok.Signature = "0x" + common.Bytes2Hex(sig)
-		delete(tok.Types, "EIP712Domain")
-		token, err = encodeBearerVoucherToken(tok)
-		if err != nil {
-			t.Fatal(err)
-		}
-		got, err := verifyBearerVoucher(token, now, voucherTestPin(1))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !sameAddress(got.Owner, owner) || got.DealID.Cmp(big.NewInt(55)) != 0 {
-			t.Fatalf("got %+v", got)
 		}
 	})
 	t.Run("short signature", func(t *testing.T) {
 		t.Parallel()
 		ownerKey, _ := mustKey(t)
-		token := mustSignVoucher(t, ownerKey, voucherFields{
-			grantee: common.HexToAddress("0x1"), dealID: 1, deadline: now + 3600, chainID: 1,
-		})
-		raw, _ := base64.RawURLEncoding.DecodeString(token)
-		var tok voucherToken
-		_ = json.Unmarshal(raw, &tok)
-		tok.Signature = "0xabcd"
-		bad, _ := encodeBearerVoucherToken(tok)
-		_, err := verifyBearerVoucher(bad, now, voucherTestPin(1))
+		domain := NewDomain(big.NewInt(1), common.HexToAddress(testContract))
+		td := BuildProofTypedData(domain, big.NewInt(1), testPieceCID, now+3600)
+		tok := MustEncodeSignedToken(td, "0xabcd")
+		_ = ownerKey
+		_, err := verifyProofToken(tok, testPieceCID, now, pin)
 		if !errors.Is(err, ErrInvalidVoucher) || !strings.Contains(err.Error(), "65 bytes") {
 			t.Fatalf("got %v", err)
 		}
@@ -235,64 +173,37 @@ func TestVerifyBearerVoucherMalformed(t *testing.T) {
 	t.Run("bad recovery id", func(t *testing.T) {
 		t.Parallel()
 		ownerKey, _ := mustKey(t)
-		token := mustSignVoucher(t, ownerKey, voucherFields{
-			grantee: common.HexToAddress("0x1"), dealID: 1, deadline: now + 3600, chainID: 1,
-		})
-		raw, _ := base64.RawURLEncoding.DecodeString(token)
-		var tok voucherToken
-		_ = json.Unmarshal(raw, &tok)
-		sig := common.FromHex(tok.Signature)
-		sig[64] = 2 // invalid after 27-normalization path
-		tok.Signature = "0x" + common.Bytes2Hex(sig)
-		bad, _ := encodeBearerVoucherToken(tok)
-		_, err := verifyBearerVoucher(bad, now, voucherTestPin(1))
+		domain := NewDomain(big.NewInt(1), common.HexToAddress(testContract))
+		td := BuildProofTypedData(domain, big.NewInt(1), testPieceCID, now+3600)
+		sig := common.FromHex(MustSignEIP712(ownerKey, td))
+		sig[64] = 2
+		tok := MustEncodeSignedToken(td, "0x"+common.Bytes2Hex(sig))
+		_, err := verifyProofToken(tok, testPieceCID, now, pin)
 		if !errors.Is(err, ErrInvalidVoucher) || !strings.Contains(err.Error(), "recovery id") {
-			t.Fatalf("got %v", err)
-		}
-	})
-	t.Run("bad deadline type", func(t *testing.T) {
-		t.Parallel()
-		tok := validShapeToken()
-		tok.Message[voucherTypeDeadline] = true
-		raw, _ := encodeBearerVoucherToken(*tok)
-		_, err := verifyBearerVoucher(raw, now, voucherTestPin(1))
-		if !errors.Is(err, ErrInvalidVoucher) || !strings.Contains(err.Error(), "deadline") {
-			t.Fatalf("got %v", err)
-		}
-	})
-	t.Run("bad dealId type", func(t *testing.T) {
-		t.Parallel()
-		tok := validShapeToken()
-		tok.Message[voucherTypeDealID] = true
-		tok.Message[voucherTypeDeadline] = float64(now + 3600)
-		raw, _ := encodeBearerVoucherToken(*tok)
-		_, err := verifyBearerVoucher(raw, now, voucherTestPin(1))
-		if !errors.Is(err, ErrInvalidVoucher) || !strings.Contains(err.Error(), "dealId") {
 			t.Fatalf("got %v", err)
 		}
 	})
 	t.Run("eip712 hash failure", func(t *testing.T) {
 		t.Parallel()
-		tok := validShapeToken()
-		tok.Domain.ChainId = (*math.HexOrDecimal256)(big.NewInt(1))
-		tok.Domain.VerifyingContract = voucherTestContract
-		tok.Message[voucherTypeDeadline] = float64(now + 3600)
-		// Invalid salt makes TypedDataAndHash fail after the domain pin accepts.
-		tok.Domain.Salt = "0xnot32bytes"
-		raw, _ := encodeBearerVoucherToken(*tok)
-		_, err := verifyBearerVoucher(raw, now, voucherTestPin(1))
+		obj := validProofShape()
+		obj.Domain.ChainId = (*math.HexOrDecimal256)(big.NewInt(1))
+		obj.Domain.VerifyingContract = testContract
+		obj.Message[fieldDeadline] = float64(now + 3600)
+		obj.Domain.Salt = "0xnot32bytes"
+		tok := encodeSignedShape(t, obj, "0x"+strings.Repeat("ab", 65))
+		_, err := verifyProofToken(tok, testPieceCID, now, pin)
 		if !errors.Is(err, ErrInvalidVoucher) || !strings.Contains(strings.ToLower(err.Error()), "eip-712") {
 			t.Fatalf("got %v", err)
 		}
 	})
-	t.Run("invalid verifyingContract in domain", func(t *testing.T) {
+	t.Run("invalid verifyingContract", func(t *testing.T) {
 		t.Parallel()
-		tok := validShapeToken()
-		tok.Domain.ChainId = (*math.HexOrDecimal256)(big.NewInt(1))
-		tok.Domain.VerifyingContract = "not-an-address"
-		tok.Message[voucherTypeDeadline] = float64(now + 3600)
-		raw, _ := encodeBearerVoucherToken(*tok)
-		_, err := verifyBearerVoucher(raw, now, voucherTestPin(1))
+		obj := validProofShape()
+		obj.Domain.ChainId = (*math.HexOrDecimal256)(big.NewInt(1))
+		obj.Domain.VerifyingContract = "not-an-address"
+		obj.Message[fieldDeadline] = float64(now + 3600)
+		tok := encodeSignedShape(t, obj, "0x"+strings.Repeat("ab", 65))
+		_, err := verifyProofToken(tok, testPieceCID, now, pin)
 		if !errors.Is(err, ErrInvalidVoucher) || !strings.Contains(err.Error(), "verifyingContract") {
 			t.Fatalf("got %v", err)
 		}
@@ -303,17 +214,17 @@ func TestEnsureEIP712DomainTypes(t *testing.T) {
 	t.Parallel()
 	t.Run("nil types and salt", func(t *testing.T) {
 		t.Parallel()
-		tok := &voucherToken{
+		obj := &eip712TypedDataJSON{
 			Domain: apitypes.TypedDataDomain{
-				Name:              voucherDomainName,
-				Version:           voucherDomainVer,
+				Name:              eip712DomainName,
+				Version:           eip712DomainVer,
 				ChainId:           math.NewHexOrDecimal256(1),
-				VerifyingContract: "0x1234567890abcdef1234567890abcdef12345678",
+				VerifyingContract: testContract,
 				Salt:              "0x" + strings.Repeat("11", 32),
 			},
 		}
-		ensureEIP712DomainTypes(tok)
-		fields := tok.Types["EIP712Domain"]
+		ensureEIP712DomainTypes(obj)
+		fields := obj.Types["EIP712Domain"]
 		var names []string
 		for _, f := range fields {
 			names = append(names, f.Name)
@@ -326,41 +237,63 @@ func TestEnsureEIP712DomainTypes(t *testing.T) {
 	t.Run("keeps existing EIP712Domain", func(t *testing.T) {
 		t.Parallel()
 		existing := []apitypes.Type{{Name: "name", Type: "string"}}
-		tok := &voucherToken{
+		obj := &eip712TypedDataJSON{
 			Types:  apitypes.Types{"EIP712Domain": existing},
-			Domain: apitypes.TypedDataDomain{Name: voucherDomainName, Version: voucherDomainVer},
+			Domain: apitypes.TypedDataDomain{Name: eip712DomainName, Version: eip712DomainVer},
 		}
-		ensureEIP712DomainTypes(tok)
-		if len(tok.Types["EIP712Domain"]) != 1 {
-			t.Fatalf("mutated existing domain types: %+v", tok.Types["EIP712Domain"])
+		ensureEIP712DomainTypes(obj)
+		if len(obj.Types["EIP712Domain"]) != 1 {
+			t.Fatalf("mutated existing domain types: %+v", obj.Types["EIP712Domain"])
 		}
 	})
 }
 
-func TestVoucherAuthorizesDeal(t *testing.T) {
+func TestAccessAuthorizesDeal(t *testing.T) {
 	t.Parallel()
 	owner := common.HexToAddress("0xabc0000000000000000000000000000000000abc")
-	v := VerifiedVoucher{Owner: owner, DealID: big.NewInt(1001)}
-	if voucherAuthorizesDeal(v, nil) {
+	grantee := common.HexToAddress("0xdef0000000000000000000000000000000000def")
+
+	ownerDirect := &VerifiedAccess{Proof: &VerifiedProof{Requester: owner, Resource: testPieceCID}}
+	if accessAuthorizesDeal(ownerDirect, nil) {
 		t.Fatal("nil deal")
 	}
-	if voucherAuthorizesDeal(v, &Deal{DealID: "1001", Client: owner, DealType: DealTypePublic}) {
+	if accessAuthorizesDeal(ownerDirect, &Deal{DealID: "1001", Client: owner, DealType: DealTypePublic}) {
 		t.Fatal("public deal")
 	}
-	if !voucherAuthorizesDeal(v, &Deal{DealID: "1001", Client: owner, DealType: DealTypePrivate}) {
-		t.Fatal("private owner+dealId match")
+	if !accessAuthorizesDeal(ownerDirect, &Deal{DealID: "1001", Client: owner, DealType: DealTypePrivate}) {
+		t.Fatal("owner-direct")
 	}
-	if voucherAuthorizesDeal(v, &Deal{DealID: "1002", Client: owner, DealType: DealTypePrivate}) {
-		t.Fatal("same owner wrong dealId")
+	// Owner-direct ignores scope: owner may retrieve any of their private deals.
+	if !accessAuthorizesDeal(ownerDirect, &Deal{DealID: "1002", Client: owner, DealType: DealTypePrivate}) {
+		t.Fatal("owner-direct other scope")
 	}
-	if voucherAuthorizesDeal(VerifiedVoucher{DealID: big.NewInt(1001)}, &Deal{DealID: "1001", Client: owner, DealType: DealTypePrivate}) {
-		t.Fatal("zero owner")
+
+	delegated := &VerifiedAccess{
+		Proof:    &VerifiedProof{Requester: grantee, Resource: testPieceCID},
+		Vouchers: []VerifiedVoucher{{Owner: owner, Grantee: grantee, Scope: big.NewInt(1001)}},
 	}
-	if voucherAuthorizesDeal(VerifiedVoucher{Owner: owner}, &Deal{DealID: "1001", Client: owner, DealType: DealTypePrivate}) {
-		t.Fatal("nil voucher dealId")
+	if !accessAuthorizesDeal(delegated, &Deal{DealID: "1001", Client: owner, DealType: DealTypePrivate}) {
+		t.Fatal("delegated")
 	}
-	if voucherAuthorizesDeal(v, &Deal{DealID: "not-a-number", Client: owner, DealType: DealTypePrivate}) {
-		t.Fatal("unparseable deal id")
+	if accessAuthorizesDeal(delegated, &Deal{DealID: "1002", Client: owner, DealType: DealTypePrivate}) {
+		t.Fatal("voucher scope != deal id")
+	}
+	wrongIssuer := &VerifiedAccess{
+		Proof:    &VerifiedProof{Requester: grantee, Resource: testPieceCID},
+		Vouchers: []VerifiedVoucher{{Owner: grantee, Grantee: grantee, Scope: big.NewInt(1001)}},
+	}
+	if accessAuthorizesDeal(wrongIssuer, &Deal{DealID: "1001", Client: owner, DealType: DealTypePrivate}) {
+		t.Fatal("wrong voucher owner")
+	}
+	noVoucher := &VerifiedAccess{Proof: &VerifiedProof{Requester: grantee}}
+	if accessAuthorizesDeal(noVoucher, &Deal{DealID: "1001", Client: owner, DealType: DealTypePrivate}) {
+		t.Fatal("grantee without voucher")
+	}
+	if accessAuthorizesDeal(nil, &Deal{DealID: "1001", Client: owner, DealType: DealTypePrivate}) {
+		t.Fatal("nil access")
+	}
+	if accessAuthorizesDeal(&VerifiedAccess{}, &Deal{DealID: "1001", Client: owner, DealType: DealTypePrivate}) {
+		t.Fatal("no proof")
 	}
 }
 
@@ -386,13 +319,16 @@ func TestDealAllowsAccess(t *testing.T) {
 
 func TestVoucherErrorHelpers(t *testing.T) {
 	t.Parallel()
-	if voucherErrorCode(errors.New("expired yesterday")) != "voucher_expired" {
+	if voucherErrorCode(errors.New("proof expired deadline")) != "proof_expired" {
+		t.Fatal("proof expired")
+	}
+	if voucherErrorCode(errors.New("voucher expired yesterday")) != "voucher_expired" {
 		t.Fatal("expired")
 	}
 	if voucherErrorCode(errors.New("bad signature")) != "invalid_signature" {
 		t.Fatal("signature")
 	}
-	if voucherErrorCode(errors.New("bearer token base64url decode")) != "malformed_voucher" {
+	if voucherErrorCode(errors.New("token base64url decode")) != "malformed_voucher" {
 		t.Fatal("malformed")
 	}
 	if voucherErrorCode(errors.New("something else")) != "invalid_voucher" {
@@ -418,17 +354,21 @@ func TestVoucherErrorHelpers(t *testing.T) {
 	}
 }
 
-func TestBearerAuthorizationValuesEdge(t *testing.T) {
+func TestAuthTokensForSchemeEdge(t *testing.T) {
 	t.Parallel()
-	if bearerAuthorizationValues(nil) != nil {
+	if authTokensForScheme(nil, SchemeRetrievalProof) != nil {
 		t.Fatal("nil request")
 	}
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Add("Authorization", "   ")
-	req.Header.Add("Authorization", "Bearer") // scheme only, no token separator
+	req.Header.Add("Authorization", "RetrievalProof")
 	req.Header.Add("Authorization", "Payment x")
-	if got := bearerAuthorizationValues(req); len(got) != 0 {
-		t.Fatalf("got %v", got)
+	req.Header.Add("Authorization", "RetrievalVoucher v1")
+	if got := authTokensForScheme(req, SchemeRetrievalProof); len(got) != 0 {
+		t.Fatalf("proof got %v", got)
+	}
+	if got := authTokensForScheme(req, SchemeRetrievalVoucher); len(got) != 1 || got[0] != "v1" {
+		t.Fatalf("voucher got %v", got)
 	}
 }
 
@@ -459,7 +399,7 @@ func TestHasPaymentAuthorizationNil(t *testing.T) {
 	}
 }
 
-func TestSelectRepresentativeDealNilAndVoucher(t *testing.T) {
+func TestSelectRepresentativeDealNilAndAccess(t *testing.T) {
 	t.Parallel()
 	owner := common.HexToAddress("0xabc0000000000000000000000000000000000abc")
 	other := common.HexToAddress("0x1")
@@ -468,18 +408,19 @@ func TestSelectRepresentativeDealNilAndVoucher(t *testing.T) {
 		{DealID: "1", Client: other, DealType: DealTypePrivate},
 		{DealID: "2", Client: owner, DealType: DealTypePrivate},
 	}
-	got := selectRepresentativeDeal(deals, owner, []VerifiedVoucher{{Owner: owner, Grantee: owner, DealID: big.NewInt(2)}})
+	ownerAccess := &VerifiedAccess{Proof: &VerifiedProof{Requester: owner}}
+	got := selectRepresentativeDeal(deals, ownerAccess)
 	if got == nil || got.DealID != "2" {
 		t.Fatalf("got %+v", got)
 	}
-	// Wrong dealId must not select the same-owner private deal via voucher.
-	got = selectRepresentativeDeal(deals, owner, []VerifiedVoucher{{Owner: owner, Grantee: owner, DealID: big.NewInt(99)}})
-	if got == nil || got.DealID != "2" {
-		// owner matches deal 2 as Client; voucher miss still allows owner match
-		t.Fatalf("owner match want deal 2, got %+v", got)
+	// Access that authorizes no private deal: fall back to first non-nil deal.
+	strangerAccess := &VerifiedAccess{Proof: &VerifiedProof{Requester: common.HexToAddress("0x9")}}
+	got = selectRepresentativeDeal(deals, strangerAccess)
+	if got == nil || got.DealID != "1" {
+		t.Fatalf("fallback first deal want 1, got %+v", got)
 	}
-	// Empty requester: vouchers must not authorize; fall back to first non-nil deal.
-	got = selectRepresentativeDeal(deals, common.Address{}, []VerifiedVoucher{{Owner: owner, Grantee: owner, DealID: big.NewInt(2)}})
+	// No access: fall back to first non-nil deal.
+	got = selectRepresentativeDeal(deals, nil)
 	if got == nil || got.DealID != "1" {
 		t.Fatalf("fallback first deal want 1, got %+v", got)
 	}
@@ -487,10 +428,10 @@ func TestSelectRepresentativeDealNilAndVoucher(t *testing.T) {
 
 func TestPrivateDealAllowedNil(t *testing.T) {
 	t.Parallel()
-	if privateDealAllowed(nil, common.HexToAddress("0x1"), nil) {
+	if privateDealAllowed(nil, nil, common.Address{}) {
 		t.Fatal("nil deal")
 	}
-	if privateDealAllowed(&Deal{DealType: DealTypePublic}, common.HexToAddress("0x1"), nil) {
+	if privateDealAllowed(&Deal{DealType: DealTypePublic}, nil, common.Address{}) {
 		t.Fatal("public")
 	}
 }
@@ -499,43 +440,71 @@ func TestDenyAccessSkipsNilDeals(t *testing.T) {
 	t.Parallel()
 	a := NewAuthorizer()
 	req := httptest.NewRequest(http.MethodGet, "/piece/baga", nil)
-	denied, reason := a.denyAccess(req, []*Deal{nil, {DealID: "1", DealType: DealTypePublic}}, nil, nil)
+	denied, reason, _ := a.denyAccess(req, []*Deal{nil, {DealID: "1", DealType: DealTypePublic}}, nil, nil)
 	if denied || reason != "" {
 		t.Fatalf("denied=%v reason=%q", denied, reason)
 	}
 }
 
-func validShapeToken() *voucherToken {
-	return &voucherToken{
+// encodeSignedShape serializes an arbitrary typed-data object + signature into a
+// signed wire token (for malformed-signature / hash-failure tests).
+func encodeSignedShape(t *testing.T, obj *eip712TypedDataJSON, sig string) string {
+	t.Helper()
+	raw, err := json.Marshal(signedTypedData{
+		Domain:      obj.Domain,
+		Types:       obj.Types,
+		PrimaryType: obj.PrimaryType,
+		Message:     obj.Message,
+		Signature:   sig,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+func validProofShape() *eip712TypedDataJSON {
+	return &eip712TypedDataJSON{
 		Domain: apitypes.TypedDataDomain{
-			Name:    voucherDomainName,
-			Version: voucherDomainVer,
+			Name:    eip712DomainName,
+			Version: eip712DomainVer,
 		},
 		Types: apitypes.Types{
-			voucherPrimaryType: {
-				{Name: voucherTypeGrantee, Type: "address"},
-				{Name: voucherTypeDealID, Type: "uint256"},
-				{Name: voucherTypeDeadline, Type: "uint256"},
+			primaryTypeProof: {
+				{Name: fieldScope, Type: "uint256"},
+				{Name: fieldResource, Type: "string"},
+				{Name: fieldDeadline, Type: "uint256"},
 			},
 		},
-		PrimaryType: voucherPrimaryType,
+		PrimaryType: primaryTypeProof,
 		Message: map[string]any{
-			voucherTypeGrantee:  "0x0000000000000000000000000000000000000001",
-			voucherTypeDealID:   float64(1),
-			voucherTypeDeadline: float64(time.Now().Add(time.Hour).Unix()),
+			fieldScope:    float64(1),
+			fieldResource: testPieceCID,
+			fieldDeadline: float64(time.Now().Add(time.Hour).Unix()),
 		},
-		Signature: "0x" + strings.Repeat("ab", 65),
 	}
 }
 
-func TestVerifyBearerVoucherRequiresDomainPin(t *testing.T) {
-	t.Parallel()
-	ownerKey, _ := mustKey(t)
-	token := mustSignVoucher(t, ownerKey, voucherFields{
-		grantee: common.HexToAddress("0x1"), dealID: 1, deadline: time.Now().Add(time.Hour).Unix(), chainID: 1,
-	})
-	_, err := verifyBearerVoucher(token, time.Now().Unix(), nil)
-	if !errors.Is(err, ErrInvalidVoucher) || !strings.Contains(err.Error(), "domain pin not configured") {
-		t.Fatalf("got %v", err)
+func validVoucherShape() *eip712TypedDataJSON {
+	return &eip712TypedDataJSON{
+		Domain: apitypes.TypedDataDomain{
+			Name:    eip712DomainName,
+			Version: eip712DomainVer,
+		},
+		Types: apitypes.Types{
+			primaryTypeVoucher: {
+				{Name: fieldGrantee, Type: "address"},
+				{Name: fieldScope, Type: "uint256"},
+				{Name: fieldIssuedAt, Type: "uint256"},
+				{Name: fieldDeadline, Type: "uint256"},
+			},
+		},
+		PrimaryType: primaryTypeVoucher,
+		Message: map[string]any{
+			fieldGrantee:  "0x0000000000000000000000000000000000000001",
+			fieldScope:    float64(1),
+			fieldIssuedAt: float64(time.Now().Unix()),
+			fieldDeadline: float64(time.Now().Add(time.Hour).Unix()),
+		},
 	}
 }

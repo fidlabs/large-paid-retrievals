@@ -21,7 +21,7 @@ version: "3"
 # inspect/verify on allow). Clients c1/c2/c3 come from seed-deals summary.json.
 # Pieces under test are c1-private, c1-private-2, c1-public.
 #
-# HTTP — piece existence / public vs private (no vouchers)
+# HTTP — piece existence / public vs private (no credentials)
 # -----------------------------------------------------------------------------
 # H  http HEAD private (anon)              size/existence public; HEAD always 200
 # H  http HEAD private-2 (anon)            same for second private deal
@@ -30,33 +30,35 @@ version: "3"
 # H  http GET public (anon)                public may quote without client → 402/200
 # H  http GET private (paid, non-owner)    Payment + ?client=c2 non-owner → 403
 #
-# HTTP — EIP-712 access vouchers (Bearer)
+# HTTP — EIP-712 Retrieval credentials (RetrievalProof + RetrievalVoucher headers)
 # -----------------------------------------------------------------------------
-# H  http GET private (valid voucher dealId)     Bearer alone (no ?client=) ignored → 403
-# H  http GET private (voucher+client)           Bearer + ?client=grantee → 402/200
-# H  http GET private-2 (valid voucher dealId)   Bearer alone for deal-2 → 403
-# H  http GET private-2 (voucher+client)         Bearer + grantee for deal-2 → 402/200
-# H  http GET private (cross-dealId voucher)     deal-2 voucher on deal-1 piece → 403
-# H  http GET private-2 (cross-dealId voucher)   deal-1 voucher on deal-2 piece → 403
-# H  http GET private (voucher wrong grantee)    Bearer grantee≠?client → 403
-# H  http GET private (voucher+wrong-client)     valid c2 voucher, random ?client → 403
-# H  http GET private (c3 with c2 voucher)       seed c3 + c2-grantee voucher → 403
-# H  http GET private-2 (c3 with c2 voucher)     same for private-2
-# H  http GET private (expired voucher)          past deadline → 403 invalid_voucher JSON
-# H  http GET private (malformed voucher)        garbage Bearer → 403 invalid_voucher JSON
-# H  http GET private (wrong-signer voucher)     signed by non-owner c2 → 403
+# H  http GET private (capability-only)          RetrievalVoucher, no proof → 403 JSON
+# H  http GET private (credential)               proof+voucher headers, no ?client= → 402/200
+# H  http GET private (credential+client)        same with ?client=grantee → 402/200
+# H  http GET private-2 (credential)             proof+voucher for deal-2 → 402/200
+# H  http GET private (owner proof)              owner-direct RetrievalProof only → 402/200
+# H  http GET private (cross-scope credential)   deal-2 voucher on deal-1 piece → 403
+# H  http GET private-2 (cross-scope credential) deal-1 voucher on deal-2 piece → 403
+# H  http GET private (voucher wrong grantee)    c2 proof + other-grantee voucher → 403
+# H  http GET private (c3 binds c2 voucher)      c3 proof key + c2 voucher → 403
+# H  http GET private (expired voucher)          past voucher deadline → 403 JSON
+# H  http GET private (expired proof)            past proof deadline → 403 JSON
+# H  http GET private (proof TTL too far)        deadline > 12h → 403 JSON
+# H  http GET private (wrong resource proof)     proof.resource ≠ path CID → 403 JSON
+# H  http GET private (malformed proof)          garbage RetrievalProof → 403 JSON
+# H  http GET private (wrong-signer voucher)     voucher signed by non-owner → 403
 #
 # Fetch — paid retrieval + CAR verify (bytecut Range resume)
 # -----------------------------------------------------------------------------
-# F  fetch private as owner                      c1 owner allow + car inspect/verify
+# F  fetch private as owner                      c1 owner proof (CDP) + car verify
 # F  fetch private as non-owner                  c2 no voucher → deny at probe
 # F  fetch public as owner                       c1 public allow
 # F  fetch public as non-owner                   c2 public allow
-# F  fetch private with voucher (single-CID)     c2 + matching voucher → pay settle + CAR
+# F  fetch private with voucher (single-CID)     c2 + capability → client mints proof
 # F  rail-check private without voucher          c2 probe private → no usable source
-# F  rail-check private with voucher             c2 + voucher → Challenge details for CID
-# F  rail-check private as c3 with c2 voucher    c3≠grantee → no usable source
-# F  fetch both private with matching vouchers   c2 + both vouchers → both CARs
+# F  rail-check private with voucher             c2 + capability → Challenge details
+# F  rail-check private as c3 with c2 voucher    c3 binds c2 capability → deny
+# F  fetch both private with matching vouchers   c2 + both capabilities → both CARs
 # F  fetch both private with voucher for deal-1 only  incomplete set → deny
 # F  fetch both private with voucher for deal-2 only  incomplete set → deny
 # F  fetch both private as c3 with c2 vouchers   c3≠grantee → deny
@@ -66,10 +68,10 @@ version: "3"
 # =============================================================================
 # Covered well by unit tests (no e2e needed unless regressions): domain pin
 # mismatch (chainId/contract), CDP HTTP errors / pagination / provider filter,
-# voucher crypto (expire, bad sig, multi-header), Payment vs Bearer quoting,
-# private owner/other/HEAD, public paid GET, ignore Bearer without requester,
+# voucher crypto (expire, bad sig, multi-header), Payment vs Retrieval quoting,
+# private owner/other/HEAD, public paid GET, ignore Retrieval without requester,
 # Payment ClientAddress preferred over spoofed ?client= for access,
-# HEAD unrestricted with Bearer/Payment present.
+# HEAD unrestricted with Retrieval/Payment present.
 #
 # Still untested or only partially covered:
 # - Manifest multi-CID entry point (CLI `--cid` / args only in e2e)
@@ -277,8 +279,8 @@ tasks:
         code="$(http_code GET "${proxy_base}/piece/${c1_private_cid}?client=${c2_addr}" -H 'Authorization: Payment dummy')"
         expect_codes "http GET private (paid, non-owner)" "c2" "c1-private" "403" "${code}" 403
 
-        # --- Access vouchers (EIP-712 Bearer) ---
-        # c1 has two private deals (c1-private + c1-private-2) so we can assert dealId binding.
+        # --- Access credentials (EIP-712 Retrieval: proof + optional voucher) ---
+        # c1 has two private deals (c1-private + c1-private-2) so we can assert scope binding.
         c1_private_deal_id="$(jq -r '.[] | select(.slot=="c1-private") | .deal_id' "${summary}")"
         c1_private_2_deal_id="$(jq -r '.[] | select(.slot=="c1-private-2") | .deal_id' "${summary}")"
         [[ -n "${c1_private_deal_id}" && "${c1_private_deal_id}" != "null" ]] || {
@@ -294,13 +296,40 @@ tasks:
           exit 1
         }
         sign_voucher() {
-          # sign_voucher KEY_FILE GRANTEE DEAL_ID [extra args...]
+          # sign_voucher KEY_FILE GRANTEE SCOPE [extra args...]
           local key_file="$1" grantee_addr="$2" deal="$3"
           shift 3
           ./scripts/sign-retrieval-voucher.sh \
             --private-key-file "${key_file}" \
             --grantee "${grantee_addr}" \
-            --deal-id "${deal}" \
+            --scope "${deal}" \
+            --rpc-url "${PAY_RPC_URL}" \
+            --verifying-contract "${POREP_MARKET}" \
+            "$@"
+        }
+        sign_cred() {
+          # sign_cred PROOF_KEY_FILE VOUCHER_TOKEN RESOURCE [extra args...]
+          # Mints a standalone RetrievalProof token (proof of possession) bound to
+          # RESOURCE; it reuses VOUCHER_TOKEN only for its EIP-712 domain/scope.
+          local key_file="$1" voucher_tok="$2" resource="$3"
+          shift 3
+          ./scripts/sign-retrieval-credential.sh \
+            --private-key-file "${key_file}" \
+            --voucher "${voucher_tok}" \
+            --resource "${resource}" \
+            --rpc-url "${PAY_RPC_URL}" \
+            --verifying-contract "${POREP_MARKET}" \
+            "$@"
+        }
+        sign_owner_cred() {
+          # sign_owner_cred OWNER_KEY_FILE SCOPE RESOURCE [extra args...]
+          local key_file="$1" deal="$2" resource="$3"
+          shift 3
+          ./scripts/sign-retrieval-credential.sh \
+            --private-key-file "${key_file}" \
+            --owner-direct \
+            --scope "${deal}" \
+            --resource "${resource}" \
             --rpc-url "${PAY_RPC_URL}" \
             --verifying-contract "${POREP_MARKET}" \
             "$@"
@@ -338,58 +367,76 @@ tasks:
           echo "    ${case}: HTTP 403 invalid_voucher (ok)"
         }
 
-        echo "** HTTP voucher probes via sp-proxy :${sp_proxy_port} (deal_ids=${c1_private_deal_id},${c1_private_2_deal_id})"
-        # Bearer without requester is ignored; need ?client=grantee for voucher access.
+        echo "** HTTP credential probes via sp-proxy :${sp_proxy_port} (deal_ids=${c1_private_deal_id},${c1_private_2_deal_id})"
         voucher_ok="$(sign_voucher "${c1_key}" "${c2_addr}" "${c1_private_deal_id}" --expires-in 3600)"
-        code="$(http_code GET "${proxy_base}/piece/${c1_private_cid}" -H "Authorization: Bearer ${voucher_ok}")"
-        expect_codes "http GET private (valid voucher dealId)" "c2" "c1-private" "403" "${code}" 403
-
-        code="$(http_code GET "${proxy_base}/piece/${c1_private_cid}?client=${c2_addr}" -H "Authorization: Bearer ${voucher_ok}")"
-        expect_codes "http GET private (voucher+client)" "c2" "c1-private" "402/200" "${code}" 402 200
-
         voucher_ok_2="$(sign_voucher "${c1_key}" "${c2_addr}" "${c1_private_2_deal_id}" --expires-in 3600)"
-        code="$(http_code GET "${proxy_base}/piece/${c1_private_2_cid}" -H "Authorization: Bearer ${voucher_ok_2}")"
-        expect_codes "http GET private-2 (valid voucher dealId)" "c2" "c1-private-2" "403" "${code}" 403
+        proof_ok="$(sign_cred "${c2_key}" "${voucher_ok}" "${c1_private_cid}")"
+        proof_ok_2="$(sign_cred "${c2_key}" "${voucher_ok_2}" "${c1_private_2_cid}")"
 
-        code="$(http_code GET "${proxy_base}/piece/${c1_private_2_cid}?client=${c2_addr}" -H "Authorization: Bearer ${voucher_ok_2}")"
-        expect_codes "http GET private-2 (voucher+client)" "c2" "c1-private-2" "402/200" "${code}" 402 200
+        # Sad: capability voucher alone (no RetrievalProof) is not authorized (proof required).
+        http_body_code GET "${proxy_base}/piece/${c1_private_cid}?client=${c2_addr}" -H "Authorization: RetrievalVoucher ${voucher_ok}"
+        expect_voucher_json_error "http GET private (capability-only)" "c2" "c1-private" "${http_got_code}" "${http_got_body}"
 
-        # Sad: same-owner cross-dealId — voucher for private-2 must not open private piece (and vice versa).
-        code="$(http_code GET "${proxy_base}/piece/${c1_private_cid}?client=${c2_addr}" -H "Authorization: Bearer ${voucher_ok_2}")"
-        expect_codes "http GET private (cross-dealId voucher)" "c2" "c1-private" "403" "${code}" 403
+        # Happy: proof provides requester identity (no ?client= required); voucher delegates.
+        code="$(http_code GET "${proxy_base}/piece/${c1_private_cid}" -H "Authorization: RetrievalProof ${proof_ok}" -H "Authorization: RetrievalVoucher ${voucher_ok}")"
+        expect_codes "http GET private (credential)" "c2" "c1-private" "402/200" "${code}" 402 200
 
-        code="$(http_code GET "${proxy_base}/piece/${c1_private_2_cid}?client=${c2_addr}" -H "Authorization: Bearer ${voucher_ok}")"
-        expect_codes "http GET private-2 (cross-dealId voucher)" "c2" "c1-private-2" "403" "${code}" 403
+        code="$(http_code GET "${proxy_base}/piece/${c1_private_cid}?client=${c2_addr}" -H "Authorization: RetrievalProof ${proof_ok}" -H "Authorization: RetrievalVoucher ${voucher_ok}")"
+        expect_codes "http GET private (credential+client)" "c2" "c1-private" "402/200" "${code}" 402 200
 
-        # Sad: otherwise-valid voucher signed for a different grantee than ?client=.
+        code="$(http_code GET "${proxy_base}/piece/${c1_private_2_cid}" -H "Authorization: RetrievalProof ${proof_ok_2}" -H "Authorization: RetrievalVoucher ${voucher_ok_2}")"
+        expect_codes "http GET private-2 (credential)" "c2" "c1-private-2" "402/200" "${code}" 402 200
+
+        # Happy: owner-direct RetrievalProof (no voucher).
+        owner_proof="$(sign_owner_cred "${c1_key}" "${c1_private_deal_id}" "${c1_private_cid}")"
+        code="$(http_code GET "${proxy_base}/piece/${c1_private_cid}" -H "Authorization: RetrievalProof ${owner_proof}")"
+        expect_codes "http GET private (owner proof)" "c1" "c1-private" "402/200" "${code}" 402 200
+
+        # Sad: cross-scope — a voucher scoped to private-2 must not open the private piece.
+        # The proof binds the requested piece CID (resource matches); the voucher scope fails.
+        code="$(http_code GET "${proxy_base}/piece/${c1_private_cid}" -H "Authorization: RetrievalProof $(sign_cred "${c2_key}" "${voucher_ok_2}" "${c1_private_cid}")" -H "Authorization: RetrievalVoucher ${voucher_ok_2}")"
+        expect_codes "http GET private (cross-scope credential)" "c2" "c1-private" "403" "${code}" 403
+
+        code="$(http_code GET "${proxy_base}/piece/${c1_private_2_cid}" -H "Authorization: RetrievalProof $(sign_cred "${c2_key}" "${voucher_ok}" "${c1_private_2_cid}")" -H "Authorization: RetrievalVoucher ${voucher_ok}")"
+        expect_codes "http GET private-2 (cross-scope credential)" "c2" "c1-private-2" "403" "${code}" 403
+
+        # Sad: voucher for a different grantee; proof signed by c2 → grantee≠proof signer → plain 403.
         other_grantee="0x00000000000000000000000000000000000000bb"
         voucher_other_grantee="$(sign_voucher "${c1_key}" "${other_grantee}" "${c1_private_deal_id}" --expires-in 3600)"
-        code="$(http_code GET "${proxy_base}/piece/${c1_private_cid}?client=${c2_addr}" -H "Authorization: Bearer ${voucher_other_grantee}")"
+        code="$(http_code GET "${proxy_base}/piece/${c1_private_cid}" -H "Authorization: RetrievalProof $(sign_cred "${c2_key}" "${voucher_other_grantee}" "${c1_private_cid}")" -H "Authorization: RetrievalVoucher ${voucher_other_grantee}")"
         expect_codes "http GET private (voucher wrong grantee)" "c2" "c1-private" "403" "${code}" 403
 
-        # Sad: valid voucher for c2, but ?client= is neither owner nor signed grantee.
-        code="$(http_code GET "${proxy_base}/piece/${c1_private_cid}?client=0x00000000000000000000000000000000000000aa" -H "Authorization: Bearer ${voucher_ok}")"
-        expect_codes "http GET private (voucher+wrong-client)" "other" "c1-private" "403" "${code}" 403
+        # Sad: c3 binds a valid c2-grantee voucher (proof signer ≠ grantee) → plain 403.
+        code="$(http_code GET "${proxy_base}/piece/${c1_private_cid}" -H "Authorization: RetrievalProof $(sign_cred "${c3_key}" "${voucher_ok}" "${c1_private_cid}")" -H "Authorization: RetrievalVoucher ${voucher_ok}")"
+        expect_codes "http GET private (c3 binds c2 voucher)" "c3" "c1-private" "403" "${code}" 403
 
-        # Sad: c3 presents a valid c2-grantee voucher for c1 private pieces (?client=c3 ≠ grantee).
-        code="$(http_code GET "${proxy_base}/piece/${c1_private_cid}?client=${c3_addr}" -H "Authorization: Bearer ${voucher_ok}")"
-        expect_codes "http GET private (c3 with c2 voucher)" "c3" "c1-private" "403" "${code}" 403
-        code="$(http_code GET "${proxy_base}/piece/${c1_private_2_cid}?client=${c3_addr}" -H "Authorization: Bearer ${voucher_ok_2}")"
-        expect_codes "http GET private-2 (c3 with c2 voucher)" "c3" "c1-private-2" "403" "${code}" 403
-
-        # Sad: expired voucher → 403 JSON (requires requester so vouchers are verified).
+        # Sad: expired voucher → 403 JSON (voucher diagnostic; proof itself is valid).
         voucher_expired="$(sign_voucher "${c1_key}" "${c2_addr}" "${c1_private_deal_id}" \
           --deadline "$(($(date +%s) - 60))" --allow-past-deadline)"
-        http_body_code GET "${proxy_base}/piece/${c1_private_cid}?client=${c2_addr}" -H "Authorization: Bearer ${voucher_expired}"
+        http_body_code GET "${proxy_base}/piece/${c1_private_cid}" -H "Authorization: RetrievalProof ${proof_ok}" -H "Authorization: RetrievalVoucher ${voucher_expired}"
         expect_voucher_json_error "http GET private (expired voucher)" "c2" "c1-private" "${http_got_code}" "${http_got_body}"
 
-        # Sad: malformed bearer token → 403 JSON.
-        http_body_code GET "${proxy_base}/piece/${c1_private_cid}?client=${c2_addr}" -H 'Authorization: Bearer not-a-valid-voucher'
-        expect_voucher_json_error "http GET private (malformed voucher)" "c2" "c1-private" "${http_got_code}" "${http_got_body}"
+        # Sad: expired proof → 403 JSON (fatal proof).
+        http_body_code GET "${proxy_base}/piece/${c1_private_cid}" -H "Authorization: RetrievalProof $(sign_cred "${c2_key}" "${voucher_ok}" "${c1_private_cid}" \
+          --proof-deadline "$(($(date +%s) - 60))" --allow-past-deadline)" -H "Authorization: RetrievalVoucher ${voucher_ok}"
+        expect_voucher_json_error "http GET private (expired proof)" "c2" "c1-private" "${http_got_code}" "${http_got_body}"
 
-        # Sad: voucher signed by non-owner (c2) — signature verifies but owner ≠ deal client.
+        # Sad: proof deadline beyond MAX_PROOF_TTL (12h) → 403 JSON (fatal proof).
+        http_body_code GET "${proxy_base}/piece/${c1_private_cid}" -H "Authorization: RetrievalProof $(sign_cred "${c2_key}" "${voucher_ok}" "${c1_private_cid}" \
+          --proof-expires-in $((12 * 3600 + 60)) --allow-far-deadline)" -H "Authorization: RetrievalVoucher ${voucher_ok}"
+        expect_voucher_json_error "http GET private (proof TTL too far)" "c2" "c1-private" "${http_got_code}" "${http_got_body}"
+
+        # Sad: proof.resource ≠ path CID → 403 JSON (fatal proof).
+        http_body_code GET "${proxy_base}/piece/${c1_private_cid}" -H "Authorization: RetrievalProof $(sign_cred "${c2_key}" "${voucher_ok}" "${c1_private_2_cid}")" -H "Authorization: RetrievalVoucher ${voucher_ok}"
+        expect_voucher_json_error "http GET private (wrong resource proof)" "c2" "c1-private" "${http_got_code}" "${http_got_body}"
+
+        # Sad: malformed RetrievalProof token → 403 JSON (fatal proof).
+        http_body_code GET "${proxy_base}/piece/${c1_private_cid}?client=${c2_addr}" -H 'Authorization: RetrievalProof not-a-valid-proof'
+        expect_voucher_json_error "http GET private (malformed proof)" "c2" "c1-private" "${http_got_code}" "${http_got_body}"
+
+        # Sad: voucher signed by non-owner (c2) — signature verifies but owner ≠ deal client → plain 403.
         voucher_wrong="$(sign_voucher "${c2_key}" "${c2_addr}" "${c1_private_deal_id}" --expires-in 3600)"
-        code="$(http_code GET "${proxy_base}/piece/${c1_private_cid}?client=${c2_addr}" -H "Authorization: Bearer ${voucher_wrong}")"
+        code="$(http_code GET "${proxy_base}/piece/${c1_private_cid}" -H "Authorization: RetrievalProof $(sign_cred "${c2_key}" "${voucher_wrong}" "${c1_private_cid}")" -H "Authorization: RetrievalVoucher ${voucher_wrong}")"
         expect_codes "http GET private (wrong-signer voucher)" "c2" "c1-private" "403" "${code}" 403
 
         fetch_ok() {

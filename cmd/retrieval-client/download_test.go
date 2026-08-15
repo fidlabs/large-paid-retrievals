@@ -79,7 +79,7 @@ func TestDownloadCARSuccess(t *testing.T) {
 	}
 }
 
-func TestDownloadCARPaymentAndBearerVouchers(t *testing.T) {
+func TestDownloadCARPaymentAndRetrievalVouchers(t *testing.T) {
 	const cid = "bafyVoucherOk"
 	const client = "0x1111111111111111111111111111111111111111"
 	body := []byte("CAR-WITH-VOUCHER")
@@ -89,7 +89,7 @@ func TestDownloadCARPaymentAndBearerVouchers(t *testing.T) {
 			return
 		}
 		auths := r.Header.Values("Authorization")
-		want := []string{"Payment test", "Bearer tok-a", "Bearer tok-b"}
+		want := []string{"Payment test", "RetrievalProof tok-a", "RetrievalVoucher tok-b"}
 		if len(auths) != len(want) {
 			http.Error(w, fmt.Sprintf("Authorization=%v", auths), http.StatusUnauthorized)
 			return
@@ -111,7 +111,7 @@ func TestDownloadCARPaymentAndBearerVouchers(t *testing.T) {
 		t.Fatal(err)
 	}
 	outDir := t.TempDir()
-	err = downloadCAR(http.DefaultClient, base, cid, "/piece/"+cid, client, "Payment test", outDir, int64(len(body)), noopProgress{}, false, []string{"tok-a", "tok-b"})
+	err = downloadCAR(http.DefaultClient, base, cid, "/piece/"+cid, client, "Payment test", outDir, int64(len(body)), noopProgress{}, false, []string{"RetrievalProof tok-a", "RetrievalVoucher tok-b"})
 	if err != nil {
 		t.Fatal(err)
 	}
