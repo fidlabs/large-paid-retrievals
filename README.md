@@ -10,7 +10,7 @@ HTTP tools for retrieving **pieces** (CAR files) that are part of datasets store
 
 **Binaries:** `retrieval-client` (fetch) and `sp-proxy` (paid gateway in front of an SP piece server).
 
-**Authorization:** who may retrieve a piece is decided by the deal in CDP / on-chain PoRep market state — **`dealType`** (`public` or `private`) and **`clientAddress`** (deal owner). Public deals: any client may probe/quote/download (subject to payment). Private dataset pieces: the deal owner (`clientAddress`) and owner-delegated wallets (valid access voucher) may retrieve; others get `403`. Piece existence and size remain public (`HEAD` is always allowed). Payment (MPP / Filecoin Pay) is separate: it settles the quoted USDFC after access is allowed. Details: [Piece access](#piece-access-public-vs-private).
+**Authorization:** who may retrieve a piece is decided by the deal in CDP / on-chain PoRep market state — **`dealType`** (`public` or `private`) and **`clientAddress`** (deal owner). Public deals: any client may probe/quote/download (subject to payment). Private dataset pieces always require a short-lived `Authorization: RetrievalProof` (proof of possession) bound to the piece CID: the deal owner signs that proof directly, or a delegate signs it and also presents a matching owner-signed `Authorization: RetrievalVoucher`. `?client=` / Payment alone is not enough. Others get `403`. Piece existence and size remain public (`HEAD` is always allowed). Payment (MPP / Filecoin Pay) is separate: it settles the quoted USDFC after access is allowed. Details: [Piece access](#piece-access-public-vs-private).
 
 ### Design context
 
@@ -172,10 +172,10 @@ SPs store deal **pieces** and serve them over HTTP (typically Curio or Boost) at
 GET /piece/<piece-cid>
 ```
 
-**`sp-proxy`** sits in front of that upstream server. CDP deal lookup is **always on** (not optional): public/private access and vouchers are enforced from CDP PoRep metadata. It:
+**`sp-proxy`** sits in front of that upstream server. CDP deal lookup is **always on** (not optional): public/private access and retrieval credentials are enforced from CDP PoRep metadata. It:
 
-1. Resolves piece access from CDP PoRep deal metadata (`dealType`, `clientAddress`) scoped to your miner (`--porep-provider-id`), including owner-delegated voucher authorization for private dataset pieces.
-2. Enforces private dataset-piece authorization for the deal owner or valid owner-delegated voucher wallets.
+1. Resolves piece access from CDP PoRep deal metadata (`dealType`, `clientAddress`) scoped to your miner (`--porep-provider-id`).
+2. Enforces private dataset-piece authorization via a required `RetrievalProof` (owner-direct when the proof signer is the deal owner; otherwise a matching `RetrievalVoucher` must also authorize the proof signer).
 3. Returns **`402`** with an MPP challenge (quoted `price_usdfc`) when a client requests a piece without payment.
 4. Verifies the client’s MPP credential and **settles once** on Filecoin Pay.
 5. **Proxies** the upstream `GET` only after authorization and settlement succeed.
@@ -285,27 +285,35 @@ Optional: expose **`HEAD`** on the public proxy path for client size probes (the
 | `--porep-market-address` | PoRep Market `0x` for EIP-712 voucher domain pin. Overrides chain default (mainnet/Calibration placeholders). **Required on devnet**; startup fails if unresolved |
 | `--pay-debug`, `--verbose` | Diagnostics |
 
-Piece access resolves PoRep deals via [CDP](https://cdp.allocator.tech) (`GET /po-rep/deals?pieceCID=…`), which returns deal JSON including `dealType` and `clientAddress`. For private dataset pieces, access may be either direct owner access (`clientAddress`) or delegated voucher access (owner-signed EIP-712 retrieval voucher for the requester wallet and deal). CDP deal lookup is **always enabled** (URL defaults to `https://cdp.allocator.tech`; override with `--porep-cdp-url`). `--porep-provider-id` is **required** so results are scoped to deals you serve. `source ./scripts/devnet-env.sh` sets `SP_PROXY_POREP_CDP_URL=http://127.0.0.1:23300` and `POREP_PROVIDER_ID` for local FCSS CDP.
+Piece access resolves PoRep deals via [CDP](https://cdp.allocator.tech) (`GET /po-rep/deals?pieceCID=…`), which returns deal JSON including `dealType` and `clientAddress`. For private dataset pieces, every gated `GET` needs an `Authorization: RetrievalProof`: **owner-direct** when that proof is signed by `clientAddress`, or **delegated** when it is signed by a grantee who also presents a matching owner-signed `Authorization: RetrievalVoucher`. CDP deal lookup is **always enabled** (URL defaults to `https://cdp.allocator.tech`; override with `--porep-cdp-url`). `--porep-provider-id` is **required** so results are scoped to deals you serve. `source ./scripts/devnet-env.sh` sets `SP_PROXY_POREP_CDP_URL=http://127.0.0.1:23300` and `POREP_PROVIDER_ID` for local FCSS CDP.
 
 ### Piece access (public vs private)
 
-Deal metadata and piece CIDs are on the public chain (and in CDP), so **existence and size are not secrets**. `pieceaccess` only restricts who may obtain a quote or download CAR bytes. For private dataset pieces, the requester identity is the signer of the `Authorization: RetrievalProof` (proof of possession) token, which binds the exact piece CID. Allowed requesters are the deal owner (owner-direct proof) and any wallet presenting a valid owner-signed `Authorization: RetrievalVoucher` for that deal (voucher `scope` must match the deal id and its `grantee` must equal the proof signer). For paid GETs the Payment `ClientAddress` must also equal the proof signer. A private piece with no valid proof is denied.
+Deal metadata and piece CIDs are on the public chain (and in CDP), so **existence and size are not secrets**. `pieceaccess` only restricts who may obtain a quote or download CAR bytes.
+
+For private dataset pieces:
+
+- A short-lived **`Authorization: RetrievalProof`** (proof of possession) is **always required**, including for the deal owner. It binds the exact piece CID; the recovered signer is the requester.
+- **Owner-direct:** proof signer == deal `clientAddress` (no voucher).
+- **Delegated:** proof signer == voucher `grantee`, voucher signed by the deal owner, and voucher `scope` == deal id. Clients may send many `Authorization: RetrievalVoucher` headers; the SP uses whichever matches.
+- For paid GETs, Payment `ClientAddress` must equal the proof signer.
+- `?client=` alone never authorizes a private piece. Missing/invalid proof → denied.
 
 | Request | Public deal | Private dataset piece |
 |---------|-------------|--------------|
 | `HEAD /piece/<cid>` | Always allowed (no client). Used for size probes. | Always allowed (no client). |
-| Anonymous `GET` (no `?client=`, no `Authorization`) | Allowed → `200` (free) or `402` (paid quote). | **403 Forbidden** — probe must retry with identity. |
-| `GET ?client=<0x…>` (no payment yet) | Allowed → `200` / `402`. | Allowed if `client` is the deal owner **or** presents a valid voucher for the deal → `200` / `402`; otherwise **403**. |
-| `GET` with `?client=` **and** `Authorization: Payment …` | Allowed (after payment settles). | Allowed if requester is the deal owner or has a valid voucher for the deal; otherwise **403**. Missing deal in CDP → **403** (default-deny). |
+| Anonymous `GET` (no credentials) | Allowed → `200` (free) or `402` (paid quote). | **403 Forbidden** — probe must retry with a `RetrievalProof`. |
+| `GET` with `Authorization: RetrievalProof` (and optional `RetrievalVoucher`s; `?client=` optional) | Allowed → `200` / `402`. | Allowed if the proof authorizes the deal (owner-direct or matching voucher) → `200` / `402`; otherwise **403**. |
+| Same + `Authorization: Payment …` | Allowed (after payment settles). | Same proof/voucher rules; Payment `ClientAddress` must match the proof signer. Missing deal in CDP → **403** (default-deny). |
 | Any `GET` when CDP lookup errors (network/HTTP/JSON) | **403 Forbidden** (fail closed). `HEAD` still allowed. | Same. `ErrDealNotFound` (empty result) still allows unpaid probes. |
 
 **Client probe sequence** (`retrieval-client` / `pieceurls`):
 
 1. `HEAD` — always anonymous; learns `Content-Length` when the SP allows it.
 2. Anonymous `GET` — succeeds for public pieces (`200`/`402`).
-3. On **403**, retry the same `GET` with `?client=<wallet>` (the fetch wallet), a minted `Authorization: RetrievalProof`, and any available vouchers as repeated `Authorization: RetrievalVoucher` headers. Anonymous probes never send credentials. The deal owner, or a voucher-delegated wallet, gets a quote; unauthorized wallets stay denied and that endpoint is skipped.
+3. On **403**, retry the same `GET` with a minted `Authorization: RetrievalProof` (and any `--voucher` capabilities as `Authorization: RetrievalVoucher`). Owners mint an owner-direct proof; delegates mint a proof and forward vouchers. Anonymous probes never send credentials. Unauthorized wallets stay denied and that endpoint is skipped.
 
-See [docs/access-vouchers-eip712.md](docs/access-vouchers-eip712.md) for voucher format and client usage.
+See [docs/access-vouchers-eip712.md](docs/access-vouchers-eip712.md) for proof/voucher format and client usage.
 
 Paid download still sends `Authorization: Payment …` (and usually `?client=`); access is checked again before settlement and upstream proxying.
 
