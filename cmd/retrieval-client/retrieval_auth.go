@@ -160,15 +160,13 @@ func ethChainID(ctx context.Context, rpcURL string) (*big.Int, error) {
 // buildRetrievalAuth resolves the EIP-712 domain (chainId from the pay RPC +
 // PoRep market) used for owner-direct proofs and as a fallback for delegated
 // proofs. When --voucher is set, every token is checked for wire format,
-// non-expiry, and a recoverable signature before the client proceeds. The
-// cdpURL/providerID arguments are accepted for CLI compatibility but are no
-// longer required for client-side minting (the SP binds the deal via the piece CID).
+// non-expiry, and a recoverable signature before the client proceeds. The SP
+// binds deals via piece CID (CDP); the client does not look up CDP.
 func buildRetrievalAuth(
 	ctx context.Context,
 	key *ecdsa.PrivateKey,
 	capabilities []string,
-	payRPCURL, _cdpURL, marketOverride string,
-	_providerID uint64,
+	payRPCURL, marketOverride string,
 ) (*retrievalAuthConfig, error) {
 	cfg := &retrievalAuthConfig{key: key}
 	chainID, err := ethChainID(ctx, payRPCURL)
