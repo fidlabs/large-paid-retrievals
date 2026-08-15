@@ -399,7 +399,7 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 					if verbose {
 						fmt.Printf("  - downloading free CAR for CID %s from %s\n", it.CID, it.Base.String())
 					}
-					return downloadFreeCAR(cli, it.Base, it.CID, outDir, it.TotalBytes, pieceUI, verbose, tokens)
+					return downloadFreeCAR(cli, it.Base, it.CID, client, outDir, it.TotalBytes, pieceUI, verbose, tokens)
 				}
 				piecePath := "/piece/" + it.CID
 				if verbose {
@@ -524,8 +524,8 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 	c.Flags().StringVar(&payPaymentsAddress, "pay-payments-address", getenv("SP_PROXY_PAY_PAYMENTS_ADDRESS", ""), "Filecoin Pay payments contract (0x); empty uses chain default")
 	c.Flags().StringVar(&payTokenAddress, "pay-token-address", getenv("SP_PROXY_PAY_TOKEN_ADDRESS", ""), "USDFC token (0x); empty uses chain default (required override on Curio/FOC localnet)")
 	c.Flags().StringArrayVar(&vouchers, "voucher", nil, "EIP-712 RetrievalVoucher capability (base64url); repeat for multiple deals. Each token is checked for format, expiry, and signature at startup, then forwarded as Authorization: RetrievalVoucher with a minted per-CID Authorization: RetrievalProof")
-	c.Flags().StringVar(&porepCDPURL, "porep-cdp-url", firstEnv("SP_PROXY_POREP_CDP_URL", "POREP_CDP_URL"), "CDP base URL for owner-direct proof minting when --voucher is omitted (e.g. http://127.0.0.1:23300)")
-	c.Flags().Uint64Var(&porepProviderID, "porep-provider-id", mustParseUint64Env("0", "SP_PROXY_POREP_PROVIDER_ID", "POREP_PROVIDER_ID"), "Miner actor ID for CDP owner-proof minting; 0 disables owner CDP lookup")
+	c.Flags().StringVar(&porepCDPURL, "porep-cdp-url", firstEnv("SP_PROXY_POREP_CDP_URL", "POREP_CDP_URL"), "Unused (accepted for CLI compatibility); client no longer looks up deals in CDP when minting proofs")
+	c.Flags().Uint64Var(&porepProviderID, "porep-provider-id", mustParseUint64Env("0", "SP_PROXY_POREP_PROVIDER_ID", "POREP_PROVIDER_ID"), "Unused (accepted for CLI compatibility); client no longer looks up deals in CDP when minting proofs")
 	c.Flags().StringVar(&porepMarketAddress, "porep-market-address", firstEnv("SP_PROXY_POREP_MARKET_ADDRESS", "POREP_MARKET"), "PoRep Market (0x) for owner-direct EIP-712 domain; required on chains without a built-in default")
 	return c
 }
@@ -778,9 +778,9 @@ func cmdRailCheck(keyOpts *filpayKeyOpts) *cobra.Command {
 	c.Flags().StringVar(&payPaymentsAddress, "pay-payments-address", getenv("SP_PROXY_PAY_PAYMENTS_ADDRESS", ""), "Filecoin Pay payments contract (0x); empty uses chain default")
 	c.Flags().StringVar(&payTokenAddress, "pay-token-address", getenv("SP_PROXY_PAY_TOKEN_ADDRESS", ""), "USDFC token (0x); empty uses chain default (required override on Curio/FOC localnet)")
 	c.Flags().StringArrayVar(&vouchers, "voucher", nil, "EIP-712 RetrievalVoucher capability (base64url); repeat for multiple deals. Each token is checked for format, expiry, and signature at startup, then forwarded as Authorization: RetrievalVoucher with a minted per-CID Authorization: RetrievalProof when probing CIDs for payees")
-	c.Flags().StringVar(&porepCDPURL, "porep-cdp-url", firstEnv("SP_PROXY_POREP_CDP_URL", "POREP_CDP_URL"), "CDP base URL for owner-direct proof minting when --voucher is omitted")
-	c.Flags().Uint64Var(&porepProviderID, "porep-provider-id", mustParseUint64Env("0", "SP_PROXY_POREP_PROVIDER_ID", "POREP_PROVIDER_ID"), "Miner actor ID for CDP owner-proof minting; 0 disables owner CDP lookup")
-	c.Flags().StringVar(&porepMarketAddress, "porep-market-address", firstEnv("SP_PROXY_POREP_MARKET_ADDRESS", "POREP_MARKET"), "PoRep Market (0x) for owner-direct EIP-712 domain")
+	c.Flags().StringVar(&porepCDPURL, "porep-cdp-url", firstEnv("SP_PROXY_POREP_CDP_URL", "POREP_CDP_URL"), "Unused (accepted for CLI compatibility); client no longer looks up deals in CDP when minting proofs")
+	c.Flags().Uint64Var(&porepProviderID, "porep-provider-id", mustParseUint64Env("0", "SP_PROXY_POREP_PROVIDER_ID", "POREP_PROVIDER_ID"), "Unused (accepted for CLI compatibility); client no longer looks up deals in CDP when minting proofs")
+	c.Flags().StringVar(&porepMarketAddress, "porep-market-address", firstEnv("SP_PROXY_POREP_MARKET_ADDRESS", "POREP_MARKET"), "PoRep Market (0x) for owner-direct EIP-712 domain; required on chains without a built-in default")
 	return c
 }
 

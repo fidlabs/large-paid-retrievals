@@ -57,10 +57,9 @@ func downloadCAR(cli *http.Client, base *url.URL, cid, piecePath, client0x, auth
 	if authorization != "" {
 		req.Header.Set("Authorization", authorization)
 	}
-	// Credentials bind to a requester identity; omit on anonymous downloads.
-	if strings.TrimSpace(client0x) != "" {
-		pieceurls.AddAuthorizationHeaders(req.Header, authHeaders)
-	}
+	// RetrievalProof provides requester identity; attach whenever present (including
+	// free private downloads that probed with credentials then download without Payment).
+	pieceurls.AddAuthorizationHeaders(req.Header, authHeaders)
 	outPath := filepath.Join(outDir, sanitizeFilename(cid)+".car")
 	partialPath := outPath + ".partial"
 	paid := authorization != ""
@@ -266,11 +265,11 @@ func isRetryableDownloadError(err error) bool {
 	return errors.As(err, &retryable)
 }
 
-func downloadFreeCAR(cli *http.Client, base *url.URL, cid, outDir string, expectedTotal int64, ui ProgressUI, verbose bool, authHeaders []string) error {
+func downloadFreeCAR(cli *http.Client, base *url.URL, cid, client0x, outDir string, expectedTotal int64, ui ProgressUI, verbose bool, authHeaders []string) error {
 	u := *base
 	piecePath := "/piece/" + cid
 	u.Path = piecePath
-	return downloadCAR(cli, &u, cid, piecePath, "", "", outDir, expectedTotal, ui, verbose, authHeaders)
+	return downloadCAR(cli, &u, cid, piecePath, client0x, "", outDir, expectedTotal, ui, verbose, authHeaders)
 }
 
 func copyWithProgress(dst io.Writer, src io.Reader, cid string, total, initialWritten int64, ui ProgressUI) (int64, error) {
