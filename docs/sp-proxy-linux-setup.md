@@ -37,7 +37,7 @@ When you move the ports and put up the proxy in front of your SP software **ther
 
 1. Are logged in to the Linux host where Curio/Boost already runs.
 2. Know the public internet IP address and TCP port number of your existing Curio/Boost piece server.
-3. Have the ability to change the Curio/Boost retrieval layer  **listen** address (check their published documentation) and pick a free **local** port .
+3. Have the ability to change the Curio/Boost retrieval layer **listen** address (check their published documentation for details) and pick a free **local** port .
 4. Have access to some **FIL** for settlement gas (settler wallet).
 5. Have root/sudo permission on the Linux host for systemd + firewall.
 
@@ -58,6 +58,11 @@ This recipe is made to get up and running quickly on a regular Linux-based SP. W
 
 ## Step 0 — Prepare shell environment and confirm existing system is working
 
+Install required tools
+
+1. [Go language support ](https://go.dev/dl/) (or from your distro) - Need **Go 1.26.6+**.
+2. [Foundry `cast`](https://book.getfoundry.sh/getting-started/installation)
+
 Make sure you have the following values in your shell environment:
 
 (Replace every `REPLACE_*` value below with the actual values for your system.)
@@ -76,8 +81,6 @@ curl -sS -D- -o /dev/null --head "http://${PUBLIC_IP}:${PUBLIC_PORT}/piece/${PIE
 
 The test passes if you receive **HTTP 200** and a positive **`Content-Length`**.
 
-
-
 ## Step 1 — Pick a working directory
 
 ```bash
@@ -88,19 +91,7 @@ cd /opt/sp-proxy
 
 ---
 
-## Step 2 — Install Go
-
-Need **Go 1.26.6+**.
-
-```bash
-go version
-```
-
-If missing, install from [https://go.dev/dl/](https://go.dev/dl/) (or your distro), then confirm `go version` again.
-
----
-
-## Step 3 — Choose a localhost upstream port
+## Step 2 — Choose a localhost upstream port
 
 Pick a free **local** port Curio/Boost will use after cutover (not the public port):
 
@@ -113,7 +104,7 @@ If it is taken, pick another free port and use that everywhere below.
 
 ---
 
-## Step 4 — Build `sp-proxy`
+## Step 3 — Build `sp-proxy`
 
 ```bash
 cd /opt/sp-proxy
@@ -127,7 +118,7 @@ chmod 755 /opt/sp-proxy/sp-proxy
 
 ---
 
-## Step 5 — Create a wallet to receive your payments
+## Step 4 — Create a wallet to receive your payments
 
 There is no on-chain “register wallet” step. A settler wallet is a secp256k1 private key; the `0x` address is derived from it. Fund that address with FIL on mainnet when you are ready.
 
@@ -137,7 +128,7 @@ openssl rand -hex 32 > sp.key
 chmod 600 sp.key
 ```
 
-Show the wallet address (needs [Foundry `cast`](https://book.getfoundry.sh/getting-started/installation)):
+Show the wallet address):
 
 ```bash
 cast wallet address --private-key "0x$(tr -d '\n' < sp.key)"
@@ -151,7 +142,7 @@ Keep a secure offline backup of `sp.key`.
 
 ---
 
-## Step 6 — Write env for systemd
+## Step 5 — Write env for systemd
 
 ```bash
 cd /opt/sp-proxy
@@ -173,11 +164,11 @@ chmod 600 /opt/sp-proxy/sp-proxy.env
 
 ---
 
-## Step 7 — Cutover (brief downtime)
+## Step 6 — Cutover (brief downtime)
 
 Do these in order. Aim to finish quickly.
 
-### 7a — Rebind Curio/Boost to localhost
+### 6a — Rebind Curio/Boost to localhost
 
 In Curio/Boost config, change the HTTP piece listener from the public interface to:
 
@@ -189,7 +180,7 @@ In Curio/Boost config, change the HTTP piece listener from the public interface 
 
 Restart Curio/Boost as you normally would.
 
-### 7b — Verify Curio/Boost is local-only and still serves HEAD
+### 6b — Verify Curio/Boost is local-only and still serves HEAD
 
 ```bash
 # Must work on loopback:
@@ -212,7 +203,7 @@ Also confirm the **old public port is free** so `sp-proxy` can take it:
 ss -ltn | grep ":${PUBLIC_PORT} " || echo "public port ${PUBLIC_PORT} is free"
 ```
 
-### 7c — Start `sp-proxy` on the old public address
+### 6c — Start `sp-proxy` on the old public address
 
 Foreground smoke test first:
 
@@ -250,7 +241,7 @@ Stop the foreground process with Ctrl+C when this looks good, then install syste
 
 ---
 
-## Step 8 — Install a systemd service
+## Step 7 — Install a systemd service
 
 ```bash
 sudo tee /etc/systemd/system/sp-proxy.service >/dev/null <<'EOF'
@@ -292,7 +283,7 @@ sudo journalctl -u sp-proxy -f
 
 ---
 
-## Step 9 — Firewall
+## Step 8 — Firewall
 
 Keep the **existing** public piece port open for clients. Do not expose the new localhost upstream port.
 
@@ -306,7 +297,7 @@ sudo ufw status
 
 ---
 
-## Step 10 — Discovery ads
+## Step 9 — Discovery ads
 
 Because `sp-proxy` took over the **same** `PUBLIC_IP:PUBLIC_PORT`, existing Curio/Boost discovery URLs usually keep working **without** changing advertised host/port.
 
@@ -330,7 +321,7 @@ If you previously advertised a different URL than the listen address, update tha
 
 | Symptom | Likely fix |
 |---------|------------|
-| Bind error on public port | Curio still listening on `PUBLIC_IP:PUBLIC_PORT` — finish Step 7a/7b |
+| Bind error on public port | Curio still listening on `PUBLIC_IP:PUBLIC_PORT` — finish Step 6a/6b |
 | `503` / `payment-unavailable` | Upstream `HEAD` on `127.0.0.1:UPSTREAM_PORT` missing/not 200/no `Content-Length` |
 | Clients still get free unpaid CARs | Upstream still public — re-check `ss -ltnp` and firewall |
 | Settlement / tx failures | Settler needs FIL; check RPC (default mainnet Glif) |
