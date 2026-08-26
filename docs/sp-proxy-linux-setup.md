@@ -1,37 +1,30 @@
 # Simple `sp-proxy` setup on regular Linux
 
-Copy-paste recipe for the **simplest** paid-retrieval cutover when you already have Curio or Boost serving pieces on an **internet-routed IP**:
-
-**You start with (existing system):**
-
-- One Linux host
-- Curio/Boost already answering `GET` / `HEAD` `/piece/<cid>` on a **public** host:port (ie clients can already request retrievals)
-
-**You end with (after this guide):**
-
-- One Linux host
-- `sp-proxy` listening on that **same** public host:port
-- Curio/Boost moved to **localhost only** (no longer reachable from the internet)
-- Retrievals require payment (USDFC via Filecoin Pay) before pieces are served
+Copy-paste recipe for the **simplest** paid-retrieval cutover when you already have Curio or Boost serving pieces on an **internet-routed IP**
 
 This is an instruction on how to enable paid retrievals for deals onboarded through the Filecoin Cold Storage Service, or Peer to Pool Porep. We recommend you try to understand the mechanics, which you will find here: [README — For storage providers](../README.md#for-storage-providers) and [docs/mpp-filecoinpay.md](mpp-filecoinpay.md), but if you want to just go ahead and get started, read on.
 
----
 
-## Starting point (today)
+## You start with (existing system)
+
+- One Linux host
+- Curio/Boost already answering `GET` / `HEAD` `/piece/<cid>` on a **public** host:port (ie clients can already request retrievals)
 
 ```text
 Internet clients  -->  Curio/Boost :PUBLIC_PORT on PUBLIC_IP   (pieces served free / unpaid)
 ```
 
 Datasets are served directly from Boost/Curio to clients over the public internet with no fencing or payment for retrieval.
+## You end with (after this guide)
 
----
+- One Linux host
+- `sp-proxy` listening on that **same** public host:port
+- Curio/Boost moved to **localhost only** (no longer reachable from the internet)
+- Retrievals require payment (USDFC via Filecoin Pay) before pieces are served
 
-## What you will end up with
 
 ```text
-Internet clients  -->  sp-proxy :PUBLIC_PORT on PUBLIC_IP  -->  Curio/Boost :UPSTREAM_PORT on 127.0.0.1
+Internet clients  -->  sp-proxy :PUBLIC_PORT on PUBLIC_IP  -->  Curio/Boost :UPSTREAM_PORT on 127.0.0.1   (pieces served after payment)
 ```
 
 Once enabled, the datasets you store will be fenced by a proxy that will request client payments and only serve the data upon receiving the payment. There is nothing you need to do to the dataset itself, no on-chain changes etc. Payments are done in USDFC through Filecoin Pay. To read about Filecoin Pay go to https://docs.filecoin.cloud/core-concepts/filecoin-pay-overview/
@@ -55,10 +48,9 @@ Once enabled, the datasets you store will be fenced by a proxy that will request
 | Risk | What to do |
 |------|------------|
 | **Leaving Curio/Boost on the public IP** | If your retrieval layer stays bound to `PUBLIC_IP` / `0.0.0.0` after installing the proxy, anyone can still download pieces **without paying** simply by guessing the new port number. When installing the proxy, the SP software retrieval layer must move to **`127.0.0.1` only**. |
-| **Two listeners on the same public port** | Only one process can own `PUBLIC_IP:PUBLIC_PORT`. Stop/rebind Curio/Boost first, then start `sp-proxy` on that address. |
 | **Protect your `sp.key`** | Anyone with access to it can spend FIL gas and receive/control payee proceeds. If storing it as a file, make it mode `600` and never reveal it outside of the SP software/proxy context. |
 | **No rate limit** | Anonymous quote path is relatively expensive. Add edge rate limiting when you can. |
-| **Not your miner actor key** | `sp.key` is a **separate** Filecoin Pay settler EOA. Do not put your miner/owner BLS key in `sp.key`. |
+| **Protect your miner actor key** | `sp.key` is a **separate** Filecoin Pay settler account. Do not put your miner/owner BLS key in `sp.key`. |
 
 This recipe is made to get up and running quickly on a regular Linux-based SP. We recommend you apply your own hardening on top of this (specifically, apply the same access controls, firewall settings etc that you already do for the existing SP software running on the box.
 
@@ -331,22 +323,6 @@ curl -sS -D- -o /dev/null "http://${PUBLIC_IP}:${PUBLIC_PORT}/piece/${PIECE_CID}
 Expect HEAD `200`, and GET `402` (or `200` if free) — **not** unpaid full CAR downloads from Curio directly.
 
 If you previously advertised a different URL than the listen address, update that advertisement to whatever clients should hit now (still the proxy, never `127.0.0.1`).
-
----
-
-## Step 11 — Optional but strongly recommended
-
-1. **TLS** — terminate HTTPS on nginx/Caddy/LB; proxy to `sp-proxy`.
-2. **Rate limit** — limit requests per IP on the quote path at the edge.
-3. **Separate payee** — USDFC to a cold wallet:
-
-   ```text
-   --pay-payee-address 0xREPLACE_PAYEE
-   ```
-
-   Settler (`sp.key`) still pays FIL gas and must stay online/funded.
-
-4. **Disk** — SQLite at `/opt/sp-proxy/sp-proxy.db` grows with quotes; default retention is 1 week.
 
 ---
 
