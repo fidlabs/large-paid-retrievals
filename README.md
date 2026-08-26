@@ -45,7 +45,7 @@ When the window expires, paid retries stop: request a **new** `402` quote (new `
 
 ### What you need
 
-1. **Go 1.26.4+** or a pre-built `retrieval-client` binary.
+1. **Go 1.26.6+** or a pre-built `retrieval-client` binary.
 2. A **client private key** (`client.key`) — secp256k1 hex; see [Generate keys](#generate-keys).
 3. **FIL** on your network (mainnet by default) for Filecoin Pay transaction gas.
 4. **USDFC** in the client wallet for paid retrievals (amount depends on piece sizes and SP rates).

@@ -89,7 +89,7 @@ cd /opt/sp-proxy
 
 ## Step 1 — Install Go (if building from source)
 
-Need **Go 1.26.5+**.
+Need **Go 1.26.6+**.
 
 ```bash
 go version
