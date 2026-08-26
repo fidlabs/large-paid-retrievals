@@ -29,7 +29,7 @@ Internet clients  -->  sp-proxy :PUBLIC_PORT on PUBLIC_IP  -->  Curio/Boost :UPS
 
 Once enabled, the datasets you store will be fenced by a proxy that will request client payments and only serve the data upon receiving the payment. There is nothing you need to do to the dataset itself, no on-chain changes etc. Payments are done in USDFC through Filecoin Pay. To read about Filecoin Pay go to https://docs.filecoin.cloud/core-concepts/filecoin-pay-overview/
 
-**There will be a short downtime** on `PUBLIC_IP:PUBLIC_PORT`, the piece retrieval server, while you move from Curio/Boost to `sp-proxy` + Curio/Boost.
+When you move the ports and put up the proxy in front of your SP software **there will be a short downtime** on `PUBLIC_IP:PUBLIC_PORT`. Be aware of this if you are already serving heavy downloads.
 
 ---
 
@@ -37,7 +37,7 @@ Once enabled, the datasets you store will be fenced by a proxy that will request
 
 1. Are logged in to the Linux host where Curio/Boost already runs.
 2. Know the public internet IP address and TCP port number of your existing Curio/Boost piece server.
-3. Have the ability to change the Curio/Boost retrieval layer  **listen** address (check their published documentation).
+3. Have the ability to change the Curio/Boost retrieval layer  **listen** address (check their published documentation) and pick a free **local** port .
 4. Have access to some **FIL** for settlement gas (settler wallet).
 5. Have root/sudo permission on the Linux host for systemd + firewall.
 
