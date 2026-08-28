@@ -5,7 +5,7 @@ HTTP tools for retrieving Filecoin **piece** data (CAR files) from storage provi
 | If you are… | Start here |
 |-------------|------------|
 | **Dataset consumer** — download pieces from public or paid SPs | [For dataset consumers](#for-dataset-consumers) |
-| **Storage provider** — charge for serving stored pieces | [For storage providers](#for-storage-providers) |
+| **Storage provider** — charge for serving stored pieces | [For storage providers](#for-storage-providers) · [Simple Linux setup](docs/sp-proxy-linux-setup.md) |
 | **Developer** — maintain or extend this repo | [For developers](#for-developers) |
 
 **Binaries:** `retrieval-client` (fetch) and `sp-proxy` (paid gateway in front of an SP piece server).
@@ -45,7 +45,7 @@ When the window expires, paid retries stop: request a **new** `402` quote (new `
 
 ### What you need
 
-1. **Go 1.26.4+** or a pre-built `retrieval-client` binary.
+1. **Go 1.26.6+** or a pre-built `retrieval-client` binary.
 2. A **client private key** (`client.key`) — secp256k1 hex; see [Generate keys](#generate-keys).
 3. **FIL** on your network (mainnet by default) for Filecoin Pay transaction gas.
 4. **USDFC** in the client wallet for paid retrievals (amount depends on piece sizes and SP rates).
@@ -156,6 +156,8 @@ Paid SPs bill in **USDFC per GiB** (binary `2^30` bytes), **rounded up** to whol
 ---
 
 ## For storage providers
+
+**Basic setup steps:** [docs/sp-proxy-linux-setup.md](docs/sp-proxy-linux-setup.md) — cut over an existing public Curio/Boost HTTP endpoint on one Linux host to `sp-proxy` (same public IP:port, upstream moved to localhost) + systemd, including security caveats.
 
 ### What you provide
 
@@ -310,7 +312,8 @@ internal/
   paymentheader/      Token amounts + per-GiB price helpers
   sqlitestore/        sp-proxy deal persistence + settlement pools
 docs/
-  mpp-filecoinpay.md  HTTP + payment protocol contract
+  mpp-filecoinpay.md           HTTP + payment protocol contract
+  sp-proxy-linux-setup.md      Basic SP deploy on one Linux host
 ```
 
 ### `sp-proxy` design: payment as middleware
