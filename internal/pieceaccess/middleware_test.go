@@ -691,7 +691,7 @@ func TestMiddlewarePaidGETNoDealDenied(t *testing.T) {
 
 func TestMiddlewarePaidGETLookupErrorDenied(t *testing.T) {
 	t.Parallel()
-	lookup := &stubLookup{err: errors.New("cdp down")}
+	lookup := &stubLookup{err: errors.New("hyperion down")}
 	called := false
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true

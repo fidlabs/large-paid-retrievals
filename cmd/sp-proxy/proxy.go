@@ -44,7 +44,7 @@ type proxyAppSettings struct {
 	UpstreamHost string
 	UpstreamPort int
 
-	PorepCDPURL        string
+	PorepHyperionURL   string
 	PorepProviderID    uint64
 	PorepMarketAddress string
 }
@@ -180,21 +180,21 @@ func buildProxyHandler(
 }
 
 func newPorepDealLookup(_ context.Context, settings proxyAppSettings, logger *slog.Logger) (pieceaccess.DealLookup, func(), error) {
-	cdpURL := strings.TrimSpace(settings.PorepCDPURL)
-	if cdpURL == "" {
-		cdpURL = pieceaccess.DefaultCDPBaseURL
+	hyperionURL := strings.TrimSpace(settings.PorepHyperionURL)
+	if hyperionURL == "" {
+		hyperionURL = pieceaccess.DefaultHyperionBaseURL
 	}
 	if settings.PorepProviderID == 0 {
 		return nil, nil, fmt.Errorf("--porep-provider-id is required")
 	}
-	lookup, err := pieceaccess.NewCDPLookup(pieceaccess.CDPLookupConfig{
-		BaseURL:    cdpURL,
+	lookup, err := pieceaccess.NewHyperionLookup(pieceaccess.HyperionLookupConfig{
+		BaseURL:    hyperionURL,
 		ProviderID: settings.PorepProviderID,
 	})
 	if err != nil {
 		return nil, nil, err
 	}
-	logger.Info("porep CDP lookup enabled", "cdp_url", cdpURL, "provider_id", settings.PorepProviderID)
+	logger.Info("porep Hyperion lookup enabled", "hyperion_url", hyperionURL, "provider_id", settings.PorepProviderID)
 	return lookup, func() {}, nil
 }
 

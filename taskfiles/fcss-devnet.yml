@@ -1,6 +1,6 @@
 version: "3"
 
-# FCSS-devnet integration helpers (local Curio + CDP + seed-deals).
+# FCSS-devnet integration helpers (local Curio + Hyperion + seed-deals).
 # E2E matrix: taskfiles/fcss-devnet-e2e.yml (included below with flatten).
 # Prerequisite: sibling ../FCSS-devnet is up (`just up` + `just seed-deals`) with
 # .runtime/seed-deals/summary.json present.
@@ -47,7 +47,7 @@ tasks:
       - |
         set -euo pipefail
         unset DEVNET_ROOT CONTRACTS_DIR POREP_ENV_FILE PAY_RPC_URL \
-          SP_PROXY_POREP_CDP_URL SP_PROXY_UPSTREAM_PORT SP_PROXY_UPSTREAM_HOST || true
+          SP_PROXY_POREP_HYPERION_URL SP_PROXY_UPSTREAM_PORT SP_PROXY_UPSTREAM_HOST || true
         # shellcheck disable=SC1091
         source ./scripts/devnet-env.sh
 
@@ -69,7 +69,7 @@ tasks:
       - |
         set -euo pipefail
         unset DEVNET_ROOT CONTRACTS_DIR POREP_ENV_FILE PAY_RPC_URL \
-          SP_PROXY_POREP_CDP_URL SP_PROXY_UPSTREAM_PORT SP_PROXY_UPSTREAM_HOST || true
+          SP_PROXY_POREP_HYPERION_URL SP_PROXY_UPSTREAM_PORT SP_PROXY_UPSTREAM_HOST || true
         # shellcheck disable=SC1091
         source ./scripts/devnet-env.sh
         summary="{{.SEED_SUMMARY}}"
@@ -89,7 +89,7 @@ tasks:
         set -euo pipefail
         command -v lsof >/dev/null 2>&1 || { echo "lsof required for fcss-devnet:bytecut" >&2; exit 1; }
         unset DEVNET_ROOT CONTRACTS_DIR POREP_ENV_FILE PAY_RPC_URL \
-          SP_PROXY_POREP_CDP_URL SP_PROXY_UPSTREAM_PORT SP_PROXY_UPSTREAM_HOST || true
+          SP_PROXY_POREP_HYPERION_URL SP_PROXY_UPSTREAM_PORT SP_PROXY_UPSTREAM_HOST || true
         # shellcheck disable=SC1091
         source ./scripts/devnet-env.sh
         mkdir -p .task

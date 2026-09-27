@@ -54,7 +54,7 @@ const MaxProofTTL = dealstore.PaidAccessTTL
 type VerifiedProof struct {
 	Requester common.Address
 	// Scope is signed but advisory: the server binds the deal via Resource
-	// (piece CID → CDP), so a client need not know the deal id to mint a proof.
+	// (piece CID → Hyperion), so a client need not know the deal id to mint a proof.
 	Scope    *big.Int
 	Resource string
 	Deadline int64
@@ -655,7 +655,7 @@ func accessAuthorizesDeal(a *VerifiedAccess, d *Deal) bool {
 	return false
 }
 
-// dealIDMatches compares a signed uint256 scope to the CDP deal id string.
+// dealIDMatches compares a signed uint256 scope to the Hyperion deal id string.
 func dealIDMatches(scope *big.Int, dealID string) bool {
 	if scope == nil {
 		return false

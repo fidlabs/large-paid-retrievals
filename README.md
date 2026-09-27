@@ -10,7 +10,7 @@ HTTP tools for retrieving **pieces** (CAR files) that are part of datasets store
 
 **Binaries:** `retrieval-client` (fetch) and `sp-proxy` (paid gateway in front of an SP piece server).
 
-**Authorization:** who may retrieve a piece is decided by the deal in CDP / on-chain PoRep market state — **`dealType`** (`public` or `private`) and **`clientAddress`** (deal owner). Public deals: any client may probe/quote/download (subject to payment). Private dataset pieces always require a short-lived `Authorization: RetrievalProof` (proof of possession) bound to the piece CID: the deal owner signs that proof directly, or a delegate signs it and also presents a matching owner-signed `Authorization: RetrievalVoucher`. `?client=` / Payment alone is not enough. Others get `403`. Piece existence and size remain public (`HEAD` is always allowed). Payment (MPP / Filecoin Pay) is separate: it settles the quoted USDFC after access is allowed. Details: [Piece access](#piece-access-public-vs-private).
+**Authorization:** who may retrieve a piece is decided by the deal in Hyperion / on-chain PoRep market state — **`dealType`** (`public` or `private`) and **`clientAddress`** (deal owner). Public deals: any client may probe/quote/download (subject to payment). Private dataset pieces always require a short-lived `Authorization: RetrievalProof` (proof of possession) bound to the piece CID: the deal owner signs that proof directly, or a delegate signs it and also presents a matching owner-signed `Authorization: RetrievalVoucher`. `?client=` / Payment alone is not enough. Others get `403`. Piece existence and size remain public (`HEAD` is always allowed). Payment (MPP / Filecoin Pay) is separate: it settles the quoted USDFC after access is allowed. Details: [Piece access](#piece-access-public-vs-private).
 
 ### Design context
 
@@ -172,9 +172,9 @@ SPs store deal **pieces** and serve them over HTTP (typically Curio or Boost) at
 GET /piece/<piece-cid>
 ```
 
-**`sp-proxy`** sits in front of that upstream server. CDP deal lookup is **always on** (not optional): public/private access and retrieval credentials are enforced from CDP PoRep metadata. It:
+**`sp-proxy`** sits in front of that upstream server. Hyperion deal lookup is **always on** (not optional): public/private access and retrieval credentials are enforced from Hyperion PoRep metadata. It:
 
-1. Resolves piece access from CDP PoRep deal metadata (`dealType`, `clientAddress`) scoped to your miner (`--porep-provider-id`).
+1. Resolves piece access from Hyperion PoRep deal metadata (`dealType`, `clientAddress`) scoped to your miner (`--porep-provider-id`).
 2. Enforces private dataset-piece authorization via a required `RetrievalProof` (owner-direct when the proof signer is the deal owner; otherwise a matching `RetrievalVoucher` must also authorize the proof signer).
 3. Returns **`402`** with an MPP challenge (quoted `price_usdfc`) when a client requests a piece without payment.
 4. Verifies the client’s MPP credential and **settles once** on Filecoin Pay.
@@ -189,7 +189,7 @@ Clients using `retrieval-client` discover your proxy URL, as published by Curio/
 3. **FIL** on the settler wallet for gas.
 4. A **payee `0x` address** (defaults to settler) that receives USDFC from Filecoin Pay rails.
 5. **SQLite** path for deal/quote state (`--db`).
-6. Your **miner actor ID** (`--porep-provider-id`, **required**) for CDP filtering — see [Miner actor ID](#miner-actor-id-porep-provider-id). CDP base URL defaults to mainnet (`https://cdp.allocator.tech`); override with `--porep-cdp-url` for local/devnet.
+6. Your **miner actor ID** (`--porep-provider-id`, **required**) for Hyperion filtering — see [Miner actor ID](#miner-actor-id-porep-provider-id). Hyperion base URL defaults to mainnet (`https://hyperion.allocator.tech`); override with `--porep-hyperion-url` for local/devnet.
 
 ### Network layout (recommended)
 
@@ -230,7 +230,7 @@ go build -o bin/sp-proxy ./cmd/sp-proxy
   --upstream-host 127.0.0.1 \
   --upstream-port 8788 \
   --pay-private-key-file ./sp.key \
-  --porep-cdp-url https://cdp.allocator.tech \
+  --porep-hyperion-url https://hyperion.allocator.tech \
   --porep-provider-id 1234
 ```
 
@@ -238,7 +238,7 @@ Replace `1234` with **your** miner actor id (numeric part of `f01234`). `--liste
 
 ### Miner actor ID (`--porep-provider-id`)
 
-CDP can return PoRep deals for the same piece CID from **multiple** providers. `sp-proxy` must filter to **your** miner so public/private access matches the deals you actually serve. Pass the **numeric** actor id only (`1234` for `f01234` / `t01234`).
+Hyperion can return PoRep deals for the same piece CID from **multiple** providers. `sp-proxy` must filter to **your** miner so public/private access matches the deals you actually serve. Pass the **numeric** actor id only (`1234` for `f01234` / `t01234`).
 
 This is **not** derived from `sp.key`. The settler key is the Filecoin Pay wallet; the miner id is whichever actor Curio/Boost is running as. Strip the `f0` / `t0` prefix for the flag (e.g. `1234` for `f01234`).
 
@@ -280,16 +280,16 @@ Optional: expose **`HEAD`** on the public proxy path for client size probes (the
 | `--pay-private-key-file` | Settler key |
 | `--pay-payee-address` | Payee advertised in challenges (default: settler) |
 | `--pay-payments-address` | Optional payments contract override |
-| `--porep-cdp-url` | CDP base URL for piece CID → deal (`GET /po-rep/deals?pieceCID=…`). Defaults to mainnet `https://cdp.allocator.tech` (empty → same default). Local Curio: `http://127.0.0.1:23300`. CDP lookup is always used for privacy |
-| `--porep-provider-id` | Your miner actor id (numeric; e.g. `1234` for `f01234`). **Required**. Filters CDP deals to this SP — see [Miner actor ID](#miner-actor-id-porep-provider-id) |
-| `--porep-market-address` | PoRep Market `0x` for EIP-712 voucher domain pin. Overrides chain default (mainnet/Calibration placeholders). **Required on devnet**; startup fails if unresolved |
+| `--porep-hyperion-url` | Hyperion base URL for piece CID → deal (`GET /po-rep/deals?pieceCid=…`). Defaults to mainnet `https://hyperion.allocator.tech` (empty → same default). fcss-devnet: `http://127.0.0.1:23300`. Hyperion lookup is always used for privacy |
+| `--porep-provider-id` | Your miner actor id (numeric; e.g. `1234` for `f01234`). **Required**. Filters Hyperion deals to this SP — see [Miner actor ID](#miner-actor-id-porep-provider-id) |
+| `--porep-market-address` | PoRep Market `0x` for EIP-712 voucher domain pin. Overrides chain default (mainnet/Calibration PoRepMarket proxies from [porep-market deployments](https://github.com/fidlabs/porep-market/tree/main/deployments)). **Required on devnet**; startup fails if unresolved |
 | `--pay-debug`, `--verbose` | Diagnostics |
 
-Piece access resolves PoRep deals via [CDP](https://cdp.allocator.tech) (`GET /po-rep/deals?pieceCID=…`), which returns deal JSON including `dealType` and `clientAddress`. For private dataset pieces, every gated `GET` needs an `Authorization: RetrievalProof`: **owner-direct** when that proof is signed by `clientAddress`, or **delegated** when it is signed by a grantee who also presents a matching owner-signed `Authorization: RetrievalVoucher`. CDP deal lookup is **always enabled** (URL defaults to `https://cdp.allocator.tech`; override with `--porep-cdp-url`). `--porep-provider-id` is **required** so results are scoped to deals you serve. `source ./scripts/devnet-env.sh` sets `SP_PROXY_POREP_CDP_URL=http://127.0.0.1:23300` and `POREP_PROVIDER_ID` for local FCSS CDP.
+Piece access resolves PoRep deals via [Hyperion](https://hyperion.allocator.tech) (`GET /po-rep/deals?pieceCid=…`), which returns deal JSON including `dealType` and `clientAddress`. For private dataset pieces, every gated `GET` needs an `Authorization: RetrievalProof`: **owner-direct** when that proof is signed by `clientAddress`, or **delegated** when it is signed by a grantee who also presents a matching owner-signed `Authorization: RetrievalVoucher`. Hyperion deal lookup is **always enabled** (URL defaults to `https://hyperion.allocator.tech`; override with `--porep-hyperion-url`). `--porep-provider-id` is **required** so results are scoped to deals you serve. `source ./scripts/devnet-env.sh` sets `SP_PROXY_POREP_HYPERION_URL=http://127.0.0.1:23300` and `POREP_PROVIDER_ID` for local FCSS Hyperion.
 
 ### Piece access (public vs private)
 
-Deal metadata and piece CIDs are on the public chain (and in CDP), so **existence and size are not secrets**. `pieceaccess` only restricts who may obtain a quote or download CAR bytes.
+Deal metadata and piece CIDs are on the public chain (and in Hyperion), so **existence and size are not secrets**. `pieceaccess` only restricts who may obtain a quote or download CAR bytes.
 
 For private dataset pieces:
 
@@ -304,8 +304,8 @@ For private dataset pieces:
 | `HEAD /piece/<cid>` | Always allowed (no client). Used for size probes. | Always allowed (no client). |
 | Anonymous `GET` (no credentials) | Allowed → `200` (free) or `402` (paid quote). | **403 Forbidden** — probe must retry with a `RetrievalProof`. |
 | `GET` with `Authorization: RetrievalProof` (and optional `RetrievalVoucher`s; `?client=` optional) | Allowed → `200` / `402`. | Allowed if the proof authorizes the deal (owner-direct or matching voucher) → `200` / `402`; otherwise **403**. |
-| Same + `Authorization: Payment …` | Allowed (after payment settles). | Same proof/voucher rules; Payment `ClientAddress` must match the proof signer. Missing deal in CDP → **403** (default-deny). |
-| Any `GET` when CDP lookup errors (network/HTTP/JSON) | **403 Forbidden** (fail closed). `HEAD` still allowed. | Same. `ErrDealNotFound` (empty result) still allows unpaid probes. |
+| Same + `Authorization: Payment …` | Allowed (after payment settles). | Same proof/voucher rules; Payment `ClientAddress` must match the proof signer. Missing deal in Hyperion → **403** (default-deny). |
+| Any `GET` when Hyperion lookup errors (network/HTTP/JSON) | **403 Forbidden** (fail closed). `HEAD` still allowed. | Same. `ErrDealNotFound` (empty result) still allows unpaid probes. |
 
 **Client probe sequence** (`retrieval-client` / `pieceurls`):
 
@@ -419,7 +419,7 @@ task ci            # fmt, vet, lint, test, vuln
 **E2E (shell):**
 
 - `task test:e2e:discovery` — two CIDs from public sp-tool API, mainnet fetch (free paths).
-- `task test:e2e:fcss-devnet` — [FCSS-devnet](https://github.com/fidlabs/FCSS-devnet) seed-deals access matrix via local `sp-proxy` with `bytecut-proxy` between proxy and Curio (TCP-RST `/piece` GETs after 0.5 MiB so Range resume is exercised). Task body + full case matrix / coverage gaps: [`taskfiles/fcss-devnet-e2e.yml`](taskfiles/fcss-devnet-e2e.yml). Includes EIP-712 access-voucher happy/sad HTTP probes (matching vs cross-`dealId` across two private deals, wrong grantee, c3 presenting a valid c2 voucher, expired/malformed/wrong-signer; signed via `scripts/sign-retrieval-voucher.sh`), single-CID voucher→pay settle, `rail-check --voucher` payee discovery (with/without voucher; c3≠grantee deny), and multi-CID `retrieval-client fetch` with repeated `--voucher` (both matching vouchers as c2 → both CARs; voucher for only one deal → deny; c3 with c2 vouchers → deny). Successful fetches run `car inspect` + `car verify` on `./downloads/<cid>.car`. Requires sibling [`../FCSS-devnet`](https://github.com/fidlabs/FCSS-devnet) with `just seed-deals` summary.
+- `task test:e2e:fcss-devnet` — [FCSS-devnet](https://github.com/fidlabs/FCSS-devnet) seed-deals access matrix via local `sp-proxy` with `bytecut-proxy` between proxy and Curio (TCP-RST `/piece` GETs after 0.5 MiB so Range resume is exercised). Task body + full case matrix / coverage gaps: [`taskfiles/fcss-devnet-e2e.yml`](taskfiles/fcss-devnet-e2e.yml). Includes EIP-712 access-voucher happy/sad HTTP probes (matching vs cross-`dealId` across two private deals, wrong grantee, c3 presenting a valid c2 voucher, expired/malformed/wrong-signer; signed via `scripts/sign-retrieval-voucher.sh` and, for tooling parity, via `scripts/sign-retrieval-voucher-tooling.sh` (Python venv + `../FCSS-devnet/extern/filecoin-porep-market-tooling/porep_tooling_cli.py`), single-CID voucher→pay settle (cast + tooling paths), `rail-check --voucher` payee discovery (with/without voucher; c3≠grantee deny), and multi-CID `retrieval-client fetch` with repeated `--voucher` (both matching vouchers as c2 → both CARs; voucher for only one deal → deny; c3 with c2 vouchers → deny). Successful fetches run `car inspect` + `car verify` on `./downloads/<cid>.car`. Requires sibling [`../FCSS-devnet`](https://github.com/fidlabs/FCSS-devnet) with `just seed-deals` summary.
 
 ### Skipping SP discovery (`--sp-base-url`)
 
@@ -437,18 +437,18 @@ Local **FCSS-devnet** does **not** support piece HTTP discovery the way mainnet 
 
 ### Local FCSS-devnet helpers
 
-These tasks prepare wallets and env so you can run `sp-proxy` and `retrieval-client` against a local Curio stack from [FCSS-devnet](https://github.com/fidlabs/FCSS-devnet) (sibling checkout at [`../FCSS-devnet`](https://github.com/fidlabs/FCSS-devnet)). That stack has PoRep market deals (public and private) and piece HTTP on Curio; CDP indexes deal type and client for piece access. Use `--sp-base-url` as above — discovery is not available on FCSS-devnet.
+These tasks prepare wallets and env so you can run `sp-proxy` and `retrieval-client` against a local Curio stack from [FCSS-devnet](https://github.com/fidlabs/FCSS-devnet) (sibling checkout at [`../FCSS-devnet`](https://github.com/fidlabs/FCSS-devnet)). That stack has PoRep market deals (public and private) and piece HTTP on Curio; Hyperion indexes deal type and client for piece access. Use `--sp-base-url` as above — discovery is not available on FCSS-devnet.
 
 | Task | Purpose |
 |------|---------|
-| `task fcss-devnet:env` | Sources `scripts/devnet-env.sh`: prints/exports `PAY_RPC_URL`, `PAYMENTS`, `USDFC`, `POREP_PROVIDER_ID`, `SP_PROXY_UPSTREAM_*`, `SP_PROXY_POREP_CDP_URL`, and a sample `PIECE_CID` from VerifReg claims. |
+| `task fcss-devnet:env` | Sources `scripts/devnet-env.sh`: prints/exports `PAY_RPC_URL`, `PAYMENTS`, `USDFC`, `POREP_PROVIDER_ID`, `SP_PROXY_UPSTREAM_*`, `SP_PROXY_POREP_HYPERION_URL`, and a sample `PIECE_CID` from VerifReg claims. |
 | `task fcss-devnet:keys` | Writes `./sp.key` (and related keys) from the FCSS-devnet market-tooling `.env` so the settler wallet matches the local chain. |
 | `task fcss-devnet:fund` | Funds `./client.key` / `./sp.key` with FIL + USDFC on the local Curio chain (needed after a chain reset). |
 | `task fcss-devnet:check` | Confirms Curio serves a seed-deals data piece (`HEAD` on upstream `/piece/<cid>`). |
 | `task fcss-devnet:bytecut` | Starts `bytecut-proxy` on `:22311` in front of Curio; TCP-RST `/piece` GETs after 0.5 MiB (HEAD untouched). Point `sp-proxy --upstream-port 22311`. |
 | `task fcss-devnet:bytecut:clean` | Stops `bytecut-proxy` on `:22311`. |
 
-Typical flow after `just up` + `just seed-deals` in FCSS-devnet: `task fcss-devnet:env`, `fcss-devnet:keys`, `fcss-devnet:fund` (once), then start `sp-proxy` with the exported CDP/upstream flags and run `retrieval-client` (or `task test:e2e:fcss-devnet` for the full access matrix, which starts `bytecut-proxy` automatically).
+Typical flow after `just up` + `just seed-deals` in FCSS-devnet: `task fcss-devnet:env`, `fcss-devnet:keys`, `fcss-devnet:fund` (once), then start `sp-proxy` with the exported Hyperion/upstream flags and run `retrieval-client` (or `task test:e2e:fcss-devnet` for the full access matrix, which starts `bytecut-proxy` automatically).
 
 ### Protocol
 
@@ -466,9 +466,9 @@ Access vouchers (EIP-712 private-deal delegation): **[docs/access-vouchers-eip71
 | `SP_PROXY_PAY_PAYMENTS_ADDRESS` | sp-proxy | Optional payments contract |
 | `SP_PROXY_PAY_PAYEE_ADDRESS` | sp-proxy | Optional default payee |
 | `SP_PROXY_UPSTREAM_HOST` / `SP_PROXY_UPSTREAM_PORT` | sp-proxy | Default upstream |
-| `SP_PROXY_POREP_CDP_URL` | sp-proxy | CDP HTTP base (default mainnet `https://cdp.allocator.tech`; local `http://127.0.0.1:23300`). Empty → mainnet default; CDP lookup is always used |
-| `SP_PROXY_POREP_PROVIDER_ID` | sp-proxy | Miner actor id (numeric) for CDP deal filter; **required** (same as `--porep-provider-id`) |
-| `SP_PROXY_POREP_MARKET_ADDRESS` / `POREP_MARKET` | sp-proxy | PoRep Market `0x` override for voucher `verifyingContract` pin (required on devnet; mainnet/Calibration have placeholder defaults — **TODO: replace with real addresses**). Startup fails if the address cannot be resolved |
+| `SP_PROXY_POREP_HYPERION_URL` | sp-proxy | Hyperion HTTP base (default mainnet `https://hyperion.allocator.tech`; local `http://127.0.0.1:23300`). Empty → mainnet default; Hyperion lookup is always used |
+| `SP_PROXY_POREP_PROVIDER_ID` | sp-proxy | Miner actor id (numeric) for Hyperion deal filter; **required** (same as `--porep-provider-id`) |
+| `SP_PROXY_POREP_MARKET_ADDRESS` / `POREP_MARKET` | sp-proxy | PoRep Market `0x` override for voucher `verifyingContract` pin (required on devnet; mainnet/Calibration default to finalized PoRepMarket proxies). Startup fails if the address cannot be resolved |
 
 ### Generate keys
 

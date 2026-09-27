@@ -509,8 +509,8 @@ func TestRunProxyAppValidation(t *testing.T) {
 func TestNewPorepDealLookupRequiresProviderID(t *testing.T) {
 	t.Parallel()
 	_, _, err := newPorepDealLookup(context.Background(), proxyAppSettings{
-		PorepCDPURL:     "http://127.0.0.1:23300",
-		PorepProviderID: 0,
+		PorepHyperionURL: "http://127.0.0.1:23300",
+		PorepProviderID:  0,
 	}, testLogger())
 	if err == nil || !strings.Contains(err.Error(), "--porep-provider-id") {
 		t.Fatalf("got %v", err)
@@ -520,13 +520,13 @@ func TestNewPorepDealLookupRequiresProviderID(t *testing.T) {
 		PorepProviderID: 1004,
 	}, testLogger())
 	if err != nil || lookup == nil {
-		t.Fatalf("empty CDP URL should default to mainnet: lookup=%v err=%v", lookup, err)
+		t.Fatalf("empty Hyperion URL should default to mainnet: lookup=%v err=%v", lookup, err)
 	}
 	closeFn()
 
 	lookup, closeFn, err = newPorepDealLookup(context.Background(), proxyAppSettings{
-		PorepCDPURL:     "http://127.0.0.1:23300",
-		PorepProviderID: 1004,
+		PorepHyperionURL: "http://127.0.0.1:23300",
+		PorepProviderID:  1004,
 	}, testLogger())
 	if err != nil || lookup == nil {
 		t.Fatalf("got lookup=%v err=%v", lookup, err)
@@ -576,15 +576,15 @@ func TestBuildProxyHandlerRequiresDealLookup(t *testing.T) {
 	}
 }
 
-func TestBuildProxyHandlerRequiresMarketWhenCDPEnabled(t *testing.T) {
+func TestBuildProxyHandlerRequiresMarketWhenHyperionEnabled(t *testing.T) {
 	t.Parallel()
 	upURL, _ := url.Parse("http://127.0.0.1:9")
 	store := openTestStore(t)
 	stub := defaultStubFilpay()
 	stub.chainID = big.NewInt(31415926)
 	lookup, closeFn, err := newPorepDealLookup(context.Background(), proxyAppSettings{
-		PorepCDPURL:     "http://127.0.0.1:23300",
-		PorepProviderID: 1004,
+		PorepHyperionURL: "http://127.0.0.1:23300",
+		PorepProviderID:  1004,
 	}, testLogger())
 	if err != nil {
 		t.Fatal(err)
@@ -601,7 +601,7 @@ func TestBuildProxyHandlerRequiresMarketWhenCDPEnabled(t *testing.T) {
 	}
 }
 
-func TestRunProxyAppCDPRequiresProviderID(t *testing.T) {
+func TestRunProxyAppHyperionRequiresProviderID(t *testing.T) {
 	defer restoreProxyHooks(t)()
 
 	upstream := upstreamPieceServer(t)
@@ -613,12 +613,12 @@ func TestRunProxyAppCDPRequiresProviderID(t *testing.T) {
 	proxyListenAndServe = func(string, http.Handler) error { return nil }
 
 	settings := proxyAppSettings{
-		DBPath:          filepath.Join(t.TempDir(), "sp.db"),
-		UpstreamHost:    host,
-		UpstreamPort:    port,
-		PayPayeeAddress: testQuotePayee0x,
-		PorepCDPURL:     "http://127.0.0.1:23300",
-		PorepProviderID: 0,
+		DBPath:           filepath.Join(t.TempDir(), "sp.db"),
+		UpstreamHost:     host,
+		UpstreamPort:     port,
+		PayPayeeAddress:  testQuotePayee0x,
+		PorepHyperionURL: "http://127.0.0.1:23300",
+		PorepProviderID:  0,
 	}
 	err := runProxyApp(settings)
 	if err == nil || !strings.Contains(err.Error(), "porep deal lookup") {
@@ -652,8 +652,8 @@ func TestCobraExecuteStartsProxy(t *testing.T) {
 	defer restoreProxyHooks(t)()
 
 	// Flag defaults read SP_PROXY_POREP_* at registration; clear ambient values
-	// then pass explicit CDP + provider so startup does not depend on host env.
-	t.Setenv("SP_PROXY_POREP_CDP_URL", "")
+	// then pass explicit Hyperion + provider so startup does not depend on host env.
+	t.Setenv("SP_PROXY_POREP_HYPERION_URL", "")
 	t.Setenv("SP_PROXY_POREP_PROVIDER_ID", "0")
 
 	upstream := upstreamPieceServer(t)
@@ -677,7 +677,7 @@ func TestCobraExecuteStartsProxy(t *testing.T) {
 		"--upstream-host", host,
 		"--upstream-port", strconv.Itoa(port),
 		"--pay-payee-address", testQuotePayee0x,
-		"--porep-cdp-url", "http://127.0.0.1:23300",
+		"--porep-hyperion-url", "http://127.0.0.1:23300",
 		"--porep-provider-id", "1004",
 	})
 	if err := cmd.Execute(); err != nil {
