@@ -161,7 +161,7 @@ func ethChainID(ctx context.Context, rpcURL string) (*big.Int, error) {
 // PoRep market) used for owner-direct proofs and as a fallback for delegated
 // proofs. When --voucher is set, every token is checked for wire format,
 // non-expiry, and a recoverable signature before the client proceeds. The SP
-// binds deals via piece CID (CDP); the client does not look up CDP.
+// binds deals via piece CID (Hyperion); the client does not look up Hyperion.
 func buildRetrievalAuth(
 	ctx context.Context,
 	key *ecdsa.PrivateKey,

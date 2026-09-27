@@ -12,8 +12,9 @@ import (
 var ErrDealNotFound = errors.New("pieceaccess: porep deal not found for piece CID")
 
 // DealLookup resolves PoRep deals from a piece CID for access checks.
-// requester may be the zero address (anonymous); implementations may stop early
-// once a public deal or a private deal owned by requester is found.
+// requester may be the zero address (anonymous). Implementations may stop early
+// once a public deal is found (public-wins); they must not short-circuit on a
+// private match alone, since a later deal may still be public.
 type DealLookup interface {
 	LookupByPieceCID(ctx context.Context, pieceCID string, requester common.Address) ([]*Deal, error)
 }
@@ -45,7 +46,7 @@ func (t DealType) MarshalJSON() ([]byte, error) {
 	return []byte(`"` + t.String() + `"`), nil
 }
 
-// ParseDealType accepts CDP/on-chain labels ("PUBLIC"/"PRIVATE") or decimal codes.
+// ParseDealType accepts Hyperion/on-chain labels ("PUBLIC"/"PRIVATE") or decimal codes.
 func ParseDealType(s string) DealType {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "public", "10":
@@ -57,7 +58,7 @@ func ParseDealType(s string) DealType {
 	}
 }
 
-// Deal is the piece-access view of a PoRep deal (from CDP).
+// Deal is the piece-access view of a PoRep deal (from Hyperion).
 type Deal struct {
 	DealID     string         `json:"deal_id"`
 	Client     common.Address `json:"client"`

@@ -3,7 +3,7 @@
 **Status:** implemented in `internal/pieceaccess`. Two **separate** standalone tokens, each an
 EIP-712 typed-data object with its **signature embedded inside** the object, presented in their own
 `Authorization` headers. `retrieval-client --voucher` forwards long-lived vouchers verbatim and mints
-one per-CID `RetrievalProof`; owner-direct minting needs only the EIP-712 domain (no client-side CDP
+one per-CID `RetrievalProof`; owner-direct minting needs only the EIP-712 domain (no client-side Hyperion
 lookup — the SP binds the deal from the piece CID). FCSS e2e covers proof and voucher happy/sad paths.
 
 Delegated access to **private** PoRep dataset pieces uses two EIP-712 typed-data objects — never a
@@ -93,7 +93,7 @@ RetrievalProof(uint256 scope, string resource, uint256 deadline)
 
 | Field | Meaning |
 |---|---|
-| `scope` | **Advisory.** Signed but not authoritative: the SP binds the deal from `resource` (piece CID → CDP), so a client need not know the deal id to mint a proof. A client SHOULD set it to a voucher’s `scope` when known, or `0`. |
+| `scope` | **Advisory.** Signed but not authoritative: the SP binds the deal from `resource` (piece CID → Hyperion), so a client need not know the deal id to mint a proof. A client SHOULD set it to a voucher’s `scope` when known, or `0`. |
 | `resource` | Requested piece CID **exactly as in the path** (`GET /piece/{cid}`) |
 | `deadline` | Unix seconds; MUST satisfy `now ≤ deadline ≤ now + MAX_PROOF_TTL` |
 
@@ -114,8 +114,8 @@ fetch they expect to retry within that window.
 
 ## Scope, resource, and deal binding
 
-- **`scope`** is a `uint256`. For PoRep market deals it is the **deal id**. CDP /
-  `--porep-provider-id` scoped lookup maps `pieceCID` → deal(s) with `dealType` and
+- **`scope`** is a `uint256`. For PoRep market deals it is the **deal id**. Hyperion /
+  `--porep-provider-id` scoped lookup maps `pieceCid` → deal(s) with `dealType` and
   `clientAddress` (owner).
 - **`resource`** is the CID string from `GET /piece/{cid}` (byte-exact match to the proof).
 - A piece MAY appear on multiple deals. The credential names the scope it claims; the gate verifies
@@ -235,7 +235,7 @@ For a request on piece CID `R`, parse the single `RetrievalProof` header `P` and
    `primaryType` = `RetrievalVoucher`, domain pin match, `now ≤ deadline`, valid signature →
    `owner = ecrecover(EIP712(Vᵢ), Vᵢ.signature)`. A voucher that fails any check is dropped and kept
    only as a denial diagnostic; it never fails the request on its own.
-3. Resolve deals for `R` (CDP / provider scope). If any deal is **public** → **allow** (public-wins;
+3. Resolve deals for `R` (Hyperion / provider scope). If any deal is **public** → **allow** (public-wins;
    payment path unchanged). Else let `PRIV` be the set of private deals for this provider.
 4. For each private deal `d ∈ PRIV`, the request is **authorized** if either:
    - **owner-direct:** `requester == d.clientAddress`; or
@@ -246,27 +246,25 @@ For a request on piece CID `R`, parse the single `RetrievalProof` header `P` and
 
 **Response codes:** missing/invalid proof, or a voucher that failed verification, on a private piece
 → **403** with a JSON `invalid_voucher` body (per-token `details`). A structurally valid proof/voucher
-that simply does not authorize the deal → plain **403**. CDP / lookup failure → fail closed (never
+that simply does not authorize the deal → plain **403**. Hyperion / lookup failure → fail closed (never
 serve a private piece on error).
 
 ---
 
 ## SP pinning (`sp-proxy`)
 
-CDP deal lookup remains **always enabled**. `--porep-cdp-url` defaults to
-`https://cdp.allocator.tech`. `--porep-provider-id` is **required**.
+Hyperion deal lookup remains **always enabled**. `--porep-hyperion-url` defaults to
+`https://hyperion.allocator.tech`. `--porep-provider-id` is **required**.
 
 `sp-proxy` **always** pins EIP-712 `chainId` (from the pay RPC) and `verifyingContract` (PoRep
 Market). Startup fails if the market address cannot be resolved:
 
-- **Mainnet / Calibration:** built-in chain defaults (`internal/pieceaccess/porep_market.go`).
+- **Mainnet / Calibration:** built-in PoRepMarket proxy defaults from
+  [`porep-market` deployments](https://github.com/fidlabs/porep-market/tree/main/deployments)
+  (`internal/pieceaccess/porep_market.go`).
 - **Devnet / other:** `--porep-market-address` or `SP_PROXY_POREP_MARKET_ADDRESS` / `POREP_MARKET`.
 
 Credentials are rejected if the domain pin is missing (fail closed).
-
-> **TODO (BIG):** Mainnet and Calibration defaults are **placeholders** until real PoRep Market
-> deployments are known. Replace `PorepMarketMainnetPlaceholder` /
-> `PorepMarketCalibrationPlaceholder` before relying on production domain pinning.
 
 ---
 

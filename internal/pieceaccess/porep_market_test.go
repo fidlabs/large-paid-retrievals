@@ -14,16 +14,16 @@ func TestResolvePorepMarketAddress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if mainnet != PorepMarketMainnetPlaceholder {
-		t.Fatalf("mainnet: got %s want placeholder", mainnet.Hex())
+	if mainnet != PorepMarketMainnet {
+		t.Fatalf("mainnet: got %s want %s", mainnet.Hex(), PorepMarketMainnet.Hex())
 	}
 
 	calib, err := ResolvePorepMarketAddress("", constants.ChainIDCalibration)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if calib != PorepMarketCalibrationPlaceholder {
-		t.Fatalf("calib: got %s want placeholder", calib.Hex())
+	if calib != PorepMarketCalibration {
+		t.Fatalf("calib: got %s want %s", calib.Hex(), PorepMarketCalibration.Hex())
 	}
 
 	devnet, err := ResolvePorepMarketAddress("", constants.ChainIDDevnet)

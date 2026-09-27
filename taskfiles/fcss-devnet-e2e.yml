@@ -1,6 +1,6 @@
 version: "3"
 
-# FCSS-devnet e2e access matrix (local Curio + CDP + seed-deals).
+# FCSS-devnet e2e access matrix (local Curio + Hyperion + seed-deals).
 #
 # Prerequisite: sibling ../FCSS-devnet is up (`just up` + `just seed-deals`) with
 # .runtime/seed-deals/summary.json present. Helpers live in fcss-devnet.yml
@@ -48,13 +48,19 @@ version: "3"
 # H  http GET private (malformed proof)          garbage RetrievalProof → 403 JSON
 # H  http GET private (wrong-signer voucher)     voucher signed by non-owner → 403
 #
+# HTTP — porep-market-tooling CLI voucher parity (Python venv + porep_tooling_cli.py)
+# -----------------------------------------------------------------------------
+# H  http GET private (tooling voucher)          tooling-signed voucher + proof → 402/200
+# H  http GET private (tooling cross-scope)      tooling deal-2 voucher on deal-1 → 403
+#
 # Fetch — paid retrieval + CAR verify (bytecut Range resume)
 # -----------------------------------------------------------------------------
-# F  fetch private as owner                      c1 owner proof (CDP) + car verify
+# F  fetch private as owner                      c1 owner proof (Hyperion) + car verify
 # F  fetch private as non-owner                  c2 no voucher → deny at probe
 # F  fetch public as owner                       c1 public allow
 # F  fetch public as non-owner                   c2 public allow
 # F  fetch private with voucher (single-CID)     c2 + capability → client mints proof
+# F  fetch private with tooling voucher          c2 + tooling-signed capability → CAR verify
 # F  rail-check private without voucher          c2 probe private → no usable source
 # F  rail-check private with voucher             c2 + capability → Challenge details
 # F  rail-check private as c3 with c2 voucher    c3 binds c2 capability → deny
@@ -67,7 +73,7 @@ version: "3"
 # COVERAGE GAPS (e2e + unit together still thin / missing)
 # =============================================================================
 # Covered well by unit tests (no e2e needed unless regressions): domain pin
-# mismatch (chainId/contract), CDP HTTP errors / pagination / provider filter,
+# mismatch (chainId/contract), Hyperion HTTP errors / pagination / provider filter,
 # voucher crypto (expire, bad sig, multi-header), Payment vs Retrieval quoting,
 # private owner/other/HEAD, public paid GET, ignore Retrieval without requester,
 # Payment ClientAddress preferred over spoofed ?client= for access,
@@ -75,9 +81,8 @@ version: "3"
 #
 # Still untested or only partially covered:
 # - Manifest multi-CID entry point (CLI `--cid` / args only in e2e)
-# - Live CDP outage while e2e stack is up (fail-closed is unit-only)
+# - Live Hyperion outage while e2e stack is up (fail-closed is unit-only)
 # - Long-running sp-proxy withdraw / sqlite prune workers under load
-# - Voucher signing parity with porep-market-tooling CLI (e2e uses cast + our script)
 #
 # Included from fcss-devnet.yml with flatten: true; public entry is test:e2e:fcss-devnet.
 
@@ -100,7 +105,7 @@ tasks:
         [[ -x "${car_bin}" ]] || { echo "missing ${car_bin} (task tools)" >&2; exit 1; }
 
         unset DEVNET_ROOT CONTRACTS_DIR POREP_ENV_FILE PAY_RPC_URL \
-          SP_PROXY_POREP_CDP_URL SP_PROXY_UPSTREAM_PORT SP_PROXY_UPSTREAM_HOST || true
+          SP_PROXY_POREP_HYPERION_URL SP_PROXY_UPSTREAM_PORT SP_PROXY_UPSTREAM_HOST || true
         # shellcheck disable=SC1091
         source ./scripts/devnet-env.sh
 
@@ -181,7 +186,7 @@ tasks:
           --pay-payments-address "${PAYMENTS}" \
           --pay-token-address "${USDFC}" \
           --pay-private-key-file "{{.SP_KEY}}" \
-          --porep-cdp-url "${SP_PROXY_POREP_CDP_URL:-http://127.0.0.1:23300}" \
+          --porep-hyperion-url "${SP_PROXY_POREP_HYPERION_URL:-http://127.0.0.1:23300}" \
           --porep-provider-id "${POREP_PROVIDER_ID}" \
           --porep-market-address "${POREP_MARKET}" \
           > "${log}" 2>&1 &
@@ -202,8 +207,8 @@ tasks:
           grep -q 'sp-proxy listening' "${log}" 2>/dev/null && break
           sleep 0.5
         done
-        grep -q 'porep CDP lookup enabled' "${log}" || {
-          echo "CDP lookup not enabled; log:" >&2
+        grep -q 'porep Hyperion lookup enabled' "${log}" || {
+          echo "Hyperion lookup not enabled; log:" >&2
           cat "${log}" >&2
           exit 1
         }
@@ -305,6 +310,18 @@ tasks:
             --scope "${deal}" \
             --rpc-url "${PAY_RPC_URL}" \
             --verifying-contract "${POREP_MARKET}" \
+            "$@"
+        }
+        sign_voucher_tooling() {
+          # sign_voucher_tooling KEY_FILE GRANTEE SCOPE [extra args...]
+          # Uses FCSS-devnet filecoin-porep-market-tooling Python CLI (venv).
+          local key_file="$1" grantee_addr="$2" deal="$3"
+          shift 3
+          ./scripts/sign-retrieval-voucher-tooling.sh \
+            --private-key-file "${key_file}" \
+            --grantee "${grantee_addr}" \
+            --scope "${deal}" \
+            --tooling-root "${DEVNET_ROOT}/extern/filecoin-porep-market-tooling" \
             "$@"
         }
         sign_cred() {
@@ -439,6 +456,23 @@ tasks:
         code="$(http_code GET "${proxy_base}/piece/${c1_private_cid}" -H "Authorization: RetrievalProof $(sign_cred "${c2_key}" "${voucher_wrong}" "${c1_private_cid}")" -H "Authorization: RetrievalVoucher ${voucher_wrong}")"
         expect_codes "http GET private (wrong-signer voucher)" "c2" "c1-private" "403" "${code}" 403
 
+        # --- porep-market-tooling CLI voucher parity (Python venv) ---
+        echo "** signing vouchers via filecoin-porep-market-tooling CLI"
+        voucher_tooling="$(sign_voucher_tooling "${c1_key}" "${c2_addr}" "${c1_private_deal_id}" --expires-in 3600)"
+        voucher_tooling_2="$(sign_voucher_tooling "${c1_key}" "${c2_addr}" "${c1_private_2_deal_id}" --expires-in 3600)"
+        [[ -n "${voucher_tooling}" && -n "${voucher_tooling_2}" ]] || {
+          echo "tooling CLI returned empty voucher token(s)" >&2
+          exit 1
+        }
+        proof_tooling="$(sign_cred "${c2_key}" "${voucher_tooling}" "${c1_private_cid}")"
+
+        code="$(http_code GET "${proxy_base}/piece/${c1_private_cid}" -H "Authorization: RetrievalProof ${proof_tooling}" -H "Authorization: RetrievalVoucher ${voucher_tooling}")"
+        expect_codes "http GET private (tooling voucher)" "c2" "c1-private" "402/200" "${code}" 402 200
+
+        # Tooling-signed deal-2 voucher must not open deal-1 piece (same scope binding as cast path).
+        code="$(http_code GET "${proxy_base}/piece/${c1_private_cid}" -H "Authorization: RetrievalProof $(sign_cred "${c2_key}" "${voucher_tooling_2}" "${c1_private_cid}")" -H "Authorization: RetrievalVoucher ${voucher_tooling_2}")"
+        expect_codes "http GET private (tooling cross-scope)" "c2" "c1-private" "403" "${code}" 403
+
         fetch_ok() {
           local key="$1" piece="$2" client_label="$3" deal_label="$4" case_label="$5"
           local car_path="{{.OUT_DIR}}/${piece}.car"
@@ -539,6 +573,28 @@ tasks:
         else
           record "fetch private with voucher (single-CID)" "c2" "c1-private" "allow" "FAIL"
           echo "expected allow for fetch private with voucher (single-CID)" >&2
+          print_results
+          exit 1
+        fi
+
+        # Tooling-signed voucher → paid settle (parity with cast/script path above).
+        echo "** expect OK: fetch private with tooling voucher"
+        rm -f "{{.OUT_DIR}}/${c1_private_cid}.car" "{{.OUT_DIR}}/${c1_private_cid}.car.partial"
+        if ./bin/retrieval-client fetch \
+          --filpay-private-key-file "${c2_key}" \
+          --pay-rpc-url "${PAY_RPC_URL}" \
+          --pay-payments-address "${PAYMENTS}" \
+          --pay-token-address "${USDFC}" \
+          --sp-base-url "http://127.0.0.1:${sp_proxy_port}" \
+          --cid "${c1_private_cid}" \
+          --voucher "${voucher_tooling}" \
+          --out-dir "{{.OUT_DIR}}" \
+          --yes; then
+          verify_downloaded_car "${c1_private_cid}" "c2" "c1-private" "fetch private with tooling voucher"
+          record "fetch private with tooling voucher" "c2" "c1-private" "allow" "PASS"
+        else
+          record "fetch private with tooling voucher" "c2" "c1-private" "allow" "FAIL"
+          echo "expected allow for fetch private with tooling voucher" >&2
           print_results
           exit 1
         fi

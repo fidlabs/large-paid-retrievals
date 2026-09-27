@@ -1,7 +1,7 @@
 // Package pieceaccess gates piece CAR retrieval for private PoRep deals.
 //
 // Private deals (and their piece CIDs / sizes) are recorded on the public chain
-// and indexed by CDP — there is no secrecy about existence or size. HEAD is
+// and indexed by Hyperion — there is no secrecy about existence or size. HEAD is
 // always allowed. GET without a Retrieval credential only succeeds for public
 // deals; private pieces return 403 so probes can retry with a proof (+ voucher
 // when delegated). Owner ?client= / Payment alone is not enough for private
@@ -50,7 +50,7 @@ type Authorizer struct {
 // Option configures Authorizer.
 type Option func(*Authorizer)
 
-// WithDealLookup sets PoRep deal resolution from piece CID (CDP). Required for Middleware.
+// WithDealLookup sets PoRep deal resolution from piece CID (Hyperion). Required for Middleware.
 func WithDealLookup(lookup DealLookup) Option {
 	return func(a *Authorizer) {
 		a.lookup = lookup
@@ -209,7 +209,7 @@ func selectRepresentativeDeal(deals []*Deal, access *VerifiedAccess) *Deal {
 //
 // HEAD is never denied (size/existence are public).
 // Lookup transport/decode errors fail closed on GET (paid or probe) so private
-// pieces cannot appear probeable during a CDP outage. ErrDealNotFound still
+// pieces cannot appear probeable during a Hyperion outage. ErrDealNotFound still
 // allows unpaid probes (no private metadata to enforce).
 // Access is allowed if any matching deal is public, or any private deal is
 // authorized by a verified Retrieval credential (owner-direct proof or
@@ -313,7 +313,7 @@ func hasPaymentAuthorization(r *http.Request) bool {
 	return false
 }
 
-// requesterAddress resolves a wallet identity for CDP lookup hints and paid
+// requesterAddress resolves a wallet identity for Hyperion lookup hints and paid
 // heuristics. Prefer Payment over ?client= / header. Private-deal access
 // decisions use verified credentials, not this address alone.
 func (a *Authorizer) requesterAddress(r *http.Request) common.Address {

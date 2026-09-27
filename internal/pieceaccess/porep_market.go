@@ -8,29 +8,25 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-// TODO(BIG): Replace these PLACEHOLDER PoRep Market contract addresses with the
-// real mainnet and Calibration deployments once they are known / finalized.
-// Until then, voucher EIP-712 domain pinning on those networks uses these
-// dummies — they are NOT the live market contracts. Do not ship production
-// voucher flows against mainnet/calib relying on these values.
+// Finalized PoRep Market UUPS proxies from
+// https://github.com/fidlabs/porep-market/tree/main/deployments
+// (mainnet/calibnet latest.json, status=finalized). Used as EIP-712
+// verifyingContract for access credentials.
 //
 // Devnet (and any other chain) has no built-in default; pass
 // --porep-market-address / SP_PROXY_POREP_MARKET_ADDRESS / POREP_MARKET.
 var (
-	// PorepMarketMainnetPlaceholder is a temporary stand-in for chain 314.
-	PorepMarketMainnetPlaceholder = common.HexToAddress("0x0000000000000000000000000000000000a1a1a1")
-	// PorepMarketCalibrationPlaceholder is a temporary stand-in for chain 314159.
-	PorepMarketCalibrationPlaceholder = common.HexToAddress("0x0000000000000000000000000000000000b2b2b2")
+	// PorepMarketMainnet is the PoRepMarket proxy on chain 314.
+	PorepMarketMainnet = common.HexToAddress("0x02328379543e47bA8AeD039B08aA8cC836584E74")
+	// PorepMarketCalibration is the PoRepMarket proxy on chain 314159.
+	PorepMarketCalibration = common.HexToAddress("0xF895b2Af3B238E7D05A44cd7FBeBE10cBeb3F34b")
 )
 
 // PorepMarketAddressesByChainID maps well-known networks to the PoRep Market
 // contract used as EIP-712 verifyingContract for access vouchers.
-//
-// TODO(BIG): Update entries when real mainnet/Calibration addresses land
-// (see PorepMarketMainnetPlaceholder / PorepMarketCalibrationPlaceholder).
 var PorepMarketAddressesByChainID = map[int64]common.Address{
-	constants.ChainIDMainnet:     PorepMarketMainnetPlaceholder,
-	constants.ChainIDCalibration: PorepMarketCalibrationPlaceholder,
+	constants.ChainIDMainnet:     PorepMarketMainnet,
+	constants.ChainIDCalibration: PorepMarketCalibration,
 }
 
 // ResolvePorepMarketAddress returns the PoRep Market contract for voucher

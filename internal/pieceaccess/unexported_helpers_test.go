@@ -297,26 +297,6 @@ func TestAccessAuthorizesDeal(t *testing.T) {
 	}
 }
 
-func TestDealAllowsAccess(t *testing.T) {
-	t.Parallel()
-	owner := common.HexToAddress("0x1")
-	if dealAllowsAccess(nil, owner) {
-		t.Fatal("nil")
-	}
-	if !dealAllowsAccess(&Deal{DealType: DealTypePublic}, common.Address{}) {
-		t.Fatal("public")
-	}
-	if dealAllowsAccess(&Deal{DealType: DealTypePrivate, Client: owner}, common.Address{}) {
-		t.Fatal("anonymous private")
-	}
-	if !dealAllowsAccess(&Deal{DealType: DealTypePrivate, Client: owner}, owner) {
-		t.Fatal("owner private")
-	}
-	if dealAllowsAccess(&Deal{DealType: DealTypeUnknown}, owner) {
-		t.Fatal("unknown")
-	}
-}
-
 func TestVoucherErrorHelpers(t *testing.T) {
 	t.Parallel()
 	if voucherErrorCode(errors.New("proof expired deadline")) != "proof_expired" {
