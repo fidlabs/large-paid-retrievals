@@ -1,6 +1,7 @@
 package pieceaccess
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/data-preservation-programs/go-synapse/constants"
@@ -27,11 +28,11 @@ func TestResolvePorepMarketAddress(t *testing.T) {
 	}
 
 	devnet, err := ResolvePorepMarketAddress("", constants.ChainIDDevnet)
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatalf("devnet should error without override, got %s", devnet.Hex())
 	}
-	if devnet != (common.Address{}) {
-		t.Fatalf("devnet should have no default, got %s", devnet.Hex())
+	if !strings.Contains(err.Error(), "no PoRep market default") {
+		t.Fatalf("devnet error: %v", err)
 	}
 
 	override := common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678")

@@ -47,5 +47,5 @@ func ResolvePorepMarketAddress(override string, chainID int64) (common.Address, 
 	if addr, ok := PorepMarketAddressesByChainID[chainID]; ok && addr != (common.Address{}) {
 		return addr, nil
 	}
-	return common.Address{}, nil
+	return common.Address{}, fmt.Errorf("pieceaccess: no PoRep market default for chain %d; set --porep-market-address (or SP_PROXY_POREP_MARKET_ADDRESS / POREP_MARKET)", chainID)
 }

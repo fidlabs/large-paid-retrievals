@@ -138,9 +138,6 @@ func resolveAuthDomain(marketOverride string, chainID *big.Int) (pieceaccessDoma
 	if err != nil {
 		return pieceaccessDomain{}, err
 	}
-	if market == (common.Address{}) {
-		return pieceaccessDomain{}, nil
-	}
 	return pieceaccessDomain{chainID: new(big.Int).Set(chainID), market: market}, nil
 }
 

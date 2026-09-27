@@ -93,9 +93,6 @@ func requireVoucherDomainPin(settings proxyAppSettings, fc proxyFilpay) (*big.In
 	if err != nil {
 		return nil, common.Address{}, err
 	}
-	if market == (common.Address{}) {
-		return nil, common.Address{}, fmt.Errorf("PoRep market address required for chain %d; set --porep-market-address (or SP_PROXY_POREP_MARKET_ADDRESS / POREP_MARKET)", chainID.Int64())
-	}
 	return chainID, market, nil
 }
 

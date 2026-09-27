@@ -544,7 +544,7 @@ func TestRequireVoucherDomainPin(t *testing.T) {
 
 	stub.chainID = big.NewInt(31415926) // devnet — no built-in default
 	_, _, err = requireVoucherDomainPin(proxyAppSettings{}, stub)
-	if err == nil || !strings.Contains(err.Error(), "PoRep market address required") {
+	if err == nil || !strings.Contains(err.Error(), "no PoRep market default") {
 		t.Fatalf("expected missing market error, got %v", err)
 	}
 
