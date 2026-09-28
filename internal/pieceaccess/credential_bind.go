@@ -133,7 +133,7 @@ func MintProofForPiece(domain apitypes.TypedDataDomain, scope *big.Int, pieceCID
 		return "", fmt.Errorf("%w: empty piece CID", ErrInvalidVoucher)
 	}
 	if proofDeadline <= 0 {
-		proofDeadline = time.Now().Unix() + int64(MaxProofTTL.Seconds())
+		proofDeadline = time.Now().Unix() + int64(DefaultProofTTL().Seconds())
 	}
 	return MintProofToken(proofKey, domain, scope, pieceCID, proofDeadline)
 }

@@ -177,24 +177,6 @@ func ensureTypedDataDomainTypes(td *apitypes.TypedData) {
 	if td.Types == nil {
 		td.Types = apitypes.Types{}
 	}
-	if _, ok := td.Types["EIP712Domain"]; ok {
-		return
-	}
-	var fields []apitypes.Type
-	if td.Domain.Name != "" {
-		fields = append(fields, apitypes.Type{Name: "name", Type: "string"})
-	}
-	if td.Domain.Version != "" {
-		fields = append(fields, apitypes.Type{Name: "version", Type: "string"})
-	}
-	if td.Domain.ChainId != nil {
-		fields = append(fields, apitypes.Type{Name: "chainId", Type: "uint256"})
-	}
-	if td.Domain.VerifyingContract != "" {
-		fields = append(fields, apitypes.Type{Name: "verifyingContract", Type: "address"})
-	}
-	if td.Domain.Salt != "" {
-		fields = append(fields, apitypes.Type{Name: "salt", Type: "bytes32"})
-	}
-	td.Types["EIP712Domain"] = fields
+	// Always overwrite: mints must hash the full canonical domain field set.
+	td.Types["EIP712Domain"] = canonicalEIP712DomainTypes(td.Domain)
 }

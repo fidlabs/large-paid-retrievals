@@ -296,6 +296,29 @@ func TestMiddlewareLookupErrorHEADAllowed(t *testing.T) {
 	if !called || rec.Code != http.StatusOK {
 		t.Fatalf("called=%v code=%d", called, rec.Code)
 	}
+	if lookup.cid != "" {
+		t.Fatalf("HEAD must not call Hyperion; lookup cid=%q", lookup.cid)
+	}
+}
+
+func TestMiddlewareHEADSkipsCredentialAndLookup(t *testing.T) {
+	t.Parallel()
+	lookup := &stubLookup{err: errors.New("should not be called")}
+	handler := pieceaccess.NewAuthorizer(pieceaccess.WithDealLookup(lookup)).Middleware(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}),
+	)
+	req := httptest.NewRequest(http.MethodHead, "/piece/baga6ea4seaqabc", nil)
+	req.Header.Set("Authorization", "RetrievalProof not-a-valid-token")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("HEAD with bad proof must stay unrestricted; code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if lookup.cid != "" {
+		t.Fatalf("HEAD must not call Hyperion; lookup cid=%q", lookup.cid)
+	}
 }
 
 func TestDealJSON(t *testing.T) {

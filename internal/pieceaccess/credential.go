@@ -50,6 +50,15 @@ var ErrInvalidVoucher = errors.New("pieceaccess: invalid access credential")
 // whole repeat-download window.
 const MaxProofTTL = dealstore.PaidAccessTTL
 
+// ProofMintSkew is subtracted from MaxProofTTL when minting so small client/SP
+// clock skew does not reject proofs minted at the TTL ceiling.
+const ProofMintSkew = 2 * time.Minute
+
+// DefaultProofTTL is the recommended client mint window (MaxProofTTL minus skew).
+func DefaultProofTTL() time.Duration {
+	return MaxProofTTL - ProofMintSkew
+}
+
 // VerifiedProof is a validated RetrievalProof (PoP) token.
 type VerifiedProof struct {
 	Requester common.Address
@@ -134,22 +143,30 @@ func (p *voucherDomainPin) configured() bool {
 	return p != nil && p.chainID != nil && p.chainID.Sign() > 0 && p.contract != (common.Address{})
 }
 
-// parseAndVerifyAccess reads RetrievalProof (0..1) and RetrievalVoucher (0..N)
+// parseAndVerifyAccess reads RetrievalProof (0 or 1) and RetrievalVoucher (0..N)
 // Authorization headers and verifies them against pieceCID + the domain pin.
 //
-// A present-but-invalid proof is fatal (returns an error → 403 JSON). Voucher
-// failures are non-fatal diagnostics. When no Retrieval* header is present at
-// all it returns (nil, nil).
+// More than one RetrievalProof is fatal. A present-but-invalid proof is fatal
+// (returns an error → 403 JSON). Voucher failures are non-fatal diagnostics.
+// When no Retrieval* header is present at all it returns (nil, nil).
 func parseAndVerifyAccess(r *http.Request, pieceCID string, pin *voucherDomainPin) (*VerifiedAccess, error) {
 	proofRaws := authTokensForScheme(r, SchemeRetrievalProof)
 	voucherRaws := authTokensForScheme(r, SchemeRetrievalVoucher)
 	if len(proofRaws) == 0 && len(voucherRaws) == 0 {
 		return nil, nil
 	}
+	if len(proofRaws) > 1 {
+		err := fmt.Errorf("%w: multiple RetrievalProof headers", ErrInvalidVoucher)
+		return nil, &voucherVerifyError{details: []voucherErrorDetail{{
+			Index:   0,
+			Error:   voucherErrorCode(err),
+			Message: err.Error(),
+		}}}
+	}
 	now := credentialNow()
 	access := &VerifiedAccess{}
 
-	if len(proofRaws) > 0 {
+	if len(proofRaws) == 1 {
 		proof, err := verifyProofToken(proofRaws[0], pieceCID, now, pin)
 		if err != nil {
 			return nil, &voucherVerifyError{details: []voucherErrorDetail{{
@@ -525,7 +542,9 @@ func validateTypeFields(types apitypes.Types, primary string, want map[string]st
 }
 
 func recoverTypedDataSigner(obj *eip712TypedDataJSON, signatureHex string) (common.Address, error) {
-	ensureEIP712DomainTypes(obj)
+	if err := ensureEIP712DomainTypes(obj); err != nil {
+		return common.Address{}, err
+	}
 	typed := apitypes.TypedData{
 		Types:       obj.Types,
 		PrimaryType: obj.PrimaryType,
@@ -539,30 +558,68 @@ func recoverTypedDataSigner(obj *eip712TypedDataJSON, signatureHex string) (comm
 	return recoverEIP712Signer(digest, signatureHex)
 }
 
-func ensureEIP712DomainTypes(obj *eip712TypedDataJSON) {
+// canonicalEIP712DomainTypes returns the EIP712Domain field list implied by the
+// present domain values, in fixed order (name, version, chainId,
+// verifyingContract, salt).
+func canonicalEIP712DomainTypes(domain apitypes.TypedDataDomain) []apitypes.Type {
+	var fields []apitypes.Type
+	if domain.Name != "" {
+		fields = append(fields, apitypes.Type{Name: "name", Type: "string"})
+	}
+	if domain.Version != "" {
+		fields = append(fields, apitypes.Type{Name: "version", Type: "string"})
+	}
+	if domain.ChainId != nil {
+		fields = append(fields, apitypes.Type{Name: "chainId", Type: "uint256"})
+	}
+	if domain.VerifyingContract != "" {
+		fields = append(fields, apitypes.Type{Name: "verifyingContract", Type: "address"})
+	}
+	if domain.Salt != "" {
+		fields = append(fields, apitypes.Type{Name: "salt", Type: "bytes32"})
+	}
+	return fields
+}
+
+func eip712DomainTypesMatch(got, want []apitypes.Type) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	wantByName := make(map[string]string, len(want))
+	for _, f := range want {
+		wantByName[f.Name] = f.Type
+	}
+	seen := make(map[string]struct{}, len(got))
+	for _, f := range got {
+		t, ok := wantByName[f.Name]
+		if !ok || f.Type != t {
+			return false
+		}
+		if _, dup := seen[f.Name]; dup {
+			return false
+		}
+		seen[f.Name] = struct{}{}
+	}
+	return len(seen) == len(want)
+}
+
+// ensureEIP712DomainTypes synthesizes types.EIP712Domain when omitted. When
+// present, the field set MUST match the canonical set for the domain values
+// (rejects partial domain types that would leave chainId/verifyingContract
+// unsigned and rewritable after signing).
+func ensureEIP712DomainTypes(obj *eip712TypedDataJSON) error {
 	if obj.Types == nil {
 		obj.Types = apitypes.Types{}
 	}
-	if _, ok := obj.Types["EIP712Domain"]; ok {
-		return
+	expected := canonicalEIP712DomainTypes(obj.Domain)
+	if existing, ok := obj.Types["EIP712Domain"]; ok {
+		if !eip712DomainTypesMatch(existing, expected) {
+			return fmt.Errorf("%w: non-canonical types.EIP712Domain", ErrInvalidVoucher)
+		}
+		return nil
 	}
-	var fields []apitypes.Type
-	if obj.Domain.Name != "" {
-		fields = append(fields, apitypes.Type{Name: "name", Type: "string"})
-	}
-	if obj.Domain.Version != "" {
-		fields = append(fields, apitypes.Type{Name: "version", Type: "string"})
-	}
-	if obj.Domain.ChainId != nil {
-		fields = append(fields, apitypes.Type{Name: "chainId", Type: "uint256"})
-	}
-	if obj.Domain.VerifyingContract != "" {
-		fields = append(fields, apitypes.Type{Name: "verifyingContract", Type: "address"})
-	}
-	if obj.Domain.Salt != "" {
-		fields = append(fields, apitypes.Type{Name: "salt", Type: "bytes32"})
-	}
-	obj.Types["EIP712Domain"] = fields
+	obj.Types["EIP712Domain"] = expected
+	return nil
 }
 
 func recoverEIP712Signer(digest []byte, signatureHex string) (common.Address, error) {

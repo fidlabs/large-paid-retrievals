@@ -79,10 +79,26 @@ func TestAuthHeadersForPieceOwnerDirectRequiresDomain(t *testing.T) {
 	}
 	_, err = (&retrievalAuthConfig{key: ownerKey}).authHeadersForPiece(context.Background(), "baga6ea4seaqtest")
 	if err == nil {
-		t.Fatal("expected error when owner-direct domain is unset")
+		t.Fatal("expected error when owner-direct domain cannot be resolved")
 	}
-	if !strings.Contains(err.Error(), "porep-market-address") {
+	if !strings.Contains(err.Error(), "eth_chainId") && !strings.Contains(err.Error(), "porep-market") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestBuildRetrievalAuthSkipsRPCWithoutVouchers(t *testing.T) {
+	t.Parallel()
+	ownerKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Unreachable pay RPC must not fail build when no vouchers (lazy domain).
+	cfg, err := buildRetrievalAuth(context.Background(), ownerKey, nil, "http://127.0.0.1:1", "")
+	if err != nil {
+		t.Fatalf("build without vouchers must succeed: %v", err)
+	}
+	if cfg == nil || cfg.domain.ok() {
+		t.Fatalf("expected unset domain after lazy build, cfg=%+v", cfg)
 	}
 }
 
