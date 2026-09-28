@@ -208,6 +208,52 @@ func TestMiddlewarePaymentPreferredOverClientQuery_OwnerProof(t *testing.T) {
 	}
 }
 
+func TestMiddlewarePublicDealPaymentMustMatchProof(t *testing.T) {
+	t.Parallel()
+	ownerKey, _ := mustCredKey(t)
+	other := common.HexToAddress("0xAF6C83b9D33DdEAD8810011abb5cA1Cfc2d8754a")
+	lookup := &stubLookup{deal: &pieceaccess.Deal{
+		DealID: "1", DealType: pieceaccess.DealTypePublic,
+	}}
+	handler := testCredentialAuthorizer(lookup).Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	proof := mustOwnerCredential(t, ownerKey, 1, testPieceCID, time.Now().Add(time.Hour).Unix(), 314159)
+
+	t.Run("mismatch_denied", func(t *testing.T) {
+		t.Parallel()
+		authz, err := paymentAuth(other.Hex())
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodGet, "/piece/"+testPieceCID, nil)
+		addRetrievalProof(req, proof)
+		req.Header.Add("Authorization", authz)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("public deal must still bind Payment to proof; code=%d body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("match_allowed", func(t *testing.T) {
+		t.Parallel()
+		owner := crypto.PubkeyToAddress(ownerKey.PublicKey)
+		authz, err := paymentAuth(owner.Hex())
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodGet, "/piece/"+testPieceCID, nil)
+		addRetrievalProof(req, proof)
+		req.Header.Add("Authorization", authz)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("matching Payment+proof on public deal must allow; code=%d", rec.Code)
+		}
+	})
+}
+
 func TestMiddlewarePrivateDealCredentialSelectsMatchingDealAmongMany(t *testing.T) {
 	t.Parallel()
 	ownerKey, owner := mustCredKey(t)

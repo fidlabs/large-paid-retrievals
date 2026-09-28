@@ -234,6 +234,14 @@ func (a *Authorizer) denyAccess(r *http.Request, deals []*Deal, lookupErr error,
 	paid := a.isPaidRetrieval(r)
 	paymentClient := paymentClientAddress(r)
 
+	// When both a decodable Payment ClientAddress and a verified proof are present,
+	// they must agree for every deal type (public-wins must not skip this check).
+	if paymentClient != (common.Address{}) && access != nil && access.Proof != nil {
+		if !sameAddress(paymentClient, access.Proof.Requester) {
+			return true, "payment client does not match proof requester", true
+		}
+	}
+
 	if lookupErr != nil && !errors.Is(lookupErr, ErrDealNotFound) {
 		return true, "deal lookup failed", false
 	}
