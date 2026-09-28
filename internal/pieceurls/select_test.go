@@ -123,11 +123,62 @@ func TestSelectBestPieceSource_FreeBeatsPaid(t *testing.T) {
 	if !sel.Free {
 		t.Fatalf("expected free selection")
 	}
+	if sel.NeedsRetrievalAuth {
+		t.Fatal("anonymous public free must not set NeedsRetrievalAuth")
+	}
 	if sel.TotalBytes != int64(len(body)) {
 		t.Fatalf("TotalBytes=%d want %d", sel.TotalBytes, len(body))
 	}
 	if _, err := os.Stat(filepath.Join(dir, sanitizeFilename(cid)+".car")); !os.IsNotExist(err) {
 		t.Fatalf("probe must not create CAR on disk: %v", err)
+	}
+}
+
+func TestSelectBestPieceSource_AuthenticatedFreeNeedsAuth(t *testing.T) {
+	t.Parallel()
+	const cid = "bafkreidcbkgxoddug6vawnjrzb4aaublfn46sd2rvxnykbxkkarke7y76e"
+	const client = "0x1111111111111111111111111111111111111111"
+	body := []byte("private-free-car")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/piece/"+cid {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method == http.MethodHead {
+			w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, "method", http.StatusMethodNotAllowed)
+			return
+		}
+		if r.URL.Query().Get("client") == "" {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := NewClient(srv.Client())
+	c.ProbeClient = client
+	c.AuthHeadersForPiece = func(pieceCID string) ([]string, error) {
+		return []string{"RetrievalProof tok"}, nil
+	}
+	sel, err := c.SelectBestPieceSource(context.Background(), cid, []*url.URL{u}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sel.Free || !sel.NeedsRetrievalAuth {
+		t.Fatalf("want authenticated free, got free=%v needsAuth=%v", sel.Free, sel.NeedsRetrievalAuth)
 	}
 }
 

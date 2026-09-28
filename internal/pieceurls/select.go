@@ -21,6 +21,10 @@ type Selection struct {
 	Base *url.URL
 	CID  string
 	Free bool
+	// NeedsRetrievalAuth is true when a free (HTTP 200) selection required an
+	// authenticated probe (private free). Anonymous public free stays false so
+	// downloads can skip minting Retrieval credentials.
+	NeedsRetrievalAuth bool
 
 	DealUUID   string
 	PriceUSDFC string
@@ -219,10 +223,11 @@ func (c *Client) probeGET(ctx context.Context, base *url.URL, cid, client0x stri
 			return nil, false, nil
 		}
 		out := &Selection{
-			Base:       cloneURLBase(base),
-			CID:        cid,
-			Free:       true,
-			TotalBytes: totalBytes,
+			Base:               cloneURLBase(base),
+			CID:                cid,
+			Free:               true,
+			NeedsRetrievalAuth: strings.TrimSpace(client0x) != "",
+			TotalBytes:         totalBytes,
 		}
 		freeResult.Store(out)
 		if log != nil {
