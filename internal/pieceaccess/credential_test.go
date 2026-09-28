@@ -244,56 +244,84 @@ func TestParseAndVerifyAccessRejectsMultipleProofs(t *testing.T) {
 
 func TestVerifyProofRejectsPartialDomainTypes(t *testing.T) {
 	t.Parallel()
-	// Regression: types.EIP712Domain that omits chainId/verifyingContract would let an
-	// attacker rewrite those unsigned domain fields after signing and still pass the pin.
 	key, _ := mustKey(t)
-	// Sign with only name in the domain (matching partial types). go-ethereum rejects
-	// hashing when domain values exceed the typed field list.
-	td := apitypes.TypedData{
-		Types: apitypes.Types{
-			"EIP712Domain": {{Name: "name", Type: "string"}},
-			primaryTypeProof: {
-				{Name: fieldScope, Type: "uint256"},
-				{Name: fieldResource, Type: "string"},
-				{Name: fieldDeadline, Type: "uint256"},
-			},
-		},
-		PrimaryType: primaryTypeProof,
-		Domain:      apitypes.TypedDataDomain{Name: eip712DomainName},
-		Message: apitypes.TypedDataMessage{
-			fieldScope:    "1",
-			fieldResource: testPieceCID,
-			fieldDeadline: fmt.Sprintf("%d", time.Now().Unix()+3600),
-		},
-	}
+	tok := mustPartialDomainToken(t, key, primaryTypeProof, []apitypes.Type{
+		{Name: fieldScope, Type: "uint256"},
+		{Name: fieldResource, Type: "string"},
+		{Name: fieldDeadline, Type: "uint256"},
+	}, apitypes.TypedDataMessage{
+		fieldScope:    "1",
+		fieldResource: testPieceCID,
+		fieldDeadline: fmt.Sprintf("%d", time.Now().Unix()+3600),
+	})
 
-	digest, _, err := apitypes.TypedDataAndHash(td)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sig, err := crypto.Sign(digest, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sig[64] += 27
-	sigHex := "0x" + common.Bytes2Hex(sig)
-
-	// Rewrite domain to the verifier pin after signing (fields not covered by partial types).
-	obj := &eip712TypedDataJSON{
-		Domain:      NewDomain(big.NewInt(1), common.HexToAddress(testContract)),
-		Types:       td.Types,
-		PrimaryType: td.PrimaryType,
-		Message: map[string]any{
-			fieldScope:    td.Message[fieldScope],
-			fieldResource: td.Message[fieldResource],
-			fieldDeadline: td.Message[fieldDeadline],
-		},
-	}
-	tok := encodeSignedShape(t, obj, sigHex)
-
-	_, err = verifyProofToken(tok, testPieceCID, time.Now().Unix(), credentialTestPin(1))
+	_, err := verifyProofToken(tok, testPieceCID, time.Now().Unix(), credentialTestPin(1))
 	if err == nil || !strings.Contains(err.Error(), "non-canonical") {
 		t.Fatalf("want non-canonical domain types reject, got %v", err)
+	}
+}
+
+func TestVerifyVoucherRejectsPartialDomainTypes(t *testing.T) {
+	t.Parallel()
+	// Same rewrite attack as proofs: partial types.EIP712Domain leaves chainId /
+	// verifyingContract unsigned; after rewriting them to the pin, verification must fail.
+	key, grantee := mustKey(t)
+	now := time.Now().Unix()
+	tok := mustPartialDomainToken(t, key, primaryTypeVoucher, []apitypes.Type{
+		{Name: fieldGrantee, Type: "address"},
+		{Name: fieldScope, Type: "uint256"},
+		{Name: fieldIssuedAt, Type: "uint256"},
+		{Name: fieldDeadline, Type: "uint256"},
+	}, apitypes.TypedDataMessage{
+		fieldGrantee:  grantee.Hex(),
+		fieldScope:    "1001",
+		fieldIssuedAt: fmt.Sprintf("%d", now),
+		fieldDeadline: fmt.Sprintf("%d", now+86400),
+	})
+
+	_, err := verifyVoucherToken(tok, now, credentialTestPin(1))
+	if err == nil || !strings.Contains(err.Error(), "non-canonical") {
+		t.Fatalf("want non-canonical domain types reject, got %v", err)
+	}
+
+	pin := &DomainPin{ChainID: big.NewInt(1), Contract: common.HexToAddress(testContract)}
+	_, _, err = VerifyCapabilityToken(tok, now, pin)
+	if err == nil || !strings.Contains(err.Error(), "non-canonical") {
+		t.Fatalf("VerifyCapabilityToken want non-canonical reject, got %v", err)
+	}
+}
+
+func TestParseAndVerifyAccessPartialDomainVoucherIsDiagnostic(t *testing.T) {
+	t.Parallel()
+	ownerKey, grantee := mustKey(t)
+	granteeKey, _ := mustKey(t)
+	now := time.Now().Unix()
+	proof := mustProofToken(t, granteeKey, 0, testPieceCID, now+3600, 1)
+	partial := mustPartialDomainToken(t, ownerKey, primaryTypeVoucher, []apitypes.Type{
+		{Name: fieldGrantee, Type: "address"},
+		{Name: fieldScope, Type: "uint256"},
+		{Name: fieldIssuedAt, Type: "uint256"},
+		{Name: fieldDeadline, Type: "uint256"},
+	}, apitypes.TypedDataMessage{
+		fieldGrantee:  grantee.Hex(),
+		fieldScope:    "1001",
+		fieldIssuedAt: fmt.Sprintf("%d", now),
+		fieldDeadline: fmt.Sprintf("%d", now+86400),
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/piece/"+testPieceCID, nil)
+	req.Header.Add("Authorization", "RetrievalProof "+proof)
+	req.Header.Add("Authorization", "RetrievalVoucher "+partial)
+
+	access, err := parseAndVerifyAccess(req, testPieceCID, credentialTestPin(1))
+	if err != nil {
+		t.Fatalf("partial-domain voucher must be best-effort, not fatal: %v", err)
+	}
+	if access.Proof == nil || len(access.Vouchers) != 0 || len(access.voucherErrors) != 1 {
+		t.Fatalf("proof=%v vouchers=%d errs=%d", access.Proof != nil, len(access.Vouchers), len(access.voucherErrors))
+	}
+	if !strings.Contains(access.voucherErrors[0].Message, "non-canonical") {
+		t.Fatalf("err=%+v", access.voucherErrors[0])
 	}
 }
 
@@ -437,6 +465,44 @@ func mustVoucherToken(t *testing.T, ownerKey *ecdsa.PrivateKey, grantee common.A
 	domain := NewDomain(big.NewInt(chainID), common.HexToAddress(testContract))
 	td := BuildVoucherTypedData(domain, grantee, big.NewInt(scope), issuedAt, deadline)
 	return MustEncodeSignedToken(td, MustSignEIP712(ownerKey, td))
+}
+
+// mustPartialDomainToken signs with types.EIP712Domain = [name] only, then rewrites
+// domain.chainId / verifyingContract to the test pin so those fields sit outside the
+// signed digest. Verifiers must reject via non-canonical domain types.
+func mustPartialDomainToken(t *testing.T, key *ecdsa.PrivateKey, primary string, primaryFields []apitypes.Type, message apitypes.TypedDataMessage) string {
+	t.Helper()
+	td := apitypes.TypedData{
+		Types: apitypes.Types{
+			"EIP712Domain": {{Name: "name", Type: "string"}},
+			primary:        primaryFields,
+		},
+		PrimaryType: primary,
+		Domain:      apitypes.TypedDataDomain{Name: eip712DomainName},
+		Message:     message,
+	}
+	digest, _, err := apitypes.TypedDataAndHash(td)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := crypto.Sign(digest, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig[64] += 27
+	sigHex := "0x" + common.Bytes2Hex(sig)
+
+	msg := make(map[string]any, len(message))
+	for k, v := range message {
+		msg[k] = v
+	}
+	obj := &eip712TypedDataJSON{
+		Domain:      NewDomain(big.NewInt(1), common.HexToAddress(testContract)),
+		Types:       td.Types,
+		PrimaryType: primary,
+		Message:     msg,
+	}
+	return encodeSignedShape(t, obj, sigHex)
 }
 
 // encodeRawToken base64url-encodes an arbitrary JSON map (malformed-token tests).

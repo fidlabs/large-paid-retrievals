@@ -120,6 +120,15 @@ func TestValidateProofAndVoucherShape(t *testing.T) {
 			{Name: fieldIssuedAt, Type: "uint256"},
 		}
 	}, "duplicate type field")
+	mutateVoucher("incomplete primary types", func(o *eip712TypedDataJSON) {
+		// Omit grantee from types while leaving it in message — critical field would
+		// otherwise sit outside the signed digest if shape checks were skipped.
+		o.Types[primaryTypeVoucher] = []apitypes.Type{
+			{Name: fieldScope, Type: "uint256"},
+			{Name: fieldIssuedAt, Type: "uint256"},
+			{Name: fieldDeadline, Type: "uint256"},
+		}
+	}, "field count")
 	mutateVoucher("missing issuedAt", func(o *eip712TypedDataJSON) { delete(o.Message, fieldIssuedAt) }, "missing voucher.message.issuedAt")
 }
 
