@@ -42,15 +42,16 @@ type problemDetails struct {
 }
 
 type challengeItem struct {
-	CID           string
-	Base          *url.URL
-	Free          bool
-	TotalBytes    int64 // from probe HEAD; -1 when unknown
-	DealUUID      string
-	PriceUSDFC    string
-	Payee0x       string
-	PaymentTxHash string
-	Challenge     mpp.Challenge
+	CID                string
+	Base               *url.URL
+	Free               bool
+	NeedsRetrievalAuth bool  // free private: probe used Retrieval credentials
+	TotalBytes         int64 // from probe HEAD; -1 when unknown
+	DealUUID           string
+	PriceUSDFC         string
+	Payee0x            string
+	PaymentTxHash      string
+	Challenge          mpp.Challenge
 }
 
 // filpayOperations is the Filecoin Pay surface used by fetch/rail-check (mockable in tests).
@@ -110,8 +111,8 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 		spBaseURL          string
 		outDir             string
 		cids               []string
-		cidFile            string
 		manifest           string
+		cidFile            string
 		yes                bool
 		dryRun             bool
 		noProgress         bool
@@ -122,6 +123,8 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 		payRPCURL          string
 		payPaymentsAddress string
 		payTokenAddress    string
+		vouchers           []string
+		porepMarketAddress string
 	)
 	c := &cobra.Command{
 		Use:   "fetch",
@@ -132,8 +135,12 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 				return fmt.Errorf("load client private key (--filpay-private-key* / %s): %w", keyOpts.privateKeyEnv, err)
 			}
 			client := crypto.PubkeyToAddress(evmPK.PublicKey).Hex()
+			vouchers = normalizeVoucherFlags(vouchers)
 			if verbose {
 				fmt.Printf("Client 0x address (from private key): %s\n", client)
+				if len(vouchers) > 0 {
+					fmt.Printf("Access vouchers: %d\n", len(vouchers))
+				}
 			}
 			if payDebug {
 				payClientLog("client 0x=%s (derived from private key)", client)
@@ -175,6 +182,13 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 			ctx := cmd.Context()
 			if ctx == nil {
 				ctx = context.Background()
+			}
+			authCfg, err := buildRetrievalAuth(ctx, evmPK, vouchers, payRPCURL, porepMarketAddress)
+			if err != nil {
+				return fmt.Errorf("retrieval auth: %w", err)
+			}
+			pieceProber.AuthHeadersForPiece = func(pieceCID string) ([]string, error) {
+				return authCfg.authHeadersForPiece(ctx, pieceCID)
 			}
 
 			probeLog := makeProbeLog(cmd.OutOrStdout(), verbose)
@@ -253,14 +267,15 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 					}
 				}
 				items = append(items, challengeItem{
-					CID:        cid,
-					Base:       sel.Base,
-					Free:       sel.Free,
-					TotalBytes: sel.TotalBytes,
-					DealUUID:   sel.DealUUID,
-					PriceUSDFC: sel.PriceUSDFC,
-					Payee0x:    strings.TrimSpace(sel.Payee0x),
-					Challenge:  sel.Challenge,
+					CID:                cid,
+					Base:               sel.Base,
+					Free:               sel.Free,
+					NeedsRetrievalAuth: sel.NeedsRetrievalAuth,
+					TotalBytes:         sel.TotalBytes,
+					DealUUID:           sel.DealUUID,
+					PriceUSDFC:         sel.PriceUSDFC,
+					Payee0x:            strings.TrimSpace(sel.Payee0x),
+					Challenge:          sel.Challenge,
 				})
 			}
 
@@ -376,11 +391,19 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 				if it.Base == nil {
 					return fmt.Errorf("internal: missing base URL for CID %s", it.CID)
 				}
+				var tokens []string
+				if authCfg.headersNeeded(it.Free, it.NeedsRetrievalAuth) {
+					var terr error
+					tokens, terr = authCfg.authHeadersForPiece(ctx, it.CID)
+					if terr != nil {
+						return fmt.Errorf("retrieval auth for CID %s: %w", it.CID, terr)
+					}
+				}
 				if it.Free {
 					if verbose {
 						fmt.Printf("  - downloading free CAR for CID %s from %s\n", it.CID, it.Base.String())
 					}
-					return downloadFreeCAR(cli, it.Base, it.CID, outDir, it.TotalBytes, pieceUI, verbose)
+					return downloadFreeCAR(cli, it.Base, it.CID, client, outDir, it.TotalBytes, pieceUI, verbose, tokens)
 				}
 				piecePath := "/piece/" + it.CID
 				if verbose {
@@ -419,7 +442,7 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				return downloadCAR(cli, it.Base, it.CID, piecePath, client, authz, outDir, it.TotalBytes, pieceUI, verbose)
+				return downloadCAR(cli, it.Base, it.CID, piecePath, client, authz, outDir, it.TotalBytes, pieceUI, verbose, tokens)
 			}
 
 			type dlResult struct {
@@ -505,6 +528,8 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 	c.Flags().StringVar(&payRPCURL, "pay-rpc-url", getenv("SP_PROXY_PAY_RPC_URL", "https://api.node.glif.io/rpc/v1"), "Filecoin JSON-RPC URL: FVM payments + Lotus StateMinerInfo for discovery")
 	c.Flags().StringVar(&payPaymentsAddress, "pay-payments-address", getenv("SP_PROXY_PAY_PAYMENTS_ADDRESS", ""), "Filecoin Pay payments contract (0x); empty uses chain default")
 	c.Flags().StringVar(&payTokenAddress, "pay-token-address", getenv("SP_PROXY_PAY_TOKEN_ADDRESS", ""), "USDFC token (0x); empty uses chain default (required override on Curio/FOC localnet)")
+	c.Flags().StringArrayVar(&vouchers, "voucher", nil, "EIP-712 RetrievalVoucher capability (base64url); repeat for multiple deals. Each token is checked for format, expiry, and signature at startup, then forwarded as Authorization: RetrievalVoucher with a minted per-CID Authorization: RetrievalProof")
+	c.Flags().StringVar(&porepMarketAddress, "porep-market-address", firstEnv("SP_PROXY_POREP_MARKET_ADDRESS", "POREP_MARKET"), "PoRep Market (0x) for owner-direct EIP-712 domain; required on chains without a built-in default")
 	return c
 }
 
@@ -519,6 +544,8 @@ func cmdRailCheck(keyOpts *filpayKeyOpts) *cobra.Command {
 		payRPCURL          string
 		payPaymentsAddress string
 		payTokenAddress    string
+		vouchers           []string
+		porepMarketAddress string
 	)
 	c := &cobra.Command{
 		Use:   "rail-check",
@@ -529,6 +556,7 @@ func cmdRailCheck(keyOpts *filpayKeyOpts) *cobra.Command {
 				return fmt.Errorf("load client private key (--filpay-private-key* / %s): %w", keyOpts.privateKeyEnv, err)
 			}
 			client := crypto.PubkeyToAddress(evmPK.PublicKey).Hex()
+			vouchers = normalizeVoucherFlags(vouchers)
 			fmt.Printf("Client (payer): %s\n", client)
 
 			var filpayOpts []filpay.Option
@@ -575,6 +603,13 @@ func cmdRailCheck(keyOpts *filpayKeyOpts) *cobra.Command {
 				ctx := cmd.Context()
 				if ctx == nil {
 					ctx = context.Background()
+				}
+				authCfg, err := buildRetrievalAuth(ctx, evmPK, vouchers, payRPCURL, porepMarketAddress)
+				if err != nil {
+					return fmt.Errorf("retrieval auth: %w", err)
+				}
+				pieceProber.AuthHeadersForPiece = func(pieceCID string) ([]string, error) {
+					return authCfg.authHeadersForPiece(ctx, pieceCID)
 				}
 				probeLog := func(format string, args ...any) {
 					if payDebug {
@@ -745,6 +780,8 @@ func cmdRailCheck(keyOpts *filpayKeyOpts) *cobra.Command {
 	c.Flags().StringVar(&payRPCURL, "pay-rpc-url", getenv("SP_PROXY_PAY_RPC_URL", "https://api.node.glif.io/rpc/v1"), "Filecoin JSON-RPC URL: FVM payments + Lotus StateMinerInfo for discovery")
 	c.Flags().StringVar(&payPaymentsAddress, "pay-payments-address", getenv("SP_PROXY_PAY_PAYMENTS_ADDRESS", ""), "Filecoin Pay payments contract (0x); empty uses chain default")
 	c.Flags().StringVar(&payTokenAddress, "pay-token-address", getenv("SP_PROXY_PAY_TOKEN_ADDRESS", ""), "USDFC token (0x); empty uses chain default (required override on Curio/FOC localnet)")
+	c.Flags().StringArrayVar(&vouchers, "voucher", nil, "EIP-712 RetrievalVoucher capability (base64url); repeat for multiple deals. Each token is checked for format, expiry, and signature at startup, then forwarded as Authorization: RetrievalVoucher with a minted per-CID Authorization: RetrievalProof when probing CIDs for payees")
+	c.Flags().StringVar(&porepMarketAddress, "porep-market-address", firstEnv("SP_PROXY_POREP_MARKET_ADDRESS", "POREP_MARKET"), "PoRep Market (0x) for owner-direct EIP-712 domain; required on chains without a built-in default")
 	return c
 }
 
@@ -754,6 +791,27 @@ func payClientLog(format string, args ...any) {
 
 func retrievalLog(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "[retrieval-client] "+format+"\n", args...)
+}
+
+// normalizeVoucherFlags trims empty entries and strips a leading "Retrieval " or legacy "Bearer " prefix.
+func normalizeVoucherFlags(raw []string) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	seen := make(map[string]struct{}, len(raw))
+	for _, v := range raw {
+		tok := pieceurls.StripVoucherAuthScheme(strings.TrimSpace(v))
+		if tok == "" {
+			continue
+		}
+		if _, ok := seen[tok]; ok {
+			continue
+		}
+		seen[tok] = struct{}{}
+		out = append(out, tok)
+	}
+	return out
 }
 
 func truncateForLog(s string, max int) string {
@@ -974,6 +1032,16 @@ func getenv(key, fallback string) string {
 		return fallback
 	}
 	return v
+}
+
+// firstEnv returns the first non-empty env value among keys, or "".
+func firstEnv(keys ...string) string {
+	for _, key := range keys {
+		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func sumTokenValues(prices []string) (string, error) {

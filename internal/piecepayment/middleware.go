@@ -47,7 +47,9 @@ func (svc *RetrievalService) PiecePaymentMiddleware(MaxHeaderSize int) func(http
 				return
 			}
 
-			rawHdr := strings.TrimSpace(r.Header.Get("Authorization"))
+			// Only Payment-scheme credentials trigger settle. Retrieval access vouchers
+			// (and any other Authorization schemes) must not block quoting.
+			rawHdr := paymentAuthorizationHeader(r)
 			if svc.cfg.PayDebug {
 				logger.Info("piece request auth",
 					"method", r.Method,
@@ -159,6 +161,25 @@ func parsePiecePath(path string) (string, bool) {
 		return "", false
 	}
 	return cid, true
+}
+
+// paymentAuthorizationHeader returns the first Authorization: Payment … value, if any.
+// Retrieval (and other) schemes are ignored so access vouchers do not look like settle attempts.
+func paymentAuthorizationHeader(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	for _, raw := range r.Header.Values("Authorization") {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		scheme, _, ok := strings.Cut(raw, " ")
+		if ok && strings.EqualFold(scheme, mpp.AuthScheme) {
+			return raw
+		}
+	}
+	return ""
 }
 
 func upstreamProbe(next http.Handler, r *http.Request) (exists bool, status int, pieceBytes int64) {

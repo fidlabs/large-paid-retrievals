@@ -13,7 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-func TestCDPLookupByPieceCID(t *testing.T) {
+func TestHyperionLookupByPieceCID(t *testing.T) {
 	const piece = "baga6ea4seaqnhyk3yemnz3mhbfuvqe6jaknhhwtqc633pobzs5adasnwnfgyuli"
 	var sawQuery string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -38,7 +38,7 @@ func TestCDPLookupByPieceCID(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	lookup, err := NewCDPLookup(CDPLookupConfig{
+	lookup, err := NewHyperionLookup(HyperionLookupConfig{
 		BaseURL:    srv.URL,
 		ProviderID: 1004,
 		HTTPClient: srv.Client(),
@@ -67,15 +67,15 @@ func TestCDPLookupByPieceCID(t *testing.T) {
 	if !strings.EqualFold(deal.Client.Hex(), wantClient) {
 		t.Fatalf("client: got %s want %s", deal.Client.Hex(), wantClient)
 	}
-	if !strings.Contains(sawQuery, "pieceCID="+piece) {
-		t.Fatalf("query missing pieceCID: %s", sawQuery)
+	if !strings.Contains(sawQuery, "pieceCid="+piece) {
+		t.Fatalf("query missing pieceCid: %s", sawQuery)
 	}
 	if !strings.Contains(sawQuery, "providerId=f01004") {
 		t.Fatalf("query missing providerId: %s", sawQuery)
 	}
 }
 
-func TestCDPLookupEarlyOutOnPublic(t *testing.T) {
+func TestHyperionLookupEarlyOutOnPublic(t *testing.T) {
 	var pages int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		pages++
@@ -94,7 +94,7 @@ func TestCDPLookupEarlyOutOnPublic(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: srv.URL, ProviderID: 1, HTTPClient: srv.Client()})
+	lookup, err := NewHyperionLookup(HyperionLookupConfig{BaseURL: srv.URL, ProviderID: 1, HTTPClient: srv.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,23 +110,37 @@ func TestCDPLookupEarlyOutOnPublic(t *testing.T) {
 	}
 }
 
-func TestCDPLookupEarlyOutOnMatchingPrivate(t *testing.T) {
+func TestHyperionLookupContinuesPastMatchingPrivate(t *testing.T) {
+	// A matching private deal must not short-circuit: a later public deal wins.
 	owner := common.HexToAddress("0x0000000000000000000000000000000000000002")
-	var pages int
+	var pages []int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		pages++
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"data": []map[string]any{
-				{"dealId": "1", "providerId": "f01", "clientAddress": "0x0000000000000000000000000000000000000001", "dealType": "PRIVATE", "active": true},
-				{"dealId": "2", "providerId": "f01", "clientAddress": owner.Hex(), "dealType": "PRIVATE", "active": true},
-				{"dealId": "3", "providerId": "f01", "clientAddress": "0x0000000000000000000000000000000000000003", "dealType": "PRIVATE", "active": true},
-			},
-			"pagination": map[string]any{"page": 1, "pagesCount": 9, "totalCount": 90},
-		})
+		page := r.URL.Query().Get("page")
+		pages = append(pages, atoi(t, page))
+		switch page {
+		case "1":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]any{
+					{"dealId": "1", "providerId": "f01", "clientAddress": "0x0000000000000000000000000000000000000001", "dealType": "PRIVATE", "active": true},
+					{"dealId": "2", "providerId": "f01", "clientAddress": owner.Hex(), "dealType": "PRIVATE", "active": true},
+				},
+				"pagination": map[string]any{"page": 1, "pagesCount": 2, "totalCount": 3},
+			})
+		case "2":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]any{
+					{"dealId": "3", "providerId": "f01", "clientAddress": "0x0000000000000000000000000000000000000003", "dealType": "PUBLIC", "active": true},
+				},
+				"pagination": map[string]any{"page": 2, "pagesCount": 2, "totalCount": 3},
+			})
+		default:
+			t.Errorf("unexpected page %s", page)
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}})
+		}
 	}))
 	t.Cleanup(srv.Close)
 
-	lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: srv.URL, ProviderID: 1, HTTPClient: srv.Client()})
+	lookup, err := NewHyperionLookup(HyperionLookupConfig{BaseURL: srv.URL, ProviderID: 1, HTTPClient: srv.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,15 +148,43 @@ func TestCDPLookupEarlyOutOnMatchingPrivate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(deals) != 1 || deals[0].DealID != "2" {
-		t.Fatalf("expected matching private deal 2, got %+v", deals)
+	if len(deals) != 1 || deals[0].DealID != "3" || deals[0].DealType != DealTypePublic {
+		t.Fatalf("expected later public deal 3, got %+v", deals)
 	}
-	if pages != 1 {
-		t.Fatalf("pages=%d want 1", pages)
+	if len(pages) != 2 || pages[0] != 1 || pages[1] != 2 {
+		t.Fatalf("pages fetched: %v", pages)
 	}
 }
 
-func TestCDPLookupReturnsAllDeals(t *testing.T) {
+func TestHyperionLookupReturnsAllPrivateWhenNoPublic(t *testing.T) {
+	// Matching private still returns every private deal when no public appears.
+	owner := common.HexToAddress("0x0000000000000000000000000000000000000002")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{
+				{"dealId": "1", "providerId": "f01", "clientAddress": "0x0000000000000000000000000000000000000001", "dealType": "PRIVATE", "active": true},
+				{"dealId": "2", "providerId": "f01", "clientAddress": owner.Hex(), "dealType": "PRIVATE", "active": true},
+				{"dealId": "3", "providerId": "f01", "clientAddress": "0x0000000000000000000000000000000000000003", "dealType": "PRIVATE", "active": true},
+			},
+			"pagination": map[string]any{"page": 1, "pagesCount": 1, "totalCount": 3},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	lookup, err := NewHyperionLookup(HyperionLookupConfig{BaseURL: srv.URL, ProviderID: 1, HTTPClient: srv.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deals, err := lookup.LookupByPieceCID(context.Background(), "baga6ea4seaqaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deals) != 3 {
+		t.Fatalf("expected all 3 private deals, got %+v", deals)
+	}
+}
+
+func TestHyperionLookupReturnsAllDeals(t *testing.T) {
 	// No public deal and anonymous requester: must collect every private deal
 	// (cannot allow early) so denyAccess can require client identity.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -157,7 +199,7 @@ func TestCDPLookupReturnsAllDeals(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: srv.URL, ProviderID: 1, HTTPClient: srv.Client()})
+	lookup, err := NewHyperionLookup(HyperionLookupConfig{BaseURL: srv.URL, ProviderID: 1, HTTPClient: srv.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +212,7 @@ func TestCDPLookupReturnsAllDeals(t *testing.T) {
 	}
 }
 
-func TestCDPLookupPaginatesAllPages(t *testing.T) {
+func TestHyperionLookupPaginatesAllPages(t *testing.T) {
 	var pages []int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		page := r.URL.Query().Get("page")
@@ -206,7 +248,7 @@ func TestCDPLookupPaginatesAllPages(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: srv.URL, ProviderID: 1, HTTPClient: srv.Client()})
+	lookup, err := NewHyperionLookup(HyperionLookupConfig{BaseURL: srv.URL, ProviderID: 1, HTTPClient: srv.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,14 +264,14 @@ func TestCDPLookupPaginatesAllPages(t *testing.T) {
 	}
 }
 
-func TestCDPLookupPaginatesWithoutPagesCount(t *testing.T) {
+func TestHyperionLookupPaginatesWithoutPagesCount(t *testing.T) {
 	// When pagination metadata is missing, keep fetching while pages are full.
 	n := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n++
 		page := r.URL.Query().Get("page")
 		if page == "1" {
-			data := make([]map[string]any, cdpDealsPageLimit)
+			data := make([]map[string]any, hyperionDealsPageLimit)
 			for i := range data {
 				data[i] = map[string]any{
 					"dealId": strconv.Itoa(i + 1), "providerId": "f01",
@@ -247,7 +289,7 @@ func TestCDPLookupPaginatesWithoutPagesCount(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: srv.URL, ProviderID: 1, HTTPClient: srv.Client()})
+	lookup, err := NewHyperionLookup(HyperionLookupConfig{BaseURL: srv.URL, ProviderID: 1, HTTPClient: srv.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +314,7 @@ func atoi(t *testing.T, s string) int {
 	return n
 }
 
-func TestCDPLookupFiltersProviderClientSide(t *testing.T) {
+func TestHyperionLookupFiltersProviderClientSide(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"data": []map[string]any{
@@ -283,7 +325,7 @@ func TestCDPLookupFiltersProviderClientSide(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: srv.URL, ProviderID: 1, HTTPClient: srv.Client()})
+	lookup, err := NewHyperionLookup(HyperionLookupConfig{BaseURL: srv.URL, ProviderID: 1, HTTPClient: srv.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,13 +338,13 @@ func TestCDPLookupFiltersProviderClientSide(t *testing.T) {
 	}
 }
 
-func TestCDPLookupNotFound(t *testing.T) {
+func TestHyperionLookupNotFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}})
 	}))
 	t.Cleanup(srv.Close)
 
-	lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: srv.URL, ProviderID: 1, HTTPClient: srv.Client()})
+	lookup, err := NewHyperionLookup(HyperionLookupConfig{BaseURL: srv.URL, ProviderID: 1, HTTPClient: srv.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -338,18 +380,18 @@ func TestParseF0ActorID(t *testing.T) {
 	}
 }
 
-func TestNewCDPLookupValidation(t *testing.T) {
+func TestNewHyperionLookupValidation(t *testing.T) {
 	t.Parallel()
-	if _, err := NewCDPLookup(CDPLookupConfig{}); err == nil {
+	if _, err := NewHyperionLookup(HyperionLookupConfig{}); err == nil {
 		t.Fatal("expected empty base URL error")
 	}
-	if _, err := NewCDPLookup(CDPLookupConfig{BaseURL: "://bad"}); err == nil {
+	if _, err := NewHyperionLookup(HyperionLookupConfig{BaseURL: "://bad"}); err == nil {
 		t.Fatal("expected invalid URL error")
 	}
-	if _, err := NewCDPLookup(CDPLookupConfig{BaseURL: "http://127.0.0.1:9"}); err == nil {
+	if _, err := NewHyperionLookup(HyperionLookupConfig{BaseURL: "http://127.0.0.1:9"}); err == nil {
 		t.Fatal("expected missing ProviderID error")
 	}
-	lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: "http://127.0.0.1:9", ProviderID: 1})
+	lookup, err := NewHyperionLookup(HyperionLookupConfig{BaseURL: "http://127.0.0.1:9", ProviderID: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,29 +400,29 @@ func TestNewCDPLookupValidation(t *testing.T) {
 	}
 }
 
-func TestCDPLookupEmptyPieceCID(t *testing.T) {
+func TestHyperionLookupEmptyPieceCID(t *testing.T) {
 	t.Parallel()
-	lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: "http://example.invalid", ProviderID: 1})
+	lookup, err := NewHyperionLookup(HyperionLookupConfig{BaseURL: "http://example.invalid", ProviderID: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := lookup.LookupByPieceCID(context.Background(), "  ", common.Address{}); err == nil {
 		t.Fatal("expected empty piece CID error")
 	}
-	var nilLookup *CDPLookup
+	var nilLookup *HyperionLookup
 	if _, err := nilLookup.LookupByPieceCID(context.Background(), "baga", common.Address{}); err == nil {
 		t.Fatal("expected nil receiver error")
 	}
 }
 
-func TestCDPLookupHTTPErrors(t *testing.T) {
+func TestHyperionLookupHTTPErrors(t *testing.T) {
 	t.Parallel()
 	t.Run("status", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, strings.Repeat("x", 250), http.StatusBadGateway)
 		}))
 		t.Cleanup(srv.Close)
-		lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: srv.URL, ProviderID: 1, HTTPClient: srv.Client()})
+		lookup, err := NewHyperionLookup(HyperionLookupConfig{BaseURL: srv.URL, ProviderID: 1, HTTPClient: srv.Client()})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -397,7 +439,7 @@ func TestCDPLookupHTTPErrors(t *testing.T) {
 			_, _ = w.Write([]byte("{"))
 		}))
 		t.Cleanup(srv.Close)
-		lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: srv.URL, ProviderID: 1, HTTPClient: srv.Client()})
+		lookup, err := NewHyperionLookup(HyperionLookupConfig{BaseURL: srv.URL, ProviderID: 1, HTTPClient: srv.Client()})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -406,9 +448,22 @@ func TestCDPLookupHTTPErrors(t *testing.T) {
 			t.Fatalf("got %v", err)
 		}
 	})
+	t.Run("transport", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+		base := srv.URL
+		srv.Close() // force connection error on Do
+		lookup, err := NewHyperionLookup(HyperionLookupConfig{BaseURL: base, ProviderID: 1, HTTPClient: http.DefaultClient})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = lookup.LookupByPieceCID(context.Background(), "baga6ea4seaqaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", common.Address{})
+		if err == nil || !strings.Contains(err.Error(), "Hyperion GET") {
+			t.Fatalf("got %v", err)
+		}
+	})
 }
 
-func TestCDPLookupDealIDFormsAndBadProvider(t *testing.T) {
+func TestHyperionLookupDealIDFormsAndBadProvider(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -426,7 +481,7 @@ func TestCDPLookupDealIDFormsAndBadProvider(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	lookup, err := NewCDPLookup(CDPLookupConfig{BaseURL: srv.URL, ProviderID: 1004, HTTPClient: srv.Client()})
+	lookup, err := NewHyperionLookup(HyperionLookupConfig{BaseURL: srv.URL, ProviderID: 1004, HTTPClient: srv.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -446,7 +501,7 @@ func TestCDPLookupDealIDFormsAndBadProvider(t *testing.T) {
 		})
 	}))
 	t.Cleanup(bad.Close)
-	lookup, err = NewCDPLookup(CDPLookupConfig{BaseURL: bad.URL, ProviderID: 1, HTTPClient: bad.Client()})
+	lookup, err = NewHyperionLookup(HyperionLookupConfig{BaseURL: bad.URL, ProviderID: 1, HTTPClient: bad.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -478,7 +533,7 @@ func TestDecodeJSONStringish(t *testing.T) {
 
 func TestToDealNil(t *testing.T) {
 	t.Parallel()
-	var d *cdpDeal
+	var d *hyperionDeal
 	if _, err := d.toDeal(); err == nil {
 		t.Fatal("expected nil deal error")
 	}

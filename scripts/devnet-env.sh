@@ -14,7 +14,7 @@
 #     --pay-payments-address "$PAYMENTS" \
 #     --pay-token-address "$USDFC" \
 #     --pay-private-key-file ./sp.key \
-#     --porep-cdp-url "$SP_PROXY_POREP_CDP_URL" \
+#     --porep-hyperion-url "$SP_PROXY_POREP_HYPERION_URL" \
 #     --porep-provider-id "$POREP_PROVIDER_ID"
 #   ./bin/retrieval-client fetch ... --cid "$PIECE_CID" --pay-payments-address "$PAYMENTS" ...
 #
@@ -24,7 +24,7 @@
 #   POREP_ENV_FILE  market-tooling .env (default $DEVNET_ROOT/extern/filecoin-porep-market-tooling/.env)
 #   PAY_RPC_URL     Lotus FEVM RPC (default http://127.0.0.1:2234/rpc/v1)
 #   SP_PROXY_UPSTREAM_PORT  Curio piece/market host port (default 22310; FCSS_CURIO_MARKET_HOST_PORT)
-#   SP_PROXY_POREP_CDP_URL  CDP HTTP base (default http://127.0.0.1:23300; mainnet is https://cdp.allocator.tech)
+#   SP_PROXY_POREP_HYPERION_URL  Hyperion HTTP base (default http://127.0.0.1:23300; mainnet is https://hyperion.allocator.tech)
 
 # Resolve this script path. Task runs cmds under gosh (no BASH_SOURCE); bash sets it.
 _devnet_env_self=""
@@ -130,9 +130,9 @@ export SP_PROXY_POREP_PROVIDER_ID="$POREP_PROVIDER_ID"
 # Curio piece HTTP (FCSS_CURIO_MARKET_HOST_PORT); sp-proxy --upstream-port reads this.
 export SP_PROXY_UPSTREAM_HOST="${SP_PROXY_UPSTREAM_HOST:-127.0.0.1}"
 export SP_PROXY_UPSTREAM_PORT="${SP_PROXY_UPSTREAM_PORT:-22310}"
-# Local CDP (override before source for mainnet https://cdp.allocator.tech).
-# Piece access uses GET /po-rep/deals?pieceCID=… (includes dealType + clientAddress).
-export SP_PROXY_POREP_CDP_URL="${SP_PROXY_POREP_CDP_URL:-http://127.0.0.1:23300}"
+# Local Hyperion (override before source for mainnet https://hyperion.allocator.tech).
+# Piece access uses GET /po-rep/deals?pieceCid=… (includes dealType + clientAddress).
+export SP_PROXY_POREP_HYPERION_URL="${SP_PROXY_POREP_HYPERION_URL:-http://127.0.0.1:23300}"
 export DEVNET_ROOT="$_devnet_root"
 export CONTRACTS_DIR="$_devnet_contracts_dir"
 
@@ -143,7 +143,7 @@ echo "POREP_PROVIDER_ID=$POREP_PROVIDER_ID"
 echo "PIECE_CID=$PIECE_CID"
 echo "PAY_RPC_URL=$PAY_RPC_URL"
 echo "SP_PROXY_UPSTREAM_PORT=$SP_PROXY_UPSTREAM_PORT"
-echo "SP_PROXY_POREP_CDP_URL=$SP_PROXY_POREP_CDP_URL"
+echo "SP_PROXY_POREP_HYPERION_URL=$SP_PROXY_POREP_HYPERION_URL"
 
 unset -f _devnet_env_fail _devnet_env_get _devnet_env_piece_cid
 unset _devnet_env_root _devnet_root _devnet_contracts_dir _devnet_porep_env _devnet_contracts_json _miner_id _devnet_env_self

@@ -116,6 +116,43 @@ func TestCollectCIDsMissingFile(t *testing.T) {
 	}
 }
 
+func TestCollectCIDsFromFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cids.txt")
+	if err := os.WriteFile(path, []byte("bafyA\nbafyB,bafyC\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := collectCIDs(nil, path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"bafyA", "bafyB", "bafyC"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v want %v", got, want)
+		}
+	}
+}
+
+func TestNormalizeVoucherFlags(t *testing.T) {
+	got := normalizeVoucherFlags([]string{"  tok-a  ", "Retrieval tok-b", "retrieval tok-a", "Bearer tok-c", "", "  "})
+	want := []string{"tok-a", "tok-b", "tok-c"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v want %v", got, want)
+		}
+	}
+	if normalizeVoucherFlags(nil) != nil {
+		t.Fatal("nil in → nil out")
+	}
+}
+
 func TestExtractPieceCIDsSkipsEmptyPieceCID(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "manifest.json")

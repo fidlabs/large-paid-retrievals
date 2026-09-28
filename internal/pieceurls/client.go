@@ -21,6 +21,19 @@ type Client struct {
 	// after an anonymous GET returns 403 (private deal).
 	ProbeClient string
 
+	// ProbeVouchers are static base64url RetrievalVoucher tokens used when
+	// AuthHeadersForPiece is nil. They are sent as repeated
+	// "Authorization: RetrievalVoucher <token>" headers. Note a voucher alone
+	// does not authorize a private piece — a RetrievalProof is also required —
+	// so prefer AuthHeadersForPiece for real retrieval.
+	ProbeVouchers []string
+
+	// AuthHeadersForPiece, when set, returns full Authorization header VALUES
+	// (including scheme, e.g. "RetrievalProof <b64>" / "RetrievalVoucher <b64>")
+	// to attach on authenticated probes (with ProbeClient) for a piece CID. It
+	// overrides ProbeVouchers. Return an empty slice to send no headers.
+	AuthHeadersForPiece func(pieceCID string) ([]string, error)
+
 	FilecoinToolsAPI    string
 	CIDContactBaseURL   string
 	SearchPageLimit     int

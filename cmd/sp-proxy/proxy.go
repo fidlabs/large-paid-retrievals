@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -43,8 +44,9 @@ type proxyAppSettings struct {
 	UpstreamHost string
 	UpstreamPort int
 
-	PorepCDPURL     string
-	PorepProviderID uint64
+	PorepHyperionURL   string
+	PorepProviderID    uint64
+	PorepMarketAddress string
 }
 
 func validateUpstream(host string, port int) (*url.URL, error) {
@@ -73,6 +75,27 @@ func resolvePayee(payeeFlag string, fc proxyFilpay) (string, error) {
 	return payee, nil
 }
 
+func porepMarketSource(override string) string {
+	if strings.TrimSpace(override) != "" {
+		return "flag_or_env"
+	}
+	return "chain_default"
+}
+
+// requireVoucherDomainPin resolves chainId + PoRep market for EIP-712 voucher pinning.
+// Piece access always requires a resolvable market address.
+func requireVoucherDomainPin(settings proxyAppSettings, fc proxyFilpay) (*big.Int, common.Address, error) {
+	chainID := fc.ChainID()
+	if chainID == nil || chainID.Sign() <= 0 {
+		return nil, common.Address{}, fmt.Errorf("chain id unavailable from pay RPC")
+	}
+	market, err := pieceaccess.ResolvePorepMarketAddress(settings.PorepMarketAddress, chainID.Int64())
+	if err != nil {
+		return nil, common.Address{}, err
+	}
+	return chainID, market, nil
+}
+
 func buildProxyHandler(
 	upstreamURL *url.URL,
 	upstreamHost string,
@@ -83,7 +106,7 @@ func buildProxyHandler(
 	settings proxyAppSettings,
 	logger *slog.Logger,
 	dealLookup pieceaccess.DealLookup,
-) http.Handler {
+) (http.Handler, error) {
 	upstreamProxy := httputil.NewSingleHostReverseProxy(upstreamURL)
 	upstreamProxy.ModifyResponse = preserveUpstreamContentLength
 	upstreamProxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
@@ -108,9 +131,20 @@ func buildProxyHandler(
 		pieceaccess.WithLogger(logger),
 		pieceaccess.WithClientIdentity(settings.ClientQuery, settings.ClientHeader),
 	}
-	if dealLookup != nil {
-		accessOpts = append(accessOpts, pieceaccess.WithDealLookup(dealLookup))
+	if dealLookup == nil {
+		return nil, fmt.Errorf("porep deal lookup is required")
 	}
+	accessOpts = append(accessOpts, pieceaccess.WithDealLookup(dealLookup))
+	chainID, market, err := requireVoucherDomainPin(settings, fc)
+	if err != nil {
+		return nil, fmt.Errorf("porep voucher domain pin: %w", err)
+	}
+	accessOpts = append(accessOpts, pieceaccess.WithVoucherDomain(chainID, market))
+	logger.Info("porep voucher domain pin enabled",
+		"chain_id", chainID.String(),
+		"verifying_contract", market.Hex(),
+		"source", porepMarketSource(settings.PorepMarketAddress),
+	)
 	access := pieceaccess.NewAuthorizer(accessOpts...)
 
 	pieceHandler := buildPieceHandler(access, svc, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -139,25 +173,25 @@ func buildProxyHandler(
 			return
 		}
 		http.NotFound(w, r)
-	})
+	}), nil
 }
 
 func newPorepDealLookup(_ context.Context, settings proxyAppSettings, logger *slog.Logger) (pieceaccess.DealLookup, func(), error) {
-	cdpURL := strings.TrimSpace(settings.PorepCDPURL)
-	if cdpURL == "" {
-		return nil, func() {}, nil
+	hyperionURL := strings.TrimSpace(settings.PorepHyperionURL)
+	if hyperionURL == "" {
+		hyperionURL = pieceaccess.DefaultHyperionBaseURL
 	}
 	if settings.PorepProviderID == 0 {
-		return nil, nil, fmt.Errorf("--porep-provider-id is required when --porep-cdp-url is set")
+		return nil, nil, fmt.Errorf("--porep-provider-id is required")
 	}
-	lookup, err := pieceaccess.NewCDPLookup(pieceaccess.CDPLookupConfig{
-		BaseURL:    cdpURL,
+	lookup, err := pieceaccess.NewHyperionLookup(pieceaccess.HyperionLookupConfig{
+		BaseURL:    hyperionURL,
 		ProviderID: settings.PorepProviderID,
 	})
 	if err != nil {
 		return nil, nil, err
 	}
-	logger.Info("porep CDP lookup enabled", "cdp_url", cdpURL, "provider_id", settings.PorepProviderID)
+	logger.Info("porep Hyperion lookup enabled", "hyperion_url", hyperionURL, "provider_id", settings.PorepProviderID)
 	return lookup, func() {}, nil
 }
 
@@ -207,7 +241,10 @@ func runProxyApp(settings proxyAppSettings) error {
 	}
 	defer closeLookup()
 
-	handler := buildProxyHandler(upstreamURL, settings.UpstreamHost, settings.UpstreamPort, store, fc, payee, settings, logger, dealLookup)
+	handler, err := buildProxyHandler(upstreamURL, settings.UpstreamHost, settings.UpstreamPort, store, fc, payee, settings, logger, dealLookup)
+	if err != nil {
+		return err
+	}
 
 	logger.Info("filecoin pay", "payments", fc.PaymentsAddress().Hex(), "payee_0x", payee, "settler", fc.SignerAddress().Hex(),
 		"pay_debug_flag", settings.PayDebug, "filpay_trace", filTrace, "pool_trace", filTrace, "pay_http_trace", filTrace)
