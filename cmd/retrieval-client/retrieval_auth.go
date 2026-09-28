@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -26,12 +27,17 @@ import (
 // The proof's scope is advisory: the SP binds the deal via the piece CID, so a
 // client never needs to know which deal a piece belongs to.
 type retrievalAuthConfig struct {
-	key          *ecdsa.PrivateKey
-	capabilities []string // long-lived owner-signed vouchers (--voucher)
+	key            *ecdsa.PrivateKey
+	capabilities   []string // long-lived owner-signed vouchers (--voucher)
+	payRPCURL      string
+	marketOverride string
 
 	// domain is the EIP-712 domain for owner-direct proofs (and a fallback when
-	// vouchers omit a usable domain).
-	domain pieceaccessDomain
+	// vouchers omit a usable domain). Resolved lazily for owner-direct minting
+	// so anonymous public probes do not require a live pay RPC.
+	domain     pieceaccessDomain
+	domainOnce sync.Once
+	domainErr  error
 }
 
 type pieceaccessDomain struct {
@@ -50,7 +56,7 @@ func (d pieceaccessDomain) typedDomain() apitypes.TypedDataDomain {
 // authHeadersForPiece returns full Authorization header values for pieceCID: one
 // RetrievalProof plus every RetrievalVoucher capability (delegated), or a single
 // owner-direct RetrievalProof when no vouchers are configured.
-func (c *retrievalAuthConfig) authHeadersForPiece(_ context.Context, pieceCID string) ([]string, error) {
+func (c *retrievalAuthConfig) authHeadersForPiece(ctx context.Context, pieceCID string) ([]string, error) {
 	if c == nil || c.key == nil {
 		return nil, nil
 	}
@@ -58,10 +64,13 @@ func (c *retrievalAuthConfig) authHeadersForPiece(_ context.Context, pieceCID st
 	if pieceCID == "" {
 		return nil, nil
 	}
-	deadline := time.Now().Unix() + int64(pieceaccess.MaxProofTTL.Seconds())
+	deadline := time.Now().Unix() + int64(pieceaccess.DefaultProofTTL().Seconds())
 
 	if len(c.capabilities) > 0 {
 		return c.delegatedHeaders(pieceCID, deadline)
+	}
+	if err := c.ensureDomain(ctx); err != nil {
+		return nil, err
 	}
 	if !c.domain.ok() {
 		return nil, fmt.Errorf("cannot mint owner-direct RetrievalProof: set --porep-market-address or POREP_MARKET (pay-rpc chain has no PoRep market default)")
@@ -105,6 +114,29 @@ func (c *retrievalAuthConfig) delegatedHeaders(pieceCID string, deadline int64) 
 	}
 	// Proof first, then the vouchers (order is not significant to the SP).
 	return append([]string{pieceaccess.SchemeRetrievalProof + " " + proof}, vouchers...), nil
+}
+
+func (c *retrievalAuthConfig) ensureDomain(ctx context.Context) error {
+	if c == nil {
+		return fmt.Errorf("retrieval auth not configured")
+	}
+	if c.domain.ok() {
+		return nil
+	}
+	c.domainOnce.Do(func() {
+		chainID, err := ethChainID(ctx, c.payRPCURL)
+		if err != nil {
+			c.domainErr = fmt.Errorf("eth_chainId for access domain: %w", err)
+			return
+		}
+		domain, derr := resolveAuthDomain(c.marketOverride, chainID)
+		if derr != nil {
+			c.domainErr = derr
+			return
+		}
+		c.domain = domain
+	})
+	return c.domainErr
 }
 
 func parseDealScope(dealID string) (*big.Int, error) {
@@ -154,41 +186,37 @@ func ethChainID(ctx context.Context, rpcURL string) (*big.Int, error) {
 	return cli.ChainID(ctx)
 }
 
-// buildRetrievalAuth resolves the EIP-712 domain (chainId from the pay RPC +
-// PoRep market) used for owner-direct proofs and as a fallback for delegated
-// proofs. When --voucher is set, every token is checked for wire format,
-// non-expiry, and a recoverable signature before the client proceeds. The SP
-// binds deals via piece CID (Hyperion); the client does not look up Hyperion.
+// buildRetrievalAuth prepares Retrieval credential minting. Owner-direct domain
+// resolution (eth_chainId + PoRep market) is deferred until a proof is minted so
+// anonymous public probes do not require a live pay RPC. When --voucher is set,
+// every token is checked for wire format, non-expiry, and a recoverable
+// signature before the client proceeds; eth_chainId is attempted only as an
+// optional domain pin for that check.
 func buildRetrievalAuth(
 	ctx context.Context,
 	key *ecdsa.PrivateKey,
 	capabilities []string,
 	payRPCURL, marketOverride string,
 ) (*retrievalAuthConfig, error) {
-	cfg := &retrievalAuthConfig{key: key}
-	chainID, err := ethChainID(ctx, payRPCURL)
-	if err != nil {
-		if len(capabilities) == 0 {
-			return nil, fmt.Errorf("eth_chainId for access domain: %w", err)
-		}
-		// Vouchers carry their own domain; continue without a pin.
-	} else {
-		domain, derr := resolveAuthDomain(marketOverride, chainID)
-		if derr != nil {
-			if len(capabilities) == 0 {
-				return nil, derr
-			}
-		} else {
+	cfg := &retrievalAuthConfig{
+		key:            key,
+		payRPCURL:      payRPCURL,
+		marketOverride: marketOverride,
+	}
+	if len(capabilities) == 0 {
+		return cfg, nil
+	}
+	// Optional pin for voucher validation: vouchers carry their own domain.
+	if chainID, err := ethChainID(ctx, payRPCURL); err == nil {
+		if domain, derr := resolveAuthDomain(marketOverride, chainID); derr == nil {
 			cfg.domain = domain
 		}
 	}
-	if len(capabilities) > 0 {
-		verified, verr := validateCapabilityFlags(capabilities, cfg.domain)
-		if verr != nil {
-			return nil, verr
-		}
-		cfg.capabilities = verified
+	verified, verr := validateCapabilityFlags(capabilities, cfg.domain)
+	if verr != nil {
+		return nil, verr
 	}
+	cfg.capabilities = verified
 	return cfg, nil
 }
 

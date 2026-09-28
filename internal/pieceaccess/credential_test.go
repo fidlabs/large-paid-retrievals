@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/signer/core/apitypes"
 )
 
 const (
@@ -220,6 +222,78 @@ func TestParseAndVerifyAccessFatalOnBadProof(t *testing.T) {
 	_, err := parseAndVerifyAccess(req, testPieceCID, credentialTestPin(1))
 	if !errors.Is(err, ErrInvalidVoucher) {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestParseAndVerifyAccessRejectsMultipleProofs(t *testing.T) {
+	t.Parallel()
+	ownerKey, _ := mustKey(t)
+	now := time.Now().Unix()
+	p1 := mustProofToken(t, ownerKey, 1, testPieceCID, now+3600, 1)
+	p2 := mustProofToken(t, ownerKey, 1, testPieceCID, now+3600, 1)
+
+	req := httptest.NewRequest(http.MethodGet, "/piece/"+testPieceCID, nil)
+	req.Header.Add("Authorization", "RetrievalProof "+p1)
+	req.Header.Add("Authorization", "RetrievalProof "+p2)
+
+	_, err := parseAndVerifyAccess(req, testPieceCID, credentialTestPin(1))
+	if !errors.Is(err, ErrInvalidVoucher) || !strings.Contains(err.Error(), "multiple RetrievalProof") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestVerifyProofRejectsPartialDomainTypes(t *testing.T) {
+	t.Parallel()
+	// Regression: types.EIP712Domain that omits chainId/verifyingContract would let an
+	// attacker rewrite those unsigned domain fields after signing and still pass the pin.
+	key, _ := mustKey(t)
+	// Sign with only name in the domain (matching partial types). go-ethereum rejects
+	// hashing when domain values exceed the typed field list.
+	td := apitypes.TypedData{
+		Types: apitypes.Types{
+			"EIP712Domain": {{Name: "name", Type: "string"}},
+			primaryTypeProof: {
+				{Name: fieldScope, Type: "uint256"},
+				{Name: fieldResource, Type: "string"},
+				{Name: fieldDeadline, Type: "uint256"},
+			},
+		},
+		PrimaryType: primaryTypeProof,
+		Domain:      apitypes.TypedDataDomain{Name: eip712DomainName},
+		Message: apitypes.TypedDataMessage{
+			fieldScope:    "1",
+			fieldResource: testPieceCID,
+			fieldDeadline: fmt.Sprintf("%d", time.Now().Unix()+3600),
+		},
+	}
+
+	digest, _, err := apitypes.TypedDataAndHash(td)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := crypto.Sign(digest, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig[64] += 27
+	sigHex := "0x" + common.Bytes2Hex(sig)
+
+	// Rewrite domain to the verifier pin after signing (fields not covered by partial types).
+	obj := &eip712TypedDataJSON{
+		Domain:      NewDomain(big.NewInt(1), common.HexToAddress(testContract)),
+		Types:       td.Types,
+		PrimaryType: td.PrimaryType,
+		Message: map[string]any{
+			fieldScope:    td.Message[fieldScope],
+			fieldResource: td.Message[fieldResource],
+			fieldDeadline: td.Message[fieldDeadline],
+		},
+	}
+	tok := encodeSignedShape(t, obj, sigHex)
+
+	_, err = verifyProofToken(tok, testPieceCID, time.Now().Unix(), credentialTestPin(1))
+	if err == nil || !strings.Contains(err.Error(), "non-canonical") {
+		t.Fatalf("want non-canonical domain types reject, got %v", err)
 	}
 }
 

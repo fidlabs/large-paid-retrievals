@@ -111,6 +111,7 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 		outDir             string
 		cids               []string
 		manifest           string
+		cidFile            string
 		yes                bool
 		dryRun             bool
 		noProgress         bool
@@ -146,8 +147,8 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 
 			var allCIDs []string
 			if strings.TrimSpace(manifest) != "" {
-				if len(cids) > 0 || len(args) > 0 {
-					return errors.New("--manifest is mutually exclusive with positional CIDs and --cid")
+				if len(cids) > 0 || strings.TrimSpace(cidFile) != "" || len(args) > 0 {
+					return errors.New("--manifest is mutually exclusive with positional CIDs, --cid, and --cid-file")
 				}
 				var err error
 				allCIDs, err = extractPieceCIDsFromManifest(manifest)
@@ -159,12 +160,12 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 				}
 			} else {
 				var err error
-				allCIDs, err = collectCIDs(cids, args)
+				allCIDs, err = collectCIDs(cids, cidFile, args)
 				if err != nil {
 					return err
 				}
 				if len(allCIDs) == 0 {
-					return errors.New("provide at least one CID via args or --cid (or use --manifest)")
+					return errors.New("provide at least one CID via args, --cid, or --cid-file (or use --manifest)")
 				}
 			}
 			if err := os.MkdirAll(outDir, 0o755); err != nil {
@@ -509,6 +510,7 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 	c.Flags().StringVar(&spBaseURL, "sp-base-url", "", "If set, skip using discovered endpoints and probe only this SP HTTP base (e.g. http://127.0.0.1:8787)")
 	c.Flags().StringVar(&outDir, "out-dir", ".", "Output directory")
 	c.Flags().StringArrayVar(&cids, "cid", nil, "CID to fetch (repeatable)")
+	c.Flags().StringVar(&cidFile, "cid-file", "", "File with CIDs (newline or comma separated)")
 	c.Flags().StringVar(&manifest, "manifest", "", "Path to data-prep-standard super-manifest JSON (extract pieces[].piece_cid)")
 	c.Flags().BoolVar(&yes, "yes", false, "Skip interactive confirmation")
 	c.Flags().BoolVar(&dryRun, "dry-run", false, "Probe and print quote only; no chain transactions or downloads")
@@ -529,6 +531,7 @@ func cmdRailCheck(keyOpts *filpayKeyOpts) *cobra.Command {
 	var (
 		spBaseURL          string
 		cids               []string
+		cidFile            string
 		payees             []string
 		requiredUSDFC      string
 		payDebug           bool
@@ -581,8 +584,8 @@ func cmdRailCheck(keyOpts *filpayKeyOpts) *cobra.Command {
 
 			// Gather payees from manual flags and optional live MPP challenges (discovery or --sp-base-url).
 			challenges := make([]challengeItem, 0)
-			if len(cids) > 0 || len(args) > 0 {
-				allCIDs, err := collectCIDs(cids, args)
+			if len(cids) > 0 || strings.TrimSpace(cidFile) != "" || len(args) > 0 {
+				allCIDs, err := collectCIDs(cids, cidFile, args)
 				if err != nil {
 					return err
 				}
@@ -687,7 +690,7 @@ func cmdRailCheck(keyOpts *filpayKeyOpts) *cobra.Command {
 				}
 			}
 			if len(byPayeeRequired) == 0 {
-				return errors.New("no payees discovered. Provide --payee or paid MPP sources for CIDs (--cid/args, with discovery or --sp-base-url)")
+				return errors.New("no payees discovered. Provide --payee or paid MPP sources for CIDs (--cid/--cid-file/args, with discovery or --sp-base-url)")
 			}
 
 			if len(challenges) > 0 {
@@ -764,6 +767,7 @@ func cmdRailCheck(keyOpts *filpayKeyOpts) *cobra.Command {
 	}
 	c.Flags().StringVar(&spBaseURL, "sp-base-url", "", "If set, probe only this SP HTTP base for MPP challenges; empty uses piece URL discovery")
 	c.Flags().StringArrayVar(&cids, "cid", nil, "CID to probe for payee discovery (repeatable)")
+	c.Flags().StringVar(&cidFile, "cid-file", "", "File with CIDs for payee discovery via MPP (newline/comma separated)")
 	c.Flags().StringArrayVar(&payees, "payee", nil, "Explicit payee 0x address to check (repeatable)")
 	c.Flags().StringVar(&requiredUSDFC, "required-usdfc", "", "Optional required USDFC amount per --payee when no challenges are used")
 	c.Flags().BoolVar(&payDebug, "pay-debug", false, "Log Filecoin Pay operation details to stderr ([filpay-client])")
@@ -929,7 +933,7 @@ func chargeRailsForChallenges(ctx context.Context, fc filpayOperations, client s
 	return chargeTxByPayee, nil
 }
 
-func collectCIDs(flagCIDs []string, args []string) ([]string, error) {
+func collectCIDs(flagCIDs []string, cidFile string, args []string) ([]string, error) {
 	seen := map[string]struct{}{}
 	var out []string
 	appendCID := func(v string) error {
@@ -955,6 +959,19 @@ func collectCIDs(flagCIDs []string, args []string) ([]string, error) {
 		for _, p := range strings.Split(c, ",") {
 			if err := appendCID(p); err != nil {
 				return nil, err
+			}
+		}
+	}
+	if cidFile != "" {
+		b, err := os.ReadFile(cidFile)
+		if err != nil {
+			return nil, err
+		}
+		for _, line := range strings.Split(string(b), "\n") {
+			for _, p := range strings.Split(line, ",") {
+				if err := appendCID(p); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}

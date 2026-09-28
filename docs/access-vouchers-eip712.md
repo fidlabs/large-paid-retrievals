@@ -107,8 +107,9 @@ network retries for a large CAR for up to that window, matching `Authorization: 
 after settle. A shorter proof TTL would force re-signing mid-download while payment retries are
 still valid; a longer one would outlive the payment/access window.
 
-Clients SHOULD set `proof.deadline` to `now + PaidAccessTTL` (or slightly less) when starting a
-fetch they expect to retry within that window.
+Clients SHOULD mint with `proof.deadline = now + MAX_PROOF_TTL − ProofMintSkew` (2 minutes by
+default) so small client/SP clock skew does not reject a proof minted at the TTL ceiling.
+`retrieval-client` and `scripts/sign-retrieval-credential.sh` use that default.
 
 ---
 
@@ -194,13 +195,15 @@ Notes:
   `verifyingContract`).
 - uint256 fields in `message` are **decimal strings** (prefer strings above `2^53 − 1`); addresses
   and signatures are `0x`-hex; `resource` is the CID string.
-- `types` MAY omit `EIP712Domain` (verifiers synthesize it from the present `domain` fields). Field
-  lists MUST match [Structures](#structures).
+- `types` MAY omit `EIP712Domain` (verifiers synthesize the canonical field set from the present
+  `domain` values). If `EIP712Domain` is present it MUST match that canonical set
+  (`name`, `version`, `chainId`, `verifyingContract`, and `salt` only when `domain.salt` is set);
+  partial domain types are rejected. Primary-type field lists MUST match [Structures](#structures).
 
 ### Presentation
 
-- **`Authorization: RetrievalProof <token>`** — exactly one per request; the recovered signer is the
-  requester identity.
+- **`Authorization: RetrievalProof <token>`** — exactly one per request; more than one is a fatal
+  credential error. The recovered signer is the requester identity.
 - **`Authorization: RetrievalVoucher <token>`** — **repeatable**. A client presents all of its
   vouchers; the SP verifies them **best-effort** and uses whichever authorizes the resolved deal.
   A single invalid/expired voucher is a non-fatal diagnostic, not a request failure.
@@ -216,6 +219,9 @@ Anonymous probes (no proof / no vouchers) omit access tokens. Private pieces ret
 client can retry with a fresh proof (+ vouchers if delegated). A missing/invalid proof yields a JSON
 `invalid_voucher` diagnostic.
 
+**HEAD** is unrestricted: `sp-proxy` skips credential parse and Hyperion for `HEAD /piece/{cid}`
+(size/existence are public).
+
 ---
 
 ## Verification algorithm
@@ -223,9 +229,11 @@ client can retry with a fresh proof (+ vouchers if delegated). A missing/invalid
 For a request on piece CID `R`, parse the single `RetrievalProof` header `P` and every
 `RetrievalVoucher` header `V₀…Vₙ`:
 
-1. **Proof (fatal).** If a `RetrievalProof` header is present it MUST verify, else the request is
-   rejected with a `403` JSON `invalid_voucher` diagnostic:
+1. **Proof (fatal).** If more than one `RetrievalProof` header is present → reject. If one is
+   present it MUST verify, else the request is rejected with a `403` JSON `invalid_voucher`
+   diagnostic:
    - complete EIP-712 object, `primaryType` = `RetrievalProof`, `signature` present;
+   - `types.EIP712Domain` omitted or canonical (see [Wire token](#wire-token--presentation));
    - `P.message.resource == R` (byte-exact);
    - `now ≤ P.message.deadline ≤ now + MAX_PROOF_TTL`;
    - `P.domain` matches the `sp-proxy` pin (pay-RPC chain id + PoRep Market address);
@@ -278,6 +286,8 @@ Credentials are rejected if the domain pin is missing (fail closed).
   named `resource` only — aligned with how long a paid GET may be retried without re-settling.
   An optional server-side `(signer, resource, deadline)` seen-cache can shrink the window further;
   v1 MAY stay stateless.
+- **Domain type integrity.** Partial `types.EIP712Domain` (e.g. omitting `chainId`) would leave pin
+  fields unsigned and rewritable after signing; verifiers reject non-canonical domain types.
 - **Contract / multisig owners (EIP-1271).** v1 assumes an EOA owner (`ecrecover`). EIP-1271 is a
   follow-up.
 - **Revocation.** No pre-expiry revocation in v1; voucher `deadline` is the kill switch. A later
@@ -350,25 +360,6 @@ Each object embeds its own secp256k1 `signature`, is base64url(JSON)-encoded, an
 header — `Authorization: RetrievalProof <proof-token>` plus one
 `Authorization: RetrievalVoucher <voucher-token>` per voucher (and optionally
 `Authorization: Payment …` after quote).
-
----
-
-## Migration from today’s voucher-only token
-
-Current `sp-proxy` / `retrieval-client` accept a single signed `RetrievalVoucher` (fields
-`grantee`, `dealId`, `deadline`) as the entire Retrieval token. Target changes:
-
-| Today | Target |
-|---|---|
-| Voucher alone authorizes | Voucher + **required** `RetrievalProof` PoP |
-| Field `dealId` | Field **`scope`** (same numeric deal id; advisory on the proof) |
-| No `issuedAt` | Add **`issuedAt`** on voucher |
-| Requester from `?client=` / Payment | Requester from **proof `ecrecover`** (Payment MUST match) |
-| One header, one token | **Two schemes**: one `Authorization: RetrievalProof` + repeatable `Authorization: RetrievalVoucher`, each a standalone EIP-712 object with an **embedded `signature`** |
-
-`rail-check --voucher` and multi-`--voucher` probe/fetch flows carry every voucher header verbatim
-and mint one proof per piece (the proof’s scope is advisory; the SP binds the deal from the piece
-CID, so a client can present many vouchers without knowing which deal a piece is in).
 
 ---
 

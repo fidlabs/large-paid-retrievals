@@ -82,11 +82,16 @@ func TestTruncateForLog(t *testing.T) {
 }
 
 func TestCollectCIDs(t *testing.T) {
-	got, err := collectCIDs([]string{"bafy0", "bafy1,bafy2"}, []string{" bafy3 "})
+	dir := t.TempDir()
+	cidFile := filepath.Join(dir, "cids.txt")
+	if err := os.WriteFile(cidFile, []byte("bafy1\nbafy2,bafy3\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := collectCIDs([]string{"bafy0"}, cidFile, []string{" bafy4 "})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"bafy0", "bafy1", "bafy2", "bafy3"}
+	want := []string{"bafy0", "bafy4", "bafy1", "bafy2", "bafy3"}
 	if len(got) != len(want) {
 		t.Fatalf("got %v", got)
 	}
@@ -98,9 +103,37 @@ func TestCollectCIDs(t *testing.T) {
 }
 
 func TestCollectCIDsRejectsDuplicate(t *testing.T) {
-	_, err := collectCIDs([]string{"bafy0", "bafy0"}, nil)
+	_, err := collectCIDs([]string{"bafy0", "bafy0"}, "", nil)
 	if err == nil || !strings.Contains(err.Error(), "duplicate CID") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestCollectCIDsMissingFile(t *testing.T) {
+	_, err := collectCIDs(nil, filepath.Join(t.TempDir(), "missing.txt"), nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestCollectCIDsFromFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cids.txt")
+	if err := os.WriteFile(path, []byte("bafyA\nbafyB,bafyC\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := collectCIDs(nil, path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"bafyA", "bafyB", "bafyC"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v want %v", got, want)
+		}
 	}
 }
 

@@ -2,12 +2,13 @@
 //
 // Private deals (and their piece CIDs / sizes) are recorded on the public chain
 // and indexed by Hyperion — there is no secrecy about existence or size. HEAD is
-// always allowed. GET without a Retrieval credential only succeeds for public
-// deals; private pieces return 403 so probes can retry with a proof (+ voucher
-// when delegated). Owner ?client= / Payment alone is not enough for private
-// deals — the requester signs a RetrievalProof (optionally with a
-// RetrievalVoucher). Paid GET still uses Authorization: Payment; when both are
-// present, Payment ClientAddress MUST equal the proof signer.
+// always allowed (credential parse and Hyperion are skipped). GET without a
+// Retrieval credential only succeeds for public deals; private pieces return 403
+// so probes can retry with a proof (+ voucher when delegated). Owner ?client= /
+// Payment alone is not enough for private deals — the requester signs a
+// RetrievalProof (optionally with a RetrievalVoucher). Paid GET still uses
+// Authorization: Payment; when both are present, Payment ClientAddress MUST
+// equal the proof signer.
 package pieceaccess
 
 import (
@@ -120,6 +121,12 @@ func (a *Authorizer) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := context.WithValue(r.Context(), accessContextKey{}, struct{}{})
 		if cid, ok := parsePiecePath(r.URL.Path); ok {
+			// HEAD is unrestricted (size/existence are public): skip credential
+			// parse and Hyperion so bad proofs / lookup outages cannot fail probes.
+			if r.Method == http.MethodHead {
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
 			// Always parse Retrieval credentials when present — the proof provides
 			// requester identity. Do not require ?client= / Payment before parse.
 			// A present-but-invalid proof is fatal; invalid vouchers are best-effort.

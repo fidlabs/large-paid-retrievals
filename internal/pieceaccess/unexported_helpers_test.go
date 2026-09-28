@@ -223,7 +223,9 @@ func TestEnsureEIP712DomainTypes(t *testing.T) {
 				Salt:              "0x" + strings.Repeat("11", 32),
 			},
 		}
-		ensureEIP712DomainTypes(obj)
+		if err := ensureEIP712DomainTypes(obj); err != nil {
+			t.Fatal(err)
+		}
 		fields := obj.Types["EIP712Domain"]
 		var names []string
 		for _, f := range fields {
@@ -234,16 +236,42 @@ func TestEnsureEIP712DomainTypes(t *testing.T) {
 			t.Fatalf("fields=%v want %v", names, want)
 		}
 	})
-	t.Run("keeps existing EIP712Domain", func(t *testing.T) {
+	t.Run("rejects non-canonical EIP712Domain", func(t *testing.T) {
 		t.Parallel()
 		existing := []apitypes.Type{{Name: "name", Type: "string"}}
 		obj := &eip712TypedDataJSON{
-			Types:  apitypes.Types{"EIP712Domain": existing},
-			Domain: apitypes.TypedDataDomain{Name: eip712DomainName, Version: eip712DomainVer},
+			Types: apitypes.Types{"EIP712Domain": existing},
+			Domain: apitypes.TypedDataDomain{
+				Name:              eip712DomainName,
+				Version:           eip712DomainVer,
+				ChainId:           math.NewHexOrDecimal256(1),
+				VerifyingContract: testContract,
+			},
 		}
-		ensureEIP712DomainTypes(obj)
-		if len(obj.Types["EIP712Domain"]) != 1 {
-			t.Fatalf("mutated existing domain types: %+v", obj.Types["EIP712Domain"])
+		err := ensureEIP712DomainTypes(obj)
+		if err == nil || !strings.Contains(err.Error(), "non-canonical") {
+			t.Fatalf("want non-canonical reject, got %v", err)
+		}
+	})
+	t.Run("accepts canonical EIP712Domain", func(t *testing.T) {
+		t.Parallel()
+		canonical := []apitypes.Type{
+			{Name: "name", Type: "string"},
+			{Name: "version", Type: "string"},
+			{Name: "chainId", Type: "uint256"},
+			{Name: "verifyingContract", Type: "address"},
+		}
+		obj := &eip712TypedDataJSON{
+			Types: apitypes.Types{"EIP712Domain": canonical},
+			Domain: apitypes.TypedDataDomain{
+				Name:              eip712DomainName,
+				Version:           eip712DomainVer,
+				ChainId:           math.NewHexOrDecimal256(1),
+				VerifyingContract: testContract,
+			},
+		}
+		if err := ensureEIP712DomainTypes(obj); err != nil {
+			t.Fatal(err)
 		}
 	})
 }

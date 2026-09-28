@@ -25,7 +25,7 @@
 #     [--verifying-contract 0x...] \
 #     [--proof-expires-in SECONDS]
 #
-# Env defaults: PAY_RPC_URL, POREP_MARKET. Proof TTL defaults to 12h (MAX_PROOF_TTL).
+# Env defaults: PAY_RPC_URL, POREP_MARKET. Proof TTL defaults to 12h minus 2m skew.
 
 set -euo pipefail
 
@@ -36,7 +36,7 @@ resource=""
 scope=""
 owner_direct=0
 proof_deadline=""
-proof_expires_in="43200" # 12h
+proof_expires_in="43080" # 12h - 2m skew (MAX_PROOF_TTL - ProofMintSkew)
 allow_past_deadline=0
 allow_far_deadline=0
 rpc_url="${PAY_RPC_URL:-http://127.0.0.1:2234/rpc/v1}"
