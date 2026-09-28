@@ -327,7 +327,8 @@ Owner `0x47cc…` delegates private deal `1001` to grantee `0xabc…`, then the 
     "scope": "1001",
     "issuedAt": "1767139200",
     "deadline": "1767744000"
-  }
+  },
+  "signature": "0x…"
 }
 ```
 
@@ -353,7 +354,8 @@ Owner `0x47cc…` delegates private deal `1001` to grantee `0xabc…`, then the 
     "scope": "1001",
     "resource": "bafk…",
     "deadline": "1767225600"
-  }
+  },
+  "signature": "0x…"
 }
 ```
 

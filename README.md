@@ -394,6 +394,10 @@ Keeping quote, authorize, and settle in a composable middleware layer means:
 
 Today the standalone proxy is the supported deployment path; middleware extraction is a deliberate design choice to keep that option open.
 
+### Retrieval voucher count budget (future)
+
+`pieceaccess` accepts repeatable `Authorization: RetrievalVoucher` headers and verifies each with ECDSA recovery. There is **no application-level cap** on voucher count today (unlike the Payment header size limit). A bounded max voucher count (and/or aggregate credential-header budget) is a reasonable **future hardening** once we have field data on how many vouchers real clients present per request; until then, rely on the reverse proxy / server HTTP header limits.
+
 ### SP settlement pool
 
 `sp-proxy` tracks paid access in a **local SQLite settlement pool** (`internal/sqlitestore`, orchestrated by `internal/piecepayment`).
