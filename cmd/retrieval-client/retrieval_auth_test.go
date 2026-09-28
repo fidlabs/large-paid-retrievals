@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -108,6 +110,41 @@ func TestHeadersNeeded(t *testing.T) {
 	}
 	if (&retrievalAuthConfig{}).headersNeeded(false, true) {
 		t.Fatal("nil key must not need headers")
+	}
+}
+
+func TestEnsureDomainConcurrent(t *testing.T) {
+	t.Parallel()
+	ownerKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	market := common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678")
+	cfg := &retrievalAuthConfig{
+		key:    ownerKey,
+		domain: pieceaccessDomain{chainID: big.NewInt(314159), market: market},
+	}
+	const n = 32
+	errCh := make(chan error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			headers, err := cfg.authHeadersForPiece(context.Background(), "baga6ea4seaqtest")
+			if err != nil {
+				errCh <- err
+				return
+			}
+			if len(headers) != 1 || !strings.HasPrefix(headers[0], "RetrievalProof ") {
+				errCh <- fmt.Errorf("headers=%v", headers)
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatal(err)
 	}
 }
 

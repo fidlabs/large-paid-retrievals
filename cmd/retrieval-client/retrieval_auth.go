@@ -136,10 +136,12 @@ func (c *retrievalAuthConfig) ensureDomain(ctx context.Context) error {
 	if c == nil {
 		return fmt.Errorf("retrieval auth not configured")
 	}
-	if c.domain.ok() {
-		return nil
-	}
+	// Always enter Once so concurrent probes cannot race a domain.ok() read against
+	// the first writer inside Do (buildRetrievalAuth may also pre-set domain).
 	c.domainOnce.Do(func() {
+		if c.domain.ok() {
+			return
+		}
 		chainID, err := ethChainID(ctx, c.payRPCURL)
 		if err != nil {
 			c.domainErr = fmt.Errorf("eth_chainId for access domain: %w", err)
