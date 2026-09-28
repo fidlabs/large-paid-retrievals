@@ -81,7 +81,7 @@ RetrievalVoucher(address grantee, uint256 scope, uint256 issuedAt, uint256 deadl
 | `grantee` | Delegate address; the proof signer for this voucher MUST recover to it |
 | `scope` | Access unit — for PoRep, the monotonic **deal id** |
 | `issuedAt` | Unix seconds (audit) |
-| `deadline` | Unix seconds; voucher valid while `now ≤ deadline` (MAY be long-lived) |
+| `deadline` | Unix seconds; voucher valid while `now < deadline` (MAY be long-lived) |
 
 Signed by the scope’s **owner** (deal `clientAddress`).
 
@@ -95,7 +95,7 @@ RetrievalProof(uint256 scope, string resource, uint256 deadline)
 |---|---|
 | `scope` | **Advisory.** Signed but not authoritative: the SP binds the deal from `resource` (piece CID → Hyperion), so a client need not know the deal id to mint a proof. A client SHOULD set it to a voucher’s `scope` when known, or `0`. |
 | `resource` | Requested piece CID **exactly as in the path** (`GET /piece/{cid}`) |
-| `deadline` | Unix seconds; MUST satisfy `now ≤ deadline ≤ now + MAX_PROOF_TTL` |
+| `deadline` | Unix seconds; MUST satisfy `now < deadline ≤ now + MAX_PROOF_TTL` |
 
 Signed by the requester (grantee, or owner for owner-direct access). Clients MAY reuse the same
 proof across retries until `deadline` (≤ `now_at_sign + MAX_PROOF_TTL`).
@@ -235,12 +235,12 @@ For a request on piece CID `R`, parse the single `RetrievalProof` header `P` and
    - complete EIP-712 object, `primaryType` = `RetrievalProof`, `signature` present;
    - `types.EIP712Domain` omitted or canonical (see [Wire token](#wire-token--presentation));
    - `P.message.resource == R` (byte-exact);
-   - `now ≤ P.message.deadline ≤ now + MAX_PROOF_TTL`;
+   - `now < P.message.deadline ≤ now + MAX_PROOF_TTL`;
    - `P.domain` matches the `sp-proxy` pin (pay-RPC chain id + PoRep Market address);
    - `requester = ecrecover(EIP712(P), P.signature)`.
    - `P.message.scope` is parsed but **advisory** (the deal is bound from `R`, next step).
 2. **Vouchers (best-effort).** Each `Vᵢ` is verified independently: complete EIP-712 object,
-   `primaryType` = `RetrievalVoucher`, domain pin match, `now ≤ deadline`, valid signature →
+   `primaryType` = `RetrievalVoucher`, domain pin match, `now < deadline`, valid signature →
    `owner = ecrecover(EIP712(Vᵢ), Vᵢ.signature)`. A voucher that fails any check is dropped and kept
    only as a denial diagnostic; it never fails the request on its own.
 3. Resolve deals for `R` (Hyperion / provider scope). If any deal is **public** → **allow** (public-wins;
@@ -249,7 +249,8 @@ For a request on piece CID `R`, parse the single `RetrievalProof` header `P` and
    - **owner-direct:** `requester == d.clientAddress`; or
    - **delegated:** some verified voucher `V` has `V.owner == d.clientAddress`,
      `V.grantee == requester`, and `V.scope == d.dealId`.
-5. If Payment is also present, `Payment.ClientAddress` MUST equal `requester`.
+5. If Payment is also present (decodable `ClientAddress`) **and** a proof was verified,
+   `Payment.ClientAddress` MUST equal `requester` — for public and private deals alike.
 6. Else **deny**.
 
 **Response codes:** missing/invalid proof, or a voucher that failed verification, on a private piece
