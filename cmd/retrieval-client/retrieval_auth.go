@@ -82,6 +82,22 @@ func (c *retrievalAuthConfig) authHeadersForPiece(ctx context.Context, pieceCID 
 	return []string{pieceaccess.SchemeRetrievalProof + " " + proof}, nil
 }
 
+// headersNeeded reports whether a download should mint/forward Retrieval
+// credentials. Anonymous public free probes do not; private free (authenticated
+// probe), paid pieces, and voucher-backed flows do.
+func (c *retrievalAuthConfig) headersNeeded(free, needsRetrievalAuth bool) bool {
+	if c == nil || c.key == nil {
+		return false
+	}
+	if len(c.capabilities) > 0 {
+		return true
+	}
+	if !free {
+		return true
+	}
+	return needsRetrievalAuth
+}
+
 // delegatedHeaders forwards every voucher verbatim and mints one proof using the
 // vouchers' domain (falling back to the configured domain).
 func (c *retrievalAuthConfig) delegatedHeaders(pieceCID string, deadline int64) ([]string, error) {

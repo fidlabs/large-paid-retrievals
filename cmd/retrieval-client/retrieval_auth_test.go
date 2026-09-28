@@ -86,6 +86,31 @@ func TestAuthHeadersForPieceOwnerDirectRequiresDomain(t *testing.T) {
 	}
 }
 
+func TestHeadersNeeded(t *testing.T) {
+	t.Parallel()
+	ownerKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &retrievalAuthConfig{key: ownerKey}
+	if cfg.headersNeeded(true, false) {
+		t.Fatal("anonymous public free must not need headers")
+	}
+	if !cfg.headersNeeded(true, true) {
+		t.Fatal("authenticated free must need headers")
+	}
+	if !cfg.headersNeeded(false, false) {
+		t.Fatal("paid must need headers")
+	}
+	cfg.capabilities = []string{"tok"}
+	if !cfg.headersNeeded(true, false) {
+		t.Fatal("vouchers force headers even for anonymous free")
+	}
+	if (&retrievalAuthConfig{}).headersNeeded(false, true) {
+		t.Fatal("nil key must not need headers")
+	}
+}
+
 func TestBuildRetrievalAuthSkipsRPCWithoutVouchers(t *testing.T) {
 	t.Parallel()
 	ownerKey, err := crypto.GenerateKey()

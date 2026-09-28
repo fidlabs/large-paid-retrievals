@@ -42,15 +42,16 @@ type problemDetails struct {
 }
 
 type challengeItem struct {
-	CID           string
-	Base          *url.URL
-	Free          bool
-	TotalBytes    int64 // from probe HEAD; -1 when unknown
-	DealUUID      string
-	PriceUSDFC    string
-	Payee0x       string
-	PaymentTxHash string
-	Challenge     mpp.Challenge
+	CID                string
+	Base               *url.URL
+	Free               bool
+	NeedsRetrievalAuth bool  // free private: probe used Retrieval credentials
+	TotalBytes         int64 // from probe HEAD; -1 when unknown
+	DealUUID           string
+	PriceUSDFC         string
+	Payee0x            string
+	PaymentTxHash      string
+	Challenge          mpp.Challenge
 }
 
 // filpayOperations is the Filecoin Pay surface used by fetch/rail-check (mockable in tests).
@@ -266,14 +267,15 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 					}
 				}
 				items = append(items, challengeItem{
-					CID:        cid,
-					Base:       sel.Base,
-					Free:       sel.Free,
-					TotalBytes: sel.TotalBytes,
-					DealUUID:   sel.DealUUID,
-					PriceUSDFC: sel.PriceUSDFC,
-					Payee0x:    strings.TrimSpace(sel.Payee0x),
-					Challenge:  sel.Challenge,
+					CID:                cid,
+					Base:               sel.Base,
+					Free:               sel.Free,
+					NeedsRetrievalAuth: sel.NeedsRetrievalAuth,
+					TotalBytes:         sel.TotalBytes,
+					DealUUID:           sel.DealUUID,
+					PriceUSDFC:         sel.PriceUSDFC,
+					Payee0x:            strings.TrimSpace(sel.Payee0x),
+					Challenge:          sel.Challenge,
 				})
 			}
 
@@ -389,9 +391,13 @@ func cmdFetch(keyOpts *filpayKeyOpts) *cobra.Command {
 				if it.Base == nil {
 					return fmt.Errorf("internal: missing base URL for CID %s", it.CID)
 				}
-				tokens, terr := authCfg.authHeadersForPiece(ctx, it.CID)
-				if terr != nil {
-					return fmt.Errorf("retrieval auth for CID %s: %w", it.CID, terr)
+				var tokens []string
+				if authCfg.headersNeeded(it.Free, it.NeedsRetrievalAuth) {
+					var terr error
+					tokens, terr = authCfg.authHeadersForPiece(ctx, it.CID)
+					if terr != nil {
+						return fmt.Errorf("retrieval auth for CID %s: %w", it.CID, terr)
+					}
 				}
 				if it.Free {
 					if verbose {
