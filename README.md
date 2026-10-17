@@ -47,7 +47,7 @@ When the window expires, paid retries stop: request a **new** `402` quote (new `
 
 ### What you need
 
-1. **Go 1.26.6+** or a pre-built `retrieval-client` binary.
+1. **Go 1.26.9+** or a pre-built `retrieval-client` binary.
 2. A **client private key** (`client.key`) — secp256k1 hex; see [Generate keys](#generate-keys).
 3. **FIL** on your network (mainnet by default) for Filecoin Pay transaction gas.
 4. **USDFC** in the client wallet for paid retrievals (amount depends on piece sizes and SP rates).
@@ -231,16 +231,16 @@ go build -o bin/sp-proxy ./cmd/sp-proxy
   --upstream-port 8788 \
   --pay-private-key-file ./sp.key \
   --porep-hyperion-url https://hyperion.allocator.tech \
-  --porep-provider-id 1234
+  --porep-provider-id f01234
 ```
 
-Replace `1234` with **your** miner actor id (numeric part of `f01234`). `--listen 0.0.0.0:8787` accepts client connections on all interfaces; use a specific IP or put TLS/reverse-proxy in front in production. `--upstream-host 127.0.0.1` assumes Curio/Boost is bound to localhost on the same host.
+Replace `f01234` with **your** miner actor id. `--listen 0.0.0.0:8787` accepts client connections on all interfaces; use a specific IP or put TLS/reverse-proxy in front in production. `--upstream-host 127.0.0.1` assumes Curio/Boost is bound to localhost on the same host.
 
 ### Miner actor ID (`--porep-provider-id`)
 
-Hyperion can return PoRep deals for the same piece CID from **multiple** providers. `sp-proxy` must filter to **your** miner so public/private access matches the deals you actually serve. Pass the **numeric** actor id only (`1234` for `f01234` / `t01234`).
+Hyperion can return PoRep deals for the same piece CID from **multiple** providers. `sp-proxy` must filter to **your** miner so public/private access matches the deals you actually serve. Accepts `f01234`, `t01234`, or bare `1234` (`f`/`t` are interchangeable).
 
-This is **not** derived from `sp.key`. The settler key is the Filecoin Pay wallet; the miner id is whichever actor Curio/Boost is running as. Strip the `f0` / `t0` prefix for the flag (e.g. `1234` for `f01234`).
+This is **not** derived from `sp.key`. The settler key is the Filecoin Pay wallet; the miner id is whichever actor Curio/Boost is running as.
 
 **Mainnet:**
 
@@ -249,7 +249,7 @@ This is **not** derived from `sp.key`. The settler key is the Filecoin Pay walle
 
 **Local FCSS-devnet:** `source ./scripts/devnet-env.sh` exports `POREP_PROVIDER_ID` from `CURIO_MINER_ID` in the market-tooling `.env`.
 
-Optional env: `SP_PROXY_POREP_PROVIDER_ID` (same numeric value).
+Optional env: `SP_PROXY_POREP_PROVIDER_ID` (same forms as the flag).
 
 ### Pricing
 
@@ -280,12 +280,12 @@ Optional: expose **`HEAD`** on the public proxy path for client size probes (the
 | `--pay-private-key-file` | Settler key |
 | `--pay-payee-address` | Payee advertised in challenges (default: settler) |
 | `--pay-payments-address` | Optional payments contract override |
-| `--porep-hyperion-url` | Hyperion base URL for piece CID → deal (`GET /po-rep/deals?pieceCid=…`). Defaults to mainnet `https://hyperion.allocator.tech` (empty → same default). fcss-devnet: `http://127.0.0.1:23300`. Hyperion lookup is always used for privacy |
-| `--porep-provider-id` | Your miner actor id (numeric; e.g. `1234` for `f01234`). **Required**. Filters Hyperion deals to this SP — see [Miner actor ID](#miner-actor-id-porep-provider-id) |
-| `--porep-market-address` | PoRep Market `0x` for EIP-712 voucher domain pin. Overrides chain default (mainnet/Calibration PoRepMarket proxies from [porep-market deployments](https://github.com/fidlabs/porep-market/tree/main/deployments)). **Required on devnet**; startup fails if unresolved |
+| `--porep-hyperion-url` | Hyperion base URL for piece CID → deal lookup. Default `https://hyperion.allocator.tech`; fcss-devnet `http://127.0.0.1:23300` |
+| `--porep-provider-id` | Miner actor id (`f01234`, `t01234`, or `1234`). **Required**. Filters Hyperion deals to this SP — see [Miner actor ID](#miner-actor-id-porep-provider-id) |
+| `--porep-market-address` | PoRep Market `0x` for EIP-712 voucher domain pin. Overrides chain default (mainnet/Calibration from [porep-market deployments](https://github.com/fidlabs/porep-market/tree/main/deployments)). **Required on devnet** |
 | `--pay-debug`, `--verbose` | Diagnostics |
 
-Piece access resolves PoRep deals via [Hyperion](https://hyperion.allocator.tech) (`GET /po-rep/deals?pieceCid=…`), which returns deal JSON including `dealType` and `clientAddress`. For private dataset pieces, every gated `GET` needs an `Authorization: RetrievalProof`: **owner-direct** when that proof is signed by `clientAddress`, or **delegated** when it is signed by a grantee who also presents a matching owner-signed `Authorization: RetrievalVoucher`. Hyperion deal lookup is **always enabled** (URL defaults to `https://hyperion.allocator.tech`; override with `--porep-hyperion-url`). `--porep-provider-id` is **required** so results are scoped to deals you serve. `source ./scripts/devnet-env.sh` sets `SP_PROXY_POREP_HYPERION_URL=http://127.0.0.1:23300` and `POREP_PROVIDER_ID` for local FCSS Hyperion.
+Piece access authorization uses [Hyperion](https://hyperion.allocator.tech) (`GET /po-rep/deals?pieceCid=…`) for `dealType` and `clientAddress`. Clients wishing to fetch private deals need `Authorization: RetrievalProof` (owner-direct or with matching `RetrievalVoucher`s).
 
 ### Piece access (public vs private)
 
@@ -394,9 +394,9 @@ Keeping quote, authorize, and settle in a composable middleware layer means:
 
 Today the standalone proxy is the supported deployment path; middleware extraction is a deliberate design choice to keep that option open.
 
-### Retrieval voucher count budget (future)
+### Retrieval voucher count budget
 
-`pieceaccess` accepts repeatable `Authorization: RetrievalVoucher` headers and verifies each with ECDSA recovery. There is **no application-level cap** on voucher count today (unlike the Payment header size limit). A bounded max voucher count (and/or aggregate credential-header budget) is a reasonable **future hardening** once we have field data on how many vouchers real clients present per request; until then, rely on the reverse proxy / server HTTP header limits.
+`pieceaccess` accepts repeatable `Authorization: RetrievalVoucher` headers and verifies each with ECDSA recovery. There is no application-level cap on voucher count (other than total header size limit).
 
 ### SP settlement pool
 
@@ -423,7 +423,7 @@ task ci            # fmt, vet, lint, test, vuln
 **E2E (shell):**
 
 - `task test:e2e:discovery` — two CIDs from public sp-tool API, mainnet fetch (free paths).
-- `task test:e2e:fcss-devnet` — [FCSS-devnet](https://github.com/fidlabs/FCSS-devnet) seed-deals access matrix via local `sp-proxy` with `bytecut-proxy` between proxy and Curio (TCP-RST `/piece` GETs after 0.5 MiB so Range resume is exercised). Task body + full case matrix / coverage gaps: [`taskfiles/fcss-devnet-e2e.yml`](taskfiles/fcss-devnet-e2e.yml). Includes EIP-712 access-voucher happy/sad HTTP probes (matching vs cross-`dealId` across two private deals, wrong grantee, c3 presenting a valid c2 voucher, expired/malformed/wrong-signer; signed via `scripts/sign-retrieval-voucher.sh` and, for tooling parity, via `scripts/sign-retrieval-voucher-tooling.sh` (Python venv + `../FCSS-devnet/extern/filecoin-porep-market-tooling/porep_tooling_cli.py`), single-CID voucher→pay settle (cast + tooling paths), `rail-check --voucher` payee discovery (with/without voucher; c3≠grantee deny), and multi-CID `retrieval-client fetch` with repeated `--voucher` (both matching vouchers as c2 → both CARs; voucher for only one deal → deny; c3 with c2 vouchers → deny). Successful fetches run `car inspect` + `car verify` on `./downloads/<cid>.car`. Requires sibling [`../FCSS-devnet`](https://github.com/fidlabs/FCSS-devnet) with `just seed-deals` summary.
+- `task test:e2e:fcss-devnet` — [FCSS-devnet](https://github.com/fidlabs/FCSS-devnet) seed-deals access matrix (public/private HTTP, EIP-712 vouchers, paid settle, multi-CID fetch) via local `sp-proxy` + `bytecut-proxy`. Case matrix: [`taskfiles/fcss-devnet-e2e.yml`](taskfiles/fcss-devnet-e2e.yml). Requires sibling [`../FCSS-devnet`](https://github.com/fidlabs/FCSS-devnet) checkout with `just init && just up && just seed-deals`.
 
 ### Skipping SP discovery (`--sp-base-url`)
 
@@ -470,9 +470,9 @@ Access vouchers (EIP-712 private-deal delegation): **[docs/access-vouchers-eip71
 | `SP_PROXY_PAY_PAYMENTS_ADDRESS` | sp-proxy | Optional payments contract |
 | `SP_PROXY_PAY_PAYEE_ADDRESS` | sp-proxy | Optional default payee |
 | `SP_PROXY_UPSTREAM_HOST` / `SP_PROXY_UPSTREAM_PORT` | sp-proxy | Default upstream |
-| `SP_PROXY_POREP_HYPERION_URL` | sp-proxy | Hyperion HTTP base (default mainnet `https://hyperion.allocator.tech`; local `http://127.0.0.1:23300`). Empty → mainnet default; Hyperion lookup is always used |
-| `SP_PROXY_POREP_PROVIDER_ID` | sp-proxy | Miner actor id (numeric) for Hyperion deal filter; **required** (same as `--porep-provider-id`) |
-| `SP_PROXY_POREP_MARKET_ADDRESS` / `POREP_MARKET` | sp-proxy | PoRep Market `0x` override for voucher `verifyingContract` pin (required on devnet; mainnet/Calibration default to finalized PoRepMarket proxies). Startup fails if the address cannot be resolved |
+| `SP_PROXY_POREP_HYPERION_URL` | sp-proxy | Hyperion HTTP base (default mainnet `https://hyperion.allocator.tech`; local `http://127.0.0.1:23300`). Empty → mainnet default |
+| `SP_PROXY_POREP_PROVIDER_ID` | sp-proxy | Miner actor id (`f01234` / `t01234` / numeric) for Hyperion deal filter; **required** (same as `--porep-provider-id`) |
+| `SP_PROXY_POREP_MARKET_ADDRESS` / `POREP_MARKET` | sp-proxy | PoRep Market `0x` override for voucher `verifyingContract` pin (required on devnet; mainnet/Calibration default to finalized PoRepMarket proxies). |
 
 ### Generate keys
 

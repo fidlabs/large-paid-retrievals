@@ -361,10 +361,13 @@ func TestParseF0ActorID(t *testing.T) {
 	}{
 		{"f01004", 1004},
 		{"t01003", 1003},
+		{"F01234", 1234},
+		{"T01004", 1004},
 		{"1004", 1004},
+		{"  f01004  ", 1004},
 	}
 	for _, tc := range cases {
-		got, err := parseF0ActorID(tc.in)
+		got, err := ParseF0ActorID(tc.in)
 		if err != nil {
 			t.Fatalf("%s: %v", tc.in, err)
 		}
@@ -372,11 +375,10 @@ func TestParseF0ActorID(t *testing.T) {
 			t.Fatalf("%s: got %d want %d", tc.in, got, tc.want)
 		}
 	}
-	if _, err := parseF0ActorID(""); err == nil {
-		t.Fatal("expected empty error")
-	}
-	if _, err := parseF0ActorID("f0abc"); err == nil {
-		t.Fatal("expected parse error")
+	for _, bad := range []string{"", "f0abc", "f1abc", "f11234", "t3xyz", "actor"} {
+		if _, err := ParseF0ActorID(bad); err == nil {
+			t.Fatalf("expected error for %q", bad)
+		}
 	}
 }
 

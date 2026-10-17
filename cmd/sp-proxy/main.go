@@ -22,10 +22,16 @@ func main() {
 
 func root() *cobra.Command {
 	var settings proxyAppSettings
+	var porepProviderIDRaw string
 	c := &cobra.Command{
 		Use:   "sp-proxy",
 		Short: "Internet-facing /piece/<cid> MPP challenge + paid retrieval (Filecoin Pay + EVM)",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			id, err := pieceaccess.ParseF0ActorID(porepProviderIDRaw)
+			if err != nil {
+				return fmt.Errorf("invalid --porep-provider-id %q: %w", porepProviderIDRaw, err)
+			}
+			settings.PorepProviderID = id
 			return runProxyApp(settings)
 		},
 	}
@@ -50,7 +56,7 @@ func root() *cobra.Command {
 	c.Flags().StringVar(&settings.UpstreamHost, "upstream-host", getenv("SP_PROXY_UPSTREAM_HOST", "127.0.0.1"), "Upstream HTTP server host for proxied /piece requests")
 	c.Flags().IntVar(&settings.UpstreamPort, "upstream-port", mustParsePort(getenv("SP_PROXY_UPSTREAM_PORT", "8788")), "Upstream HTTP server port for proxied /piece requests")
 	c.Flags().StringVar(&settings.PorepHyperionURL, "porep-hyperion-url", getenv("SP_PROXY_POREP_HYPERION_URL", pieceaccess.DefaultHyperionBaseURL), "Hyperion base URL for piece CID → deal (GET /po-rep/deals?pieceCid=…; default https://hyperion.allocator.tech; fcss-devnet: http://127.0.0.1:23300). Empty falls back to the mainnet default; privacy always uses Hyperion")
-	c.Flags().Uint64Var(&settings.PorepProviderID, "porep-provider-id", mustParseUint64(getenv("SP_PROXY_POREP_PROVIDER_ID", "0")), "Miner actor ID (f0…); required; always filters Hyperion deals to this SP")
+	c.Flags().StringVar(&porepProviderIDRaw, "porep-provider-id", getenv("SP_PROXY_POREP_PROVIDER_ID", "0"), "Miner actor ID (f01234, t01234, or bare numeric); required; filters Hyperion deals to this SP")
 	c.Flags().StringVar(&settings.PorepMarketAddress, "porep-market-address", getenv("SP_PROXY_POREP_MARKET_ADDRESS", getenv("POREP_MARKET", "")), "PoRep Market contract (0x) for EIP-712 voucher verifyingContract; overrides chain default (mainnet/Calibration PoRepMarket proxies). Required on chains without a built-in default (e.g. devnet); startup fails if unresolved")
 	initCLIUsage(c)
 	return c
@@ -68,14 +74,6 @@ func mustParsePort(raw string) int {
 	v, err := strconv.Atoi(strings.TrimSpace(raw))
 	if err != nil {
 		return 8788
-	}
-	return v
-}
-
-func mustParseUint64(raw string) uint64 {
-	v, err := strconv.ParseUint(strings.TrimSpace(raw), 10, 64)
-	if err != nil {
-		return 0
 	}
 	return v
 }

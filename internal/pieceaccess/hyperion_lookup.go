@@ -190,7 +190,7 @@ func (d *hyperionDeal) toDeal() (*Deal, error) {
 	if d == nil {
 		return nil, fmt.Errorf("pieceaccess: nil Hyperion deal")
 	}
-	providerID, err := parseF0ActorID(d.ProviderID)
+	providerID, err := ParseF0ActorID(d.ProviderID)
 	if err != nil {
 		return nil, fmt.Errorf("pieceaccess: Hyperion providerId %q: %w", d.ProviderID, err)
 	}
@@ -219,18 +219,25 @@ func decodeJSONStringish(raw json.RawMessage) string {
 	return strings.Trim(string(raw), `"`)
 }
 
-func parseF0ActorID(s string) (uint64, error) {
+// ParseF0ActorID parses a Filecoin miner actor id as f0…, t0…, or a bare decimal.
+// Mainnet (f) and Calibration/test (t) prefixes are interchangeable.
+func ParseF0ActorID(s string) (uint64, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return 0, fmt.Errorf("empty")
 	}
 	lower := strings.ToLower(s)
-	if strings.HasPrefix(lower, "f0") || strings.HasPrefix(lower, "t0") {
+	switch {
+	case strings.HasPrefix(lower, "f0") || strings.HasPrefix(lower, "t0"):
 		s = s[2:]
+	case len(lower) >= 2 && (lower[0] == 'f' || lower[0] == 't') && lower[1] >= '1' && lower[1] <= '4':
+		return 0, fmt.Errorf("%q is not an actor id; use f0…/t0… (or bare numeric id)", s)
+	case lower[0] == 'f' || lower[0] == 't':
+		return 0, fmt.Errorf("unrecognized Filecoin address %q; use f0…/t0… or bare numeric id", s)
 	}
 	id, err := strconv.ParseUint(s, 10, 64)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("invalid actor id %q", s)
 	}
 	return id, nil
 }

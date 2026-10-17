@@ -711,3 +711,58 @@ func TestCobraInvalidUpstreamPort(t *testing.T) {
 		t.Fatal("expected error")
 	}
 }
+
+func TestCobraAcceptsPrefixedProviderID(t *testing.T) {
+	defer restoreProxyHooks(t)()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+	host, port := upstreamHostPort(t, upstream.URL)
+
+	var captured http.Handler
+	proxyOpenStore = sqlitestore.OpenStore
+	proxyNewFilpayClient = stubFilpayFactory()
+	proxyListenAndServe = func(addr string, h http.Handler) error {
+		captured = h
+		return nil
+	}
+
+	db := filepath.Join(t.TempDir(), "sp.db")
+	cmd := root()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{
+		"--db", db,
+		"--upstream-host", host,
+		"--upstream-port", strconv.Itoa(port),
+		"--pay-payee-address", testQuotePayee0x,
+		"--porep-hyperion-url", "http://127.0.0.1:23300",
+		"--porep-provider-id", "f01004",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if captured == nil {
+		t.Fatal("handler not captured")
+	}
+}
+
+func TestCobraRejectsNonActorProviderID(t *testing.T) {
+	defer restoreProxyHooks(t)()
+	proxyNewFilpayClient = stubFilpayFactory()
+	proxyListenAndServe = func(string, http.Handler) error { return nil }
+
+	cmd := root()
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{
+		"--upstream-host", "127.0.0.1",
+		"--upstream-port", "8788",
+		"--pay-payee-address", testQuotePayee0x,
+		"--porep-provider-id", "f11234",
+	})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "invalid --porep-provider-id") {
+		t.Fatalf("got %v", err)
+	}
+}
