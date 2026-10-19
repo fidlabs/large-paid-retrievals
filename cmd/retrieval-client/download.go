@@ -28,7 +28,7 @@ type retryableDownloadError struct {
 func (e *retryableDownloadError) Error() string { return e.err.Error() }
 func (e *retryableDownloadError) Unwrap() error { return e.err }
 
-func downloadCAR(cli *http.Client, base *url.URL, cid, piecePath, client0x, authorization, outDir string, expectedTotal int64, ui ProgressUI, verbose bool) error {
+func downloadCAR(cli *http.Client, base *url.URL, cid, piecePath, client0x, authorization, outDir string, expectedTotal int64, ui ProgressUI, verbose bool, authHeaders []string) error {
 	u := *base
 	u.Path = piecePath
 	if strings.TrimSpace(client0x) != "" {
@@ -39,7 +39,9 @@ func downloadCAR(cli *http.Client, base *url.URL, cid, piecePath, client0x, auth
 	fullURL := u.String()
 	if verbose {
 		if authorization != "" {
-			retrievalLog("paid GET %s (Authorization: Payment len=%d)", fullURL, len(authorization))
+			retrievalLog("paid GET %s (Authorization: Payment len=%d retrieval-headers=%d)", fullURL, len(authorization), len(authHeaders))
+		} else if len(authHeaders) > 0 {
+			retrievalLog("GET %s (retrieval-headers=%d)", fullURL, len(authHeaders))
 		} else {
 			retrievalLog("free GET %s", fullURL)
 		}
@@ -55,6 +57,9 @@ func downloadCAR(cli *http.Client, base *url.URL, cid, piecePath, client0x, auth
 	if authorization != "" {
 		req.Header.Set("Authorization", authorization)
 	}
+	// RetrievalProof provides requester identity; attach whenever present (including
+	// free private downloads that probed with credentials then download without Payment).
+	pieceurls.AddAuthorizationHeaders(req.Header, authHeaders)
 	outPath := filepath.Join(outDir, sanitizeFilename(cid)+".car")
 	partialPath := outPath + ".partial"
 	paid := authorization != ""
@@ -260,11 +265,11 @@ func isRetryableDownloadError(err error) bool {
 	return errors.As(err, &retryable)
 }
 
-func downloadFreeCAR(cli *http.Client, base *url.URL, cid, outDir string, expectedTotal int64, ui ProgressUI, verbose bool) error {
+func downloadFreeCAR(cli *http.Client, base *url.URL, cid, client0x, outDir string, expectedTotal int64, ui ProgressUI, verbose bool, authHeaders []string) error {
 	u := *base
 	piecePath := "/piece/" + cid
 	u.Path = piecePath
-	return downloadCAR(cli, &u, cid, piecePath, "", "", outDir, expectedTotal, ui, verbose)
+	return downloadCAR(cli, &u, cid, piecePath, client0x, "", outDir, expectedTotal, ui, verbose, authHeaders)
 }
 
 func copyWithProgress(dst io.Writer, src io.Reader, cid string, total, initialWritten int64, ui ProgressUI) (int64, error) {

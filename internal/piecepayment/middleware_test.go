@@ -331,7 +331,7 @@ func TestQuoteThenPaidSuccess(t *testing.T) {
 	hdr.SigType = st
 	hdr.Signature = sig
 	raw := mustAuthorization(t, *challenge, hdr)
-	paidReq, _ := http.NewRequest(http.MethodGet, ts.URL+"/piece/"+cid, nil)
+	paidReq, _ := http.NewRequest(http.MethodGet, ts.URL+"/piece/"+cid+"?client="+client, nil)
 	paidReq.Header.Set("Authorization", raw)
 	paidRes, err := http.DefaultClient.Do(paidReq)
 	if err != nil {
@@ -343,6 +343,41 @@ func TestQuoteThenPaidSuccess(t *testing.T) {
 	}
 	if mock.called != 1 {
 		t.Fatalf("expected settle called once, got %d", mock.called)
+	}
+}
+
+func TestQuoteIgnoresRetrievalVoucherAuthorization(t *testing.T) {
+	s := newTestStore(t)
+	defer s.Close()
+
+	client := "0x1111111111111111111111111111111111111111"
+	h := newTestHandler(pp.Config{
+		PriceUSDFCPerGB: "0.1",
+		FilecoinPay:     &mockPaySettler{},
+		QuotePayee0x:    testQuotePayee0x,
+		Store:           s,
+	})
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	cid := "bafkreidde4sfyosf2pm6u4vxb65wogjg464a6y6tcg75opo6q5wv34bley"
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/piece/"+cid+"?client="+client, nil)
+	req.Header.Add("Authorization", "Retrieval voucher-for-deal-1")
+	req.Header.Add("Authorization", "Retrieval voucher-for-deal-2")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusPaymentRequired {
+		t.Fatalf("expected 402 quote got %d", res.StatusCode)
+	}
+	if _, err := mpp.ParseWWWAuthenticate(res.Header.Get("WWW-Authenticate")); err != nil {
+		t.Fatalf("expected parseable MPP challenge, got %v (wa=%q)", err, res.Header.Get("WWW-Authenticate"))
+	}
+	body, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	if strings.Contains(string(body), "malformed-credential") {
+		t.Fatalf("Retrieval vouchers must not be treated as Payment credentials, body=%s", body)
 	}
 }
 
@@ -877,7 +912,7 @@ func TestOversizedAuthorizationForbidden(t *testing.T) {
 	defer ts.Close()
 
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/piece/"+testPieceCID, nil)
-	req.Header.Set("Authorization", strings.Repeat("x", 64))
+	req.Header.Set("Authorization", "Payment "+strings.Repeat("x", 64))
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)

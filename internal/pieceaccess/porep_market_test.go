@@ -1,0 +1,59 @@
+package pieceaccess
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/data-preservation-programs/go-synapse/constants"
+	"github.com/ethereum/go-ethereum/common"
+)
+
+func TestResolvePorepMarketAddress(t *testing.T) {
+	t.Parallel()
+
+	mainnet, err := ResolvePorepMarketAddress("", constants.ChainIDMainnet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mainnet != PorepMarketMainnet {
+		t.Fatalf("mainnet: got %s want %s", mainnet.Hex(), PorepMarketMainnet.Hex())
+	}
+
+	calib, err := ResolvePorepMarketAddress("", constants.ChainIDCalibration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calib != PorepMarketCalibration {
+		t.Fatalf("calib: got %s want %s", calib.Hex(), PorepMarketCalibration.Hex())
+	}
+
+	devnet, err := ResolvePorepMarketAddress("", constants.ChainIDDevnet)
+	if err == nil {
+		t.Fatalf("devnet should error without override, got %s", devnet.Hex())
+	}
+	if !strings.Contains(err.Error(), "no PoRep market default") {
+		t.Fatalf("devnet error: %v", err)
+	}
+
+	override := common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678")
+	got, err := ResolvePorepMarketAddress(override.Hex(), constants.ChainIDDevnet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != override {
+		t.Fatalf("override: got %s want %s", got.Hex(), override.Hex())
+	}
+
+	// Override wins over chain default.
+	got, err = ResolvePorepMarketAddress(override.Hex(), constants.ChainIDMainnet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != override {
+		t.Fatalf("override on mainnet: got %s", got.Hex())
+	}
+
+	if _, err := ResolvePorepMarketAddress("not-an-address", constants.ChainIDMainnet); err == nil {
+		t.Fatal("expected invalid address error")
+	}
+}

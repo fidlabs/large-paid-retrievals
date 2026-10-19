@@ -21,7 +21,7 @@ func TestDownloadCARFormatsProblemDetails(t *testing.T) {
 		t.Fatal(err)
 	}
 	cli := &http.Client{}
-	err = downloadCAR(cli, base, "bafytstproblem1", "/piece/bafytstproblem1", "", "Payment abc", t.TempDir(), -1, noopProgress{}, false)
+	err = downloadCAR(cli, base, "bafytstproblem1", "/piece/bafytstproblem1", "", "Payment abc", t.TempDir(), -1, noopProgress{}, false, nil)
 	if err == nil {
 		t.Fatal("expected error")
 	}
