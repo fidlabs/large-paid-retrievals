@@ -717,6 +717,8 @@ func (c *Client) CreditRailPayment(ctx context.Context, payer, payee common.Addr
 	if len(txHashBytes) != common.HashLength {
 		return "", nil, fmt.Errorf("filpay: invalid payment tx hash %q", paymentTxHash)
 	}
+	// One receipt, one credit key: the store dedupes on this string.
+	txHash = dealstore.CanonicalTxHash(txHash)
 	receipt, err := c.fetchTransactionReceipt(ctx, common.BytesToHash(txHashBytes))
 	if err != nil {
 		return "", nil, fmt.Errorf("filpay: payment tx receipt: %w", err)

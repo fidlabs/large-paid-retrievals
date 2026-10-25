@@ -56,6 +56,7 @@ func (s *Store) CreditPool(ctx context.Context, credit dealstore.PoolCredit) err
 	if credit.CreditedBaseUnits == nil || credit.CreditedBaseUnits.Sign() <= 0 {
 		return dealstore.ErrZeroPoolCredit
 	}
+	credit.SettleTxHash = dealstore.CanonicalTxHash(credit.SettleTxHash)
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return err
