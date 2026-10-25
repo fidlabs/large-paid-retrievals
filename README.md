@@ -157,6 +157,8 @@ Paid SPs bill in **USDFC per GiB** (binary `2^30` bytes), **rounded up** to whol
 
 ## For storage providers
 
+> **Upgrade requirement (v1.2+):** Storage providers must run **`sp-proxy` v1.2 or newer**. Versions before v1.2 can credit the same on-chain payment twice when a client presents the settlement tx hash with different hex casing. When upgrading from v1.0 or v1.1, **delete the existing SQLite database** (`--db`, e.g. `sp-proxy.db`) and start clean — do not reuse a database created by an earlier release. Clients will need to pay again for any in-flight paid-access windows after the reset.
+
 **Basic setup steps:** [docs/sp-proxy-linux-setup.md](docs/sp-proxy-linux-setup.md) — cut over an existing public Curio/Boost HTTP endpoint on one Linux host to `sp-proxy` (same public IP:port, upstream moved to localhost) + systemd, including security caveats.
 
 ### What you provide
