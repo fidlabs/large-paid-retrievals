@@ -21,6 +21,7 @@ import (
 	"errors"
 	"io"
 	"math/big"
+	"strings"
 	"time"
 )
 
@@ -108,4 +109,9 @@ type PoolSnapshot struct {
 	PoolID             string
 	RemainingBaseUnits string
 	SettledBaseUnits   string
+}
+
+// CanonicalTxHash lowercases a tx hash so one receipt has one key in the store.
+func CanonicalTxHash(h string) string {
+	return strings.ToLower(strings.TrimSpace(h))
 }

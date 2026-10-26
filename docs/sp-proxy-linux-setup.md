@@ -60,7 +60,7 @@ This recipe is made to get up and running quickly on a regular Linux-based SP. W
 
 Install required tools
 
-1. [Go language support ](https://go.dev/dl/) (or from your distro) - Need **Go 1.26.6+**.
+1. [Go language support ](https://go.dev/dl/) (or from your distro) - Need **Go 1.26.10+**.
 2. [Foundry `cast`](https://book.getfoundry.sh/getting-started/installation)
 
 Make sure you have the following values in your shell environment:

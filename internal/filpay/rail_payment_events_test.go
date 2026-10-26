@@ -116,6 +116,13 @@ func TestCreditRailPayment(t *testing.T) {
 	if err != nil || ref != tx.Hash().Hex() || credited.Cmp(netPayee) != 0 {
 		t.Fatalf("ref=%q credited=%s err=%v", ref, credited, err)
 	}
+
+	// The credit ref is the canonical hash regardless of how the client spelled it.
+	upper := "0x" + strings.ToUpper(tx.Hash().Hex()[2:])
+	ref, _, err = c.CreditRailPayment(ctx, payer, payee, upper)
+	if err != nil || ref != tx.Hash().Hex() {
+		t.Fatalf("uppercase input: ref=%q want %q err=%v", ref, tx.Hash().Hex(), err)
+	}
 }
 
 func TestSumRailOneTimePaymentCreditErrors(t *testing.T) {
