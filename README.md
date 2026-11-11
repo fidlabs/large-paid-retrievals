@@ -164,7 +164,7 @@ Paid SPs bill in **USDFC per GiB** (binary `2^30` bytes), **rounded up** to whol
 
 ## For storage providers
 
-**Basic setup steps:** [docs/sp-proxy-linux-setup.md](docs/sp-proxy-linux-setup.md) — cut over an existing public Curio/Boost HTTP endpoint on one Linux host to `sp-proxy` (same public IP:port, upstream moved to localhost) + systemd. The proxy enforces Hyperion public/private access and Filecoin Pay.
+**Basic setup steps:** [docs/sp-proxy-linux-setup.md](docs/sp-proxy-linux-setup.md) — cut over an existing public Curio/Boost HTTP endpoint on one Linux host to `sp-proxy` (same public IP:port, upstream moved to localhost) + systemd, including security caveats.
 
 ### What you provide
 
