@@ -36,7 +36,7 @@ When you move the ports and put up the proxy in front of your SP software **ther
 
 1. Are logged in to the Linux host where Curio/Boost already runs.
 2. Know the public internet IP address and TCP port number of your existing Curio/Boost piece server.
-3. Know your miner actor ID (`f01234`, `t01234`, or the bare number). This is **required** as `--porep-provider-id`. It is the Curio/Boost miner, not the Filecoin Pay settler wallet in step 4. See [Miner actor ID](../README.md#miner-actor-id-porep-provider-id).
+3. Know your miner actor ID (`f01234`, `t01234`, or the bare number).  It is the Curio/Boost miner, not the Filecoin Pay settler wallet in step 4. See [Miner actor ID](../README.md#miner-actor-id-porep-provider-id).
 4. Can reach Hyperion from this host (`https://hyperion.allocator.tech` on mainnet). If lookup fails, `GET /piece/<cid>` returns **403**. `HEAD` still works.
 5. Have the ability to change the Curio/Boost retrieval layer **listen** address (check their published documentation for details) and pick a free **local** port .
 6. Have access to some **FIL** for settlement gas (settler wallet).
@@ -52,7 +52,6 @@ When you move the ports and put up the proxy in front of your SP software **ther
 | **Protect your `sp.key`** | Anyone with access to it can spend FIL gas and receive/control payee proceeds. If storing it as a file, make it mode `600` and never reveal it outside of the SP software/proxy context. |
 | **No rate limit** | Anonymous quote path is relatively expensive. Add edge rate limiting when you can. |
 | **Protect your miner actor key** | `sp.key` is a **separate** Filecoin Pay settler account. Do not put your miner/owner BLS key in `sp.key`. |
-| **Wrong `--porep-provider-id`** | The proxy will not start if this is missing or `0`. If the id does not match your miner, Hyperion returns no deals for your pieces, and a private `GET` is quoted (**402**) instead of denied (**403**). |
 | **Hyperion unreachable** | `GET` fails closed (**403**). Do not put Curio back on the public IP to keep serving; fix outbound access to Hyperion. |
 
 This recipe is made to get up and running quickly on a regular Linux-based SP. We recommend you apply your own hardening on top of this (specifically, apply the same access controls, firewall settings etc that you already do for the existing SP software running on the box.
@@ -166,8 +165,6 @@ POREP_PROVIDER_ID=${POREP_PROVIDER_ID}
 EOF
 chmod 600 /opt/sp-proxy/sp-proxy.env
 ```
-
-`--porep-hyperion-url` defaults to `https://hyperion.allocator.tech` (override for a local Hyperion). Leave `--porep-market-address` unset on mainnet and Calibration; the PoRep Market address is built in for those chains, and startup fails on any other chain if it is missing. Other flags this recipe leaves at their defaults: `--pay-rpc-url` (mainnet Glif), `--pay-payee-address` (the settler wallet), `--db-retention` (`168h`; minimum `12h`, or `0` to disable), `--pay-withdraw-interval` (`1h`, or `0` to disable), `--pay-debug`, `--verbose`. The same values can be set with `SP_PROXY_POREP_PROVIDER_ID`, `SP_PROXY_POREP_HYPERION_URL`, `SP_PROXY_POREP_MARKET_ADDRESS` (or `POREP_MARKET`), `SP_PROXY_PAY_RPC_URL`, and `SP_PROXY_PAY_PAYEE_ADDRESS`.
 
 ---
 
@@ -333,7 +330,7 @@ If you previously advertised a different URL than the listen address, update tha
 | Symptom | Likely fix |
 |---------|------------|
 | Bind error on public port | Curio still listening on `PUBLIC_IP:PUBLIC_PORT` — finish Step 6a/6b |
-| Exits on startup (`--porep-provider-id is required` or invalid) | Set `POREP_PROVIDER_ID` to `f01234`, `t01234`, or a positive number |
+| Exits on startup (`--porep-provider-id is required` or invalid) | Set `POREP_PROVIDER_ID` to your miner id |
 | Exits on startup (`no PoRep market default for chain`) | Pay RPC is not mainnet or Calibration — set `--porep-market-address` |
 | `503` / `payment-unavailable` | Upstream `HEAD` on `127.0.0.1:UPSTREAM_PORT` missing/not 200/no `Content-Length` |
 | `GET` is **403** on a piece you expect to be public | Hyperion lookup failed (outbound HTTPS). `HEAD` can still be 200 |
