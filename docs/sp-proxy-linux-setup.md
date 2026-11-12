@@ -113,7 +113,7 @@ If it is taken, pick another free port and use that everywhere below.
 cd /opt/sp-proxy
 git clone https://github.com/fidlabs/large-paid-retrievals.git src
 cd src
-git checkout main   # v1.0–v1.2 do not enforce private-deal access; use main or a later tag
+git checkout v2.0   # v1.0–v1.2 do not enforce private-deal access; use the latest v2.x tag
 go build -o /opt/sp-proxy/sp-proxy ./cmd/sp-proxy
 cd /opt/sp-proxy
 chmod 755 /opt/sp-proxy/sp-proxy
